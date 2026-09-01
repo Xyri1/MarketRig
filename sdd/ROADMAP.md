@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestone R0 is delivered; the next work is Milestone R1, starting with its feature design.
+Milestone R0 is delivered; Milestone R1's design is complete, and its implementation slice is the next work.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -43,6 +43,8 @@ Dependencies: none.
 ## Milestone R1 — Equity paper trading and the agent's market surface
 
 This milestone realizes the choices recorded per D4, D5, D9, D38, D39, D63, D64, and D76.
+
+**Design complete** — [`features/r1-equity-paper-trading/`](features/r1-equity-paper-trading/PRD.md) (PRD, DECISIONS, SPEC drafted 2026-09-01).
 
 **Goal:** Produce the first authoritative trading fact, and give a real agent both halves of the market surface.
 
