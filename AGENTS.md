@@ -46,6 +46,16 @@ Document conventions:
 - Verify library facts against current documentation before pinning them in a spec, and name the version line you checked.
 - The SDD set and feature folders never reference the pre-founding implementation — no migration framing, no legacy paths; the archived snapshot exists for humans, never for citations.
 
+## Git worktrees
+
+For isolated or parallel work, create a worktree under `.worktrees/<slug>/` from the repo root:
+
+```bash
+git worktree add .worktrees/<slug> -b <branch>
+```
+
+Work, build, and commit inside that directory. Remove it when done (`git worktree remove .worktrees/<slug>`). Use only `.worktrees/` — not sibling paths or `.claude/worktrees/`. Once daemons exist, set `MARKETRIG_TEST_DATA_ROOT` to a scratch dir in that worktree.
+
 ## Guardrails — do not cross without a recorded decision
 
 Product boundary:
