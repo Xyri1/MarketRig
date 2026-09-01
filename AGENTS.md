@@ -109,12 +109,16 @@ The frontend arrives with R5; until then everything is Cargo:
 cargo fmt --check                                  # formatting
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace                             # module checks + gate
-cargo test -p marketrig-acceptance --test gate     # the R0 gate alone (G1–G11)
+cargo test -p marketrig-acceptance --test gate     # the gate alone (G1–G20, ~3 min)
+
+# The attended experiment, one cell at a time; unset it and both cells skip.
+MARKETRIG_EXPERIMENT=codex  cargo test -p marketrig-acceptance --test experiment -- --nocapture
+MARKETRIG_EXPERIMENT=claude cargo test -p marketrig-acceptance --test experiment -- --nocapture
 ```
 
-The gate builds and drives the real binaries itself and writes its evidence bundle to `target/acceptance/r0-<stamp>/` (`MARKETRIG_ACCEPTANCE_OUT` overrides). CI (`.github/workflows/ci.yml`) runs the three checks on macOS and Windows.
+Both acceptance modes build and drive the real binaries themselves and write an evidence bundle to `target/acceptance/gate-<stamp>/` or `target/acceptance/experiment-<cell>-<stamp>/` (`MARKETRIG_ACCEPTANCE_OUT` overrides): `observations.jsonl` one JSON line per step, `marketrigd-N.stderr` per daemon, the relocated `data/`, `desks/`, and `logs/`, and the experiment's `instructions.txt`. The gate runs its own stand-in feed on loopback; the experiment polls real Yahoo and prints what the operator must do by hand. CI (`.github/workflows/ci.yml`) runs the three checks on macOS and Windows; the experiment stays operator-run.
 
-Never run `marketrigd` or `marketrig` (once they exist) without `MARKETRIG_TEST_DATA_ROOT` pointing at a scratch directory: without it they write to the real per-user data root and `~/.marketrig`. `MARKETRIG_TEST_NO_TRADING=1` additionally keeps a daemon off the public market feed (per `sdd/SPEC.md` §17).
+Never run `marketrigd` or `marketrig` without `MARKETRIG_TEST_DATA_ROOT` pointing at a scratch directory: without it they write to the real per-user data root and `~/.marketrig`. `MARKETRIG_TEST_NO_TRADING=1` additionally keeps a daemon off the public market feed, and `MARKETRIG_TEST_QUOTE_URL` (honored only alongside the data root, and outranking `NO_TRADING`) points it at a stand-in feed instead (per `sdd/SPEC.md` §17 and `sdd/features/r1-equity-paper-trading/SPEC.md` §10.1).
 
 ## Verification philosophy
 

@@ -1565,8 +1565,11 @@ dependencies = [
 name = "marketrig-acceptance"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "rmcp",
  "rusqlite",
  "serde_json",
+ "tokio",
  "ureq",
 ]
 

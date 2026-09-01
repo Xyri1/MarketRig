@@ -4,9 +4,20 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
-# The gate drives public surfaces only (per R0-7): spawned binaries, the loopback
-# API, workspace files, and read-only SQLite. It never depends on marketrigd.
-[dev-dependencies]
+# The harness drives public surfaces only (per R0-7, root SPEC §17): the spawned
+# binaries, the loopback API, the desk's MCP surface through the harness's own
+# MCP client, workspace files, and read-only SQLite. It never depends on
+# marketrigd, so every shape it asserts is re-stated from the SPEC on purpose.
+#
+# The gate and the experiment are two test targets over one library target, which
+# is where the shared harness lives: an integration test binary cannot share code
+# with another one.
+[dependencies]
+# The stand-in chart feed (R1 feature SPEC §10.1) — loopback only.
+axum.workspace = true
+# G19's own MCP client, spawning the real adapter over stdio (per D4, D75).
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 rusqlite.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 ureq.workspace = true
