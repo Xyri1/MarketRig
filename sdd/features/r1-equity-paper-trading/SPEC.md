@@ -159,7 +159,7 @@ CREATE TABLE book_snapshots (
 ) STRICT;
 ```
 
-Migration 2 also widens `operational_events.kind` with `TRADING_NODE_STARTED` and `TRADING_NODE_FAILED`. Every sandbox event lands in its event table, and the `book_snapshots` row is rewritten, inside one unit with whatever else that event implies; order and position listings are query projections over these tables, never stored ones (R1-5). MarketRig holds no `Position` objects outside the node (R1-5, settling root §12.4's open question).
+Migration 2 also widens `operational_events.kind` with `TRADING_NODE_STARTED` and `TRADING_NODE_FAILED` — as a table rebuild (create the widened `STRICT` table, copy, drop, rename, recreate the index), since SQLite cannot alter a `CHECK`; the pattern every later kind widening repeats. Every sandbox event lands in its event table, and the `book_snapshots` row is rewritten, inside one unit with whatever else that event implies; order and position listings are query projections over these tables, never stored ones (R1-5). MarketRig holds no `Position` objects outside the node (R1-5, settling root §12.4's open question).
 
 ## 6. Actions, replay, and the evaluation queue
 

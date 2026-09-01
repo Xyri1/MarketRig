@@ -116,7 +116,10 @@ fn home() -> io::Result<PathBuf> {
 
 /// The ordered, embedded migration list (R0-3). `PRAGMA user_version` holds the
 /// count applied; migrations are forward-only and never edited once released.
-const MIGRATIONS: &[&str] = &[include_str!("store/001_r0.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("store/001_r0.sql"),
+    include_str!("store/002_r1.sql"),
+];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
 #[derive(Debug)]
@@ -306,7 +309,7 @@ fn migrations_apply_and_stamp() {
             })
             .unwrap()
     };
-    assert_eq!(pragmas(&store), (1, "wal".to_string(), 1));
+    assert_eq!(pragmas(&store), (2, "wal".to_string(), 1));
 
     let tables = store
         .call(|c| {
@@ -320,10 +323,18 @@ fn migrations_apply_and_stamp() {
         .unwrap();
     assert_eq!(
         tables,
-        vec![
-            ("desks".to_string(), 1),
-            ("operational_events".to_string(), 1)
+        [
+            "book_snapshots",
+            "desks",
+            "fills",
+            "operational_events",
+            "order_events",
+            "position_cycles",
+            "position_events",
+            "prompts",
+            "trading_actions",
         ]
+        .map(|name| (name.to_string(), 1))
     );
 
     let index: String = store
@@ -341,7 +352,113 @@ fn migrations_apply_and_stamp() {
     // Reopening an up-to-date database applies nothing and keeps the stamp.
     drop(store);
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
-    assert_eq!(pragmas(&store), (1, "wal".to_string(), 1));
+    assert_eq!(pragmas(&store), (2, "wal".to_string(), 1));
+}
+
+#[cfg(test)]
+#[test]
+fn trading_migration_applies() {
+    let user_version = |store: &Store| {
+        store.call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+    };
+
+    // A fresh database lands on migration 2 with every R1 table present and STRICT.
+    let (_dir, store) = open_temp();
+    assert_eq!(user_version(&store).unwrap(), 2);
+    for name in [
+        "book_snapshots",
+        "fills",
+        "order_events",
+        "position_cycles",
+        "position_events",
+        "prompts",
+        "trading_actions",
+    ] {
+        let strict = store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap_or_else(|e| panic!("{name} must exist: {e}"));
+        assert_eq!(strict, 1, "{name} must be STRICT");
+    }
+    drop(store);
+
+    // A migration-1 database upgrades in place, carrying its rows.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
+             INSERT INTO desks VALUES ('019a','beta','CREATING','/desks/beta',1000,NULL,NULL,NULL);
+             INSERT INTO operational_events VALUES ('01a0','RECOVERY',NULL,1500,'{\"a\":1}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(user_version(&store).unwrap(), 2);
+    let carried: (i64, String, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT count(*) FROM desks), kind, payload FROM operational_events",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        (2, "RECOVERY".to_string(), "{\"a\":1}".to_string())
+    );
+
+    // The rebuilt table keeps its tail index, its payload default, and the
+    // widened vocabulary — and still refuses an unknown kind.
+    let index: String = store
+        .call(|c| {
+            c.query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'operational_events' AND sql IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(index, "operational_events_tail");
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO operational_events (id, kind, desk_id, occurred_at_ns) \
+                 VALUES ('01a1','TRADING_NODE_STARTED','0199',1600)",
+                [],
+            )
+        })
+        .expect("TRADING_NODE_STARTED must be accepted");
+    let defaulted: String = store
+        .call(|c| {
+            c.query_row(
+                "SELECT payload FROM operational_events WHERE id = '01a1'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(defaulted, "{}");
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO operational_events VALUES ('01a2','NODE_WOBBLED',NULL,1700,'{}')",
+                [],
+            ))
+            .is_err(),
+        "an unknown kind must still be rejected"
+    );
 }
 
 #[cfg(test)]
@@ -351,7 +468,7 @@ fn newer_database_rejected() {
     let path = dir.path().join("marketrig.sqlite3");
     let store = Store::open(&path).unwrap();
     store
-        .call(|c| c.pragma_update(None, "user_version", 2i64))
+        .call(|c| c.pragma_update(None, "user_version", 3i64))
         .unwrap();
     drop(store);
 

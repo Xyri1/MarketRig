@@ -5,8 +5,19 @@ edition.workspace = true
 
 [dependencies]
 axum.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 getrandom.workspace = true
+nautilus-common.workspace = true
+nautilus-core.workspace = true
+nautilus-data.workspace = true
+nautilus-execution.workspace = true
+nautilus-live.workspace = true
+nautilus-model.workspace = true
+nautilus-sandbox.workspace = true
+reqwest.workspace = true
 rusqlite.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true

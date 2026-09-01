@@ -1,7 +1,11 @@
 //! `marketrig` — the continuity-plane CLI (feature SPEC
 //! `r0-workspace-desk-identity` §8). R0 ships exactly the `desk` group.
+//!
+//! The crate is also the shared daemon-access library: `marketrig-mcp` reuses
+//! [`client::Endpoint`] for discovery, verification, and HTTP rather than
+//! carrying a second copy (slice 002 §2).
 
-mod client;
+pub mod client;
 
 use clap::{Parser, Subcommand};
 use client::{Endpoint, Fault};
