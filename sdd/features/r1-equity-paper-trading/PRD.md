@@ -1,7 +1,7 @@
 # R1 — Equity paper trading and the agent's market surface: Feature PRD
 
 **Milestone:** [R1](../../ROADMAP.md#milestone-r1--equity-paper-trading-and-the-agents-market-surface)
-**Status:** Design complete — PRD, DECISIONS, and SPEC drafted 2026-09-01
+**Status:** Design complete — PRD, DECISIONS, and SPEC accepted 2026-09-01
 
 This feature designs Milestone R1: the first authoritative trading fact and both halves of the agent's market surface. It refines `sdd/SPEC.md` §3, §12, §13, §15, and §17 and invents nothing beyond them.
 

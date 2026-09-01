@@ -17,7 +17,7 @@ New `marketrigd` modules mirror the check prefixes: `feed`, `catalog`, `node`, `
 One out-of-tree `DataClient` per node polls Yahoo's chart endpoint per catalog instrument:
 
 - once at subscription, whatever the phase — so a desk always has a last close to look at;
-- then every **10 seconds** while the instrument's market phase is `OPEN`, and not otherwise;
+- then, only while the instrument's market phase is `OPEN`: every **30 seconds**, tightened to every **10 seconds** while the desk holds an open order or a nonflat position in that instrument (R1-1);
 - HTTP 429: up to **8 attempts, 400 ms apart** (the spike-verified counts, per D76); exhaustion or any other failure leaves the last accepted observation standing and marks health `DEGRADED` — never a silent provider substitution (root §12.2);
 - the endpoint base URL is compiled in; `MARKETRIG_TEST_QUOTE_URL` (§10.1) is its only override.
 
@@ -68,9 +68,9 @@ Any operation naming an instrument outside the catalog answers `INSTRUMENT_UNKNO
 
 ### 4.1 Account and sandbox wiring (R1-4)
 
-One NautilusTrader **cash** account with netting positions per desk, created with the desk's node and seeded exactly once: **100,000 USD, 1,000,000 HKD, 1,000,000 CNY**. No conversion between balances: an instrument trades against its own currency. Wiring follows root §12.1's normative rules verbatim: sandbox execution client through the builder's simulated-client entry point; the fee model configured **explicitly** to charge each instrument's declared rates; the data-event sender taken on the node thread; one venue routed to one execution client per node.
+One NautilusTrader **cash** account with netting positions per desk, created with the desk's node and seeded exactly once: **100,000 USD, 1,000,000 HKD, 1,000,000 CNY**. No conversion between balances: an instrument trades against its own currency. Wiring follows root §12.1's normative rules verbatim: sandbox execution client through the builder's simulated-client entry point; the fee model configured **explicitly** — never implicit — to charge each market's declared per-side rate, whether that rides the instrument type's own fee fields or an explicit MarketRig fee model (settled at slice time against the pinned crates, per R1-4); the data-event sender taken on the node thread; one venue routed to one execution client per node.
 
-Instrument fee rates by market (R1-4, `ponytail:` ceiling recorded there): `US` 0 bp, `HK` 11 bp, `CN` 3 bp per side.
+Fee rates by market (R1-4, `ponytail:` ceiling recorded there): `US` 0 bp, `HK` 11 bp, `CN` 3 bp per side.
 
 The synthesized book (per D76): both sides equal the last observation at the instrument's precision, both sizes one lot. Everything that exposes the book says `book_synthesized: true`. A market order therefore fills at last; a limit order rests until last crosses it; round trips cost only fees.
 
@@ -83,7 +83,7 @@ The synthesized book (per D76): both sides equal the last observation at the ins
   "side": "BUY", "type": "MARKET", "quantity": "100", "price": null }
 ```
 
-Validation, in the daemon and nowhere else (per D4): `action_id` matches `[a-z0-9-]{1,64}` and is new for the desk (a repeat replays, §6); the instrument is cataloged; `side` is `BUY | SELL`, `type` is `MARKET | LIMIT`; `quantity` is a positive multiple of the lot; `price` is required for `LIMIT`, forbidden for `MARKET`, and a positive multiple of the tick; a `BUY`'s worst-case cost fits the currency balance (`INSUFFICIENT_BALANCE`); a `SELL` fits the held quantity (`INSUFFICIENT_POSITION` — long-only follows from the cash account). Time in force is GTC and implicit. Cancel takes the resting order's `client_order_id` plus its own `action_id`; an unknown or already-terminal order answers `ORDER_NOT_FOUND`.
+The daemon validates **form**, and nowhere else validates anything (per D4): `action_id` matches `[a-z0-9-]{1,64}` and is new for the desk (a repeat replays, §6); the instrument is cataloged; `side` is `BUY | SELL`, `type` is `MARKET | LIMIT`; `quantity` is a positive multiple of the lot; `price` is required for `LIMIT`, forbidden for `MARKET`, and a positive multiple of the tick — each failure `ORDER_INVALID`. Sufficiency is the sandbox's judgment, not the daemon's (per D38, R1-4): a sandbox refusal of any kind — insufficient balance, a sell beyond the held quantity, or any other denial — answers `ORDER_REJECTED` with the sandbox's own reason in the message. Time in force is GTC and implicit. Cancel takes the resting order's `client_order_id` plus its own `action_id`; an unknown or already-terminal order answers `ORDER_NOT_FOUND`.
 
 Submission is synchronous through the sandbox: the route answers after the sandbox accepts (and, for a marketable order, fills) or refuses. Orders on a desk that is not `READY` answer `DESK_NOT_READY`.
 
@@ -194,7 +194,7 @@ All routes behind the R0 bearer and envelope. Live-state routes (node-backed) st
 
 The ActionRecord is the `trading_actions` row's JSON: `action_id`, `id`, `kind`, `created_at_ns`, and the outcome (for a submit, the order's current projection including `client_order_id`). History routes return complete newest-first lists; pagination stays deferred (root §18).
 
-New codes (append-only per D68): `INSTRUMENT_UNKNOWN` 404, `ORDER_NOT_FOUND` 404, `ORDER_INVALID` 400, `INSUFFICIENT_BALANCE` 409, `INSUFFICIENT_POSITION` 409, `DESK_NOT_READY` 409, `MARKET_UNAVAILABLE` 503.
+New codes (append-only per D68): `INSTRUMENT_UNKNOWN` 404, `ORDER_NOT_FOUND` 404, `ORDER_INVALID` 400 (form), `ORDER_REJECTED` 409 (sandbox refusal, reason verbatim), `DESK_NOT_READY` 409, `MARKET_UNAVAILABLE` 503.
 
 ## 8. The MCP adapter (R1-7)
 
@@ -222,9 +222,9 @@ The gate serves a harness-owned local HTTP server speaking the chart-endpoint sh
 - **G13 — USD round trip and the queued evaluation.** Market buy of one AAPL lot → fill row, order events verbatim, live position, balance moved; market sell to flat → `position_cycles` row with net realized P&L, and — asserted via read-only SQLite in one query — its `prompts` row born in the same transaction.
 - **G14 — resting, cancel, and replay.** A limit buy below market rests; the same `action_id` resubmitted answers `200` with the original record and creates no second order; cancel with a fresh `action_id` removes it; cancel of an unknown id answers `ORDER_NOT_FOUND`.
 - **G15 — non-USD cycle.** A 0700.XHKG round trip closes with realized P&L in `HKD` and nonzero commissions at the HK rate on both fills.
-- **G16 — refusals.** Unknown instrument; quantity off-lot (`ORDER_INVALID`); a buy exceeding the CNY balance; a sell exceeding the position; each the envelope with its documented code, and no `trading_actions` outcome recording an accepted order.
+- **G16 — refusals.** Unknown instrument (`INSTRUMENT_UNKNOWN`); quantity off-lot (`ORDER_INVALID`); a buy exceeding the CNY balance and a sell exceeding the position (each `ORDER_REJECTED`, the sandbox's reason in the message); each the envelope with its documented code, and no `trading_actions` outcome recording an accepted order.
 - **G17 — restoration.** With a resting limit order standing: `POST /quit`, restart, first market-plane read restores the book — the order is open under its **original** `client_order_id`, positions and balances match, history rows are untouched, and quotes are `UNAVAILABLE` until the stand-in is polled again.
-- **G18 — feed honesty.** The stand-in answers 429 eight times then succeeds → observation accepted (retry bound honored); the stand-in goes dark → health `DEGRADED`, last observation standing with growing age; a never-observed instrument reads `UNAVAILABLE` with no price fields.
+- **G18 — feed honesty.** The stand-in answers 429 on the first seven attempts and succeeds on the eighth → observation accepted (the retry bound's last attempt); a poll of nine straight 429s → no new observation, health `DEGRADED`; the stand-in goes dark → health `DEGRADED`, last observation standing with growing age; a never-observed instrument reads `UNAVAILABLE` with no price fields.
 - **G19 — the MCP plane.** The harness's own MCP client (per D4) spawns `marketrig-mcp --desk …`: `resources/list` names exactly five; the quote resource read twice straddling a stand-in tick yields different observations; `submit_order` and `cancel_order` round-trip; a two-field call against the four-field schema answers a structured tool error carrying `ORDER_INVALID`.
 - **G20 — the history group.** `marketrig --json history` for orders, fills, and cycles matches the SQLite rows; unknown desk exits 1; no daemon exits 3.
 
@@ -239,6 +239,7 @@ G13 + G15 + G17 together are the roadmap's R1 evidence line.
 **Module checks** (`cargo test`, fakes allowed):
 
 - `feed::retry_on_429_bounded` — 8 attempts 400 ms apart against a scripted server; exhaustion leaves the prior observation and marks `DEGRADED`.
+- `feed::cadence_two_tier` — an idle instrument polls on the 30-second tier; an open order or nonflat position moves it to the 10-second tier and flat-and-orderless moves it back.
 - `feed::phase_from_calendar` — the §2.2 table incl. both lunch breaks and a US DST boundary.
 - `feed::observation_provenance` — the §2.3 fields, sequence advance on accepted updates only, precision from the instrument.
 - `feed::base_url_seam_only` — `MARKETRIG_TEST_QUOTE_URL` inert without `MARKETRIG_TEST_DATA_ROOT`.
