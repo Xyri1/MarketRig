@@ -4,7 +4,6 @@
 //! root `sdd/SPEC.md` §5.1 and §5.2.
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fmt, io};
 
 use rusqlite::{ErrorCode, Row, Transaction, params};
@@ -12,7 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::store::{Store, StoreError};
+use crate::store::{Store, StoreError, now_ns};
 
 /// The MarketRig-owned Claude Code compatibility shim, exactly (§7.2, per D20).
 const SHIM: &str = "@AGENTS.md\n";
@@ -175,7 +174,7 @@ pub fn create(store: &Store, desks_home: &Path, name: &str) -> Result<Desk, Desk
             append_event(
                 tx,
                 "DESK_CREATED",
-                &row.id,
+                Some(&row.id),
                 row.created_at_ns,
                 json!({ "name": row.name }),
             )
@@ -222,7 +221,7 @@ pub fn retry(store: &Store, desk_id: &str) -> Result<Desk, DeskError> {
         append_event(
             tx,
             "DESK_RETRIED",
-            &row.id,
+            Some(&row.id),
             at_ns,
             json!({ "name": row.name }),
         )
@@ -263,7 +262,7 @@ fn finish(store: &Store, mut desk: Desk) -> Result<Desk, DeskError> {
                 append_event(
                     tx,
                     "DESK_READY",
-                    &row.id,
+                    Some(&row.id),
                     at_ns,
                     json!({ "name": row.name }),
                 )
@@ -283,7 +282,7 @@ fn finish(store: &Store, mut desk: Desk) -> Result<Desk, DeskError> {
                 append_event(
                     tx,
                     "DESK_FAILED",
-                    &row.id,
+                    Some(&row.id),
                     at_ns,
                     json!({ "name": row.name, "failure_code": BOOTSTRAP_FAILED }),
                 )
@@ -359,11 +358,11 @@ fn read_row(r: &Row<'_>) -> rusqlite::Result<Desk> {
 }
 
 /// Appends one `operational_events` row inside the transaction of the change it
-/// evidences (§3.3).
-fn append_event(
+/// evidences (§3.3). `desk_id` is `None` for installation-wide kinds.
+pub(crate) fn append_event(
     tx: &Transaction<'_>,
     kind: &str,
-    desk_id: &str,
+    desk_id: Option<&str>,
     at_ns: i64,
     payload: Value,
 ) -> rusqlite::Result<()> {
@@ -379,13 +378,6 @@ fn append_event(
         ],
     )?;
     Ok(())
-}
-
-fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64
 }
 
 #[cfg(test)]

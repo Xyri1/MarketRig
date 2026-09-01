@@ -5,9 +5,18 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fmt, io, thread};
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
+
+/// The one clock behind every `*_ns` column: UTC Unix nanoseconds (root §15).
+pub fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
+}
 
 /// Relocates all three roots into one scratch directory (feature SPEC §2).
 pub const TEST_DATA_ROOT_ENV: &str = "MARKETRIG_TEST_DATA_ROOT";

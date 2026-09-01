@@ -74,13 +74,14 @@ The `RECOVERY` payload names `previous_daemon_uuid` (the newest earlier `RECOVER
 1. resolve roots (test seam), create missing directories
 2. acquire runtime/daemon.lock exclusively (R0-2); on failure exit nonzero: ALREADY_RUNNING
 3. open SQLite, set WAL and foreign keys, apply migrations (§3.2)
-4. recovery transaction (§4.3)
-5. complete every interrupted CREATING desk (§7.3)
-6. bind 127.0.0.1:0, mint the per-start bearer credential and daemon UUID
-7. write runtime/endpoint.json atomically (§5.1) — the daemon is now discoverable
+4. mint the daemon UUID — recovery's own event names it (§3.3)
+5. recovery transaction (§4.3)
+6. complete every interrupted CREATING desk (§7.3)
+7. bind 127.0.0.1:0, mint the per-start bearer credential
+8. write runtime/endpoint.json atomically (§5.1) — the daemon is now discoverable
 ```
 
-The bearer credential is 32 bytes from the OS CSPRNG, lowercase hex. The daemon UUID is a lowercase UUIDv7.
+The bearer credential is 32 bytes from the OS CSPRNG, lowercase hex, and is minted at bind time because nothing before the listener needs it. The daemon UUID is a lowercase UUIDv7 and is minted before recovery because the `RECOVERY` payload carries it.
 
 ### 4.2 Shutdown
 
