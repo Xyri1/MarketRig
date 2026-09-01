@@ -347,7 +347,7 @@ async fn serve() -> Served {
 }
 
 #[cfg(test)]
-async fn serve_with(feed_base: Option<String>) -> Served {
+async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
     let desks_home = dir.path().join("desks");
@@ -608,7 +608,7 @@ async fn action_replay() {
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
-    let served = serve_with(Some(feed)).await;
+    let served = serve_with(Some(crate::feed::FeedBase::standin(feed))).await;
     let base = served.base.clone();
     let url = |path: &str| format!("{base}{path}");
     let ok = Some(CREDENTIAL);
@@ -740,7 +740,7 @@ async fn market_codes() {
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
-    let served = serve_with(Some(feed)).await;
+    let served = serve_with(Some(crate::feed::FeedBase::standin(feed))).await;
     let base = served.base.clone();
     let url = |path: &str| format!("{base}{path}");
     let ok = Some(CREDENTIAL);

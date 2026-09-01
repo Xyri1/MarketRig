@@ -46,7 +46,7 @@ fn start() -> Result<daemon::Startup, (&'static str, String)> {
     })
 }
 
-fn serve(startup: &daemon::Startup, feed_base: Option<String>) -> std::io::Result<()> {
+fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::io::Result<()> {
     let std_listener = startup.listener.try_clone()?;
     std_listener.set_nonblocking(true)?;
     let registry = Arc::new(node::Registry::new(

@@ -1422,7 +1422,7 @@ fn snapshot_restores_book() {
     let registry = Registry::new(
         store.clone(),
         Arc::new(MarketState::new()),
-        Some(base.clone()),
+        Some(crate::feed::FeedBase::standin(base.clone())),
     );
     registry.ensure(&desk).expect("the node starts");
     // The first poll must land before an order can match against it.
@@ -1498,7 +1498,11 @@ fn snapshot_restores_book() {
     assert_eq!(snapshot_version, PAYLOAD_VERSION);
 
     // A fresh node over the same store restores the book.
-    let restarted = Registry::new(store.clone(), Arc::new(MarketState::new()), Some(base));
+    let restarted = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(crate::feed::FeedBase::standin(base)),
+    );
     let node = restarted
         .ensure(&desk)
         .expect("the node restores and starts");

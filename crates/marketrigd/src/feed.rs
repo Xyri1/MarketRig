@@ -117,19 +117,40 @@ pub fn resolve_base_url(test_data_root: Option<&Path>, test_quote_url: Option<&s
     }
 }
 
+/// The feed one daemon run polls (§10.1). A stand-in also lifts the calendar
+/// gate on cadence: the gate must tick at any wall-clock hour, while phase
+/// gating stays proven by the module checks and observations keep labeling the
+/// real phase (R1-9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedBase {
+    pub url: String,
+    /// True only for the two-variable test seam's override.
+    pub standin: bool,
+}
+
+impl FeedBase {
+    /// A test stand-in, as the gate and the module fixtures construct it.
+    pub fn standin(url: String) -> FeedBase {
+        FeedBase { url, standin: true }
+    }
+}
+
 /// The one feed base this daemon run polls, read once at startup and passed down
 /// so nothing else depends on process environment ([`crate::store::Roots::from_env`]).
 ///
 /// `None` is "no feed at all": nodes still start, no polling task runs, and every
 /// quote stays `UNAVAILABLE`. That is what `MARKETRIG_TEST_NO_TRADING` buys — and
 /// a stand-in named by both seam variables outranks it (§10.1).
-pub fn feed_base_from_env() -> Option<String> {
+pub fn feed_base_from_env() -> Option<FeedBase> {
     let test_data_root = env::var_os(crate::store::TEST_DATA_ROOT_ENV).map(PathBuf::from);
     let test_quote_url = env::var(TEST_QUOTE_URL_ENV).ok();
     match (test_data_root.as_deref(), test_quote_url.as_deref()) {
-        (Some(root), Some(url)) => Some(resolve_base_url(Some(root), Some(url))),
+        (Some(root), Some(url)) => Some(FeedBase::standin(resolve_base_url(Some(root), Some(url)))),
         _ if env::var_os(TEST_NO_TRADING_ENV).is_some() => None,
-        _ => Some(CHART_BASE_URL.to_owned()),
+        _ => Some(FeedBase {
+            url: CHART_BASE_URL.to_owned(),
+            standin: false,
+        }),
     }
 }
 

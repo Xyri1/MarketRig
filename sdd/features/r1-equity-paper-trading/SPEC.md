@@ -218,7 +218,7 @@ Registration is operator-performed in R1 (the experiment configures each runtime
 
 ### 10.1 The stand-in feed (R1-9)
 
-The gate serves a harness-owned local HTTP server speaking the chart-endpoint shape with a scripted deterministic price sequence, and sets `MARKETRIG_TEST_QUOTE_URL` to it. The variable is honored only alongside `MARKETRIG_TEST_DATA_ROOT`. `MARKETRIG_TEST_NO_TRADING` (root §17) keeps the daemon off the compiled-in public URL; it does not suppress polling a stand-in named by `MARKETRIG_TEST_QUOTE_URL`. Scripts can advance prices, return 429 bursts, and go dark, which is what G18 drives. Real Yahoo appears only in the live and attended legs (per D75, D76).
+The gate serves a harness-owned local HTTP server speaking the chart-endpoint shape with a scripted deterministic price sequence, and sets `MARKETRIG_TEST_QUOTE_URL` to it. The variable is honored only alongside `MARKETRIG_TEST_DATA_ROOT`. `MARKETRIG_TEST_NO_TRADING` (root §17) keeps the daemon off the compiled-in public URL; it does not suppress polling a stand-in named by `MARKETRIG_TEST_QUOTE_URL`. Scripts can advance prices, return 429 bursts, and go dark, which is what G18 drives. A stand-in also lifts the calendar gate on cadence — the poller treats every phase as `OPEN`, because the gate must tick at any wall-clock hour while phase gating is already proven by `feed::phase_from_calendar` and `feed::cadence_two_tier`; observations still label the real calendar phase. Real Yahoo appears only in the live and attended legs (per D75, D76).
 
 ### 10.2 Gate scenarios (continuing R0's chain)
 

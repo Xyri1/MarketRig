@@ -42,7 +42,9 @@ use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::catalog::{self, Entry, Market};
-use crate::feed::{self, ChartClient, IDLE_INTERVAL, MarketState, next_delay, phase};
+use crate::feed::{
+    self, ChartClient, FeedBase, IDLE_INTERVAL, MarketState, Phase, next_delay, phase,
+};
 use crate::store::{Store, now_ns};
 use crate::trade;
 
@@ -168,7 +170,7 @@ pub struct Registry {
     store: Store,
     market: Arc<MarketState>,
     /// The one feed base this run polls, or `None` for no feed at all (§10.1).
-    feed_base: Option<String>,
+    feed_base: Option<FeedBase>,
     nodes: Mutex<HashMap<String, Arc<Node>>>,
 }
 
@@ -181,7 +183,7 @@ impl fmt::Debug for Registry {
 }
 
 impl Registry {
-    pub fn new(store: Store, market: Arc<MarketState>, feed_base: Option<String>) -> Registry {
+    pub fn new(store: Store, market: Arc<MarketState>, feed_base: Option<FeedBase>) -> Registry {
         Registry {
             store,
             market,
@@ -310,7 +312,7 @@ fn node_thread(
     desk_id: String,
     store: Store,
     market: Arc<MarketState>,
-    feed_base: Option<String>,
+    feed_base: Option<FeedBase>,
     ready: mpsc::Sender<Result<LiveNodeHandle, String>>,
     jobs: UnboundedReceiver<Job>,
 ) {
@@ -366,7 +368,7 @@ fn node_thread(
 /// sequence from [`Registry::start`], once the node is running.
 fn build(
     desk_id: &str,
-    feed_base: Option<String>,
+    feed_base: Option<FeedBase>,
     market: Arc<MarketState>,
 ) -> Result<LiveNode, String> {
     assert_precision();
@@ -537,7 +539,7 @@ fn currency(market: Market) -> Currency {
 /// installation-wide market state every accepted observation advances.
 #[derive(Debug)]
 struct ChartDataClientConfig {
-    feed_base: Option<String>,
+    feed_base: Option<FeedBase>,
     market: Arc<MarketState>,
 }
 
@@ -563,12 +565,13 @@ impl DataClientFactory for ChartDataClientFactory {
             .downcast_ref::<ChartDataClientConfig>()
             .ok_or_else(|| anyhow::anyhow!("{name} needs a ChartDataClientConfig"))?;
         let chart = match &config.feed_base {
-            Some(base) => Some(ChartClient::new(base.clone()).map_err(|e| anyhow::anyhow!(e))?),
+            Some(base) => Some(ChartClient::new(base.url.clone()).map_err(|e| anyhow::anyhow!(e))?),
             None => None,
         };
         Ok(Box::new(ChartDataClient {
             client_id: ClientId::from(name),
             chart,
+            assume_open: config.feed_base.as_ref().is_some_and(|base| base.standin),
             market: Arc::clone(&config.market),
             cache,
             subscribed: false,
@@ -593,6 +596,9 @@ struct ChartDataClient {
     /// `None` keeps this desk off the feed entirely (§10.1): the node still runs,
     /// and every quote stays `UNAVAILABLE`.
     chart: Option<ChartClient>,
+    /// A stand-in feed lifts the calendar gate on cadence (§10.1, R1-9): the gate
+    /// must tick at any wall-clock hour. Observations still label the real phase.
+    assume_open: bool,
     market: Arc<MarketState>,
     cache: CacheView,
     /// The catalog is subscribed once, when the data engine starts this client.
@@ -642,6 +648,7 @@ impl DataClient for ChartDataClient {
                 Arc::clone(&self.market),
                 self.cache.clone(),
                 sender.clone(),
+                self.assume_open,
             ));
         }
         Ok(())
@@ -697,6 +704,7 @@ async fn poll(
     market: Arc<MarketState>,
     cache: CacheView,
     sender: UnboundedSender<DataEvent>,
+    assume_open: bool,
 ) {
     let instrument_id = InstrumentId::from(entry.instrument_id);
     if poll_once(entry, instrument_id, &chart, &market, &sender)
@@ -706,10 +714,12 @@ async fn poll(
         return;
     }
     loop {
-        match next_delay(
-            phase(entry.market, now_ns()),
-            exposed(&cache, &instrument_id),
-        ) {
+        let cadence_phase = if assume_open {
+            Phase::Open
+        } else {
+            phase(entry.market, now_ns())
+        };
+        match next_delay(cadence_phase, exposed(&cache, &instrument_id)) {
             Some(delay) => {
                 tokio::time::sleep(delay).await;
                 if poll_once(entry, instrument_id, &chart, &market, &sender)
@@ -867,7 +877,7 @@ fn sender_on_node_thread() {
     let registry = Registry::new(
         store.clone(),
         Arc::new(MarketState::new()),
-        Some(base.clone()),
+        Some(FeedBase::standin(base.clone())),
     );
     let node = registry.ensure(&desk).expect("the node starts");
     assert_eq!(events(&store, &desk), ["TRADING_NODE_STARTED"]);
