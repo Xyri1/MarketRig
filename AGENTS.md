@@ -1,0 +1,104 @@
+# MarketRig — Agent Guide
+
+MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-trading harness in which an external coding agent (Codex CLI or Claude Code) observes markets, trades on a NautilusTrader sandbox, keeps desk-scoped memory and skills, sleeps, wakes, and keeps improving. MarketRig is the environment; the agent is the intelligence. The MVP is an experiment in persistent agent behavior, not a production trading system.
+
+`CLAUDE.md` is `@AGENTS.md`; edit this file only.
+
+## Repository state
+
+- Design phase. The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D76, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Implementation has not started; the next work is Milestone R0 (`sdd/ROADMAP.md`), preceded by its feature design per the SDD process below.
+- The daemon `marketrigd`, the CLI `marketrig`, and the stdio adapter `marketrig-mcp` are Rust binaries from one Cargo workspace (`crates/`, with `src-tauri/` a member); the Vue 3 frontend lives at the repository root; the one interpreter MarketRig ships runs only the supervised Hindsight memory child. See `sdd/SPEC.md` §3.
+- When code lands, keep **Commands** below current in the same change. Feature folders under `sdd/features/` are created fresh as milestones activate.
+
+## Where truth lives
+
+| Need | File |
+| --- | --- |
+| Why the product exists, MVP scope, success criteria | `sdd/PRD.md` |
+| Settled decisions with rationale (`D1`…`D76`) | `sdd/DECISIONS.md` |
+| Current mechanical contract and invariants — the source of truth | `sdd/SPEC.md` |
+| Milestones R0–R7, order, non-goals, deferred work | `sdd/ROADMAP.md` |
+| One feature's motivation / decisions / spec delta | `sdd/features/<slug>/{PRD,DECISIONS,SPEC}.md` (created per milestone) |
+| Mechanics intentionally left unresolved | `sdd/SPEC.md` §18 |
+
+Reading order for any task: `PRD.md` → `DECISIONS.md` → `SPEC.md` → `ROADMAP.md` → the relevant `sdd/features/<slug>/`. Feature specs refine the product spec; they never contradict it without a recorded decision.
+
+## How to work here (SDD)
+
+1. Create `sdd/features/<slug>/` only when real content exists; never scaffold empty templates.
+2. Write the feature PRD (motivation, outcome, scope, non-goals, success criteria), then DECISIONS, then SPEC with concrete scenarios and a closing **Required checks** section.
+3. Create a PLAN only when implementation is about to start. Implement and verify, then merge durable spec changes into `sdd/SPEC.md`, durable decisions into `sdd/DECISIONS.md`, and refresh `sdd/ROADMAP.md`.
+4. Mark a roadmap item "design complete" only once its feature folder has all three documents.
+
+Decision rules:
+
+- Product decisions are `D<n>`, sequential, active only; cite them as `per D<n>`. Each entry is **Decision** / **Rationale** / **Contract** (links to the governing sections).
+- Feature decisions use a short unique local prefix and are summarized as one product `D<n>` when merged.
+- Changing a settled decision means editing it in place and updating every document that cites it in the same change.
+- A `ponytail:` note inside a decision marks a deliberate ceiling and its upgrade path; keep it while the shortcut stands.
+
+Document conventions:
+
+- `sdd/SPEC.md` section numbers are link anchors cited across the repo; add subsections (`4.6`) rather than renumbering.
+- A section that rests on decisions opens with `*Decision basis: per D…*`; extend it when you add a decision.
+- Say "deferred" and point at `sdd/SPEC.md` §18 instead of inventing a schema, protocol, wording, or pin.
+- Verify library facts against current documentation before pinning them in a spec, and name the version line you checked.
+- The SDD set and feature folders never reference the pre-founding implementation — no migration framing, no legacy paths; the archived snapshot exists for humans, never for citations.
+
+## Guardrails — do not cross without a recorded decision
+
+Product boundary:
+
+- MarketRig is a harness, not a trader: no daemon-owned reasoning, no `find_alpha` / `should_buy` / `choose_strategy`, no strategy engine, no risk-policy engine, no multi-agent orchestration, no live trading.
+- MarketRig owns Observe, Act, time, and durable continuity; the agent owns Orient, Decide, Evaluate, and Learn. A realized-P&L event queues an evaluation prompt; it never forces a memory or skill write.
+- Do not leak NautilusTrader, OpenBB, or Hindsight APIs as product contract. The agent surface is split per D4: the market plane (awareness resources and typed order tools) through the one `marketrig-mcp` adapter, the continuity plane (records, triggers, memory, prompts) through `marketrig`. No capability appears on both.
+
+Identity and state:
+
+- One desk is one trader identity (UUIDv7 plus immutable kebab name); runtimes and native sessions are replaceable. There is no `Run` entity and no `INACTIVE | IDLE | WORKING | WAITING` agent-status state machine.
+- Every desk-scoped operation carries the desk UUID end to end; desk-owned rows use composite `(desk_id, …)` foreign keys; the daemon has no process-global selected desk.
+- `marketrigd` is the sole writer of authoritative state: SQLite through a thin binding, plain SQL, explicit `BEGIN IMMEDIATE`, WAL, `STRICT` tables, UUIDv7 text IDs, `*_ns` nanosecond instants, and decimal **text** for money — never `REAL`, never a float, never an ORM.
+- NautilusTrader computes every trading fact; MarketRig stores its payloads verbatim and never recalculates P&L, fees, or averages. The daemon consumes the `nautilus-*` Rust crates pinned in lockstep (`=0.62.0`), never the Python/PyO3 surface (per D39); the numeric precision feature is set explicitly and asserted at startup.
+- After a desk is `READY`, never rewrite agent-owned files (`AGENTS.md`, `.agents/skills/`); MarketRig reconciles only `CLAUDE.md` and the `.claude/skills` link.
+
+Runtime and delivery:
+
+- Daemon-to-agent input goes only through structured runtime paths: never keystroke emulation, never interrupting a turn, never an automatic retry of an uncertain delivery or trading action. Prefer supported programmatic interfaces everywhere.
+- Activation is resume-first with explicit pointers (`codex resume <thread>`, `claude --resume <uuid>`); never ambient `--continue`; no prompt on the command line.
+- Occurrences are candidates; firings exist only through atomic acceptance. Missed schedules become miss evidence, never catch-up firings. A one-off is consumed by its first accepted firing regardless of later failure.
+- Secrets live only in the OS credential store behind the daemon: never in SQLite, logs, prompts, URLs, or CLI output. The single recorded exception is the Hindsight child's environment (per D49).
+
+Localization:
+
+- The desktop, tray, and notifications ship in `en` and `zh-Hans`. Everything the agent consumes — CLI, MCP, JSON, error codes and messages, daemon prompts, seeded `AGENTS.md` and skills, logs — is English and byte-identical under both locales.
+
+## Stack and layout
+
+Settled per D30, D43, D47, D53–D62; see `sdd/SPEC.md` §3 for the architecture and §4.1 for packaging.
+
+| Path | Contents |
+| --- | --- |
+| `/` (root) | Vue 3 + TypeScript 6 + Vite frontend (Tailwind CSS 4, Reka UI 2, vue-i18n, ghostty-web, Hey API-generated REST client; Node.js 24 LTS and pnpm 11 via Corepack); the Cargo workspace manifest |
+| `crates/` | `marketrigd` (library crate + thin binary; axum-served loopback API), `marketrig` (CLI), `marketrig-mcp` (stdio adapter, `rmcp =3.2.0`), shared internal crates |
+| `src-tauri/` | Tauri 2 Rust shell, a member of the root workspace: window, tray, single instance, daemon bootstrap, no HTTP |
+
+Conventions:
+
+- Use pnpm and Cargo directly; no monorepo tool, task runner, workspace framework beyond Cargo's own, or commit-hook framework.
+- Pin dependencies exactly. Bumping a pin is a version change verified by that module's checks, not a new decision. Crates named in DECISIONS as candidates (axum, rusqlite, keyring, tracing, …) are pinned at plan time.
+- No ORM, no abstraction with one implementation, no framework where the standard library or platform covers it.
+- Tests: `cargo test` per Rust crate with both acceptance modes as workspace test targets; Vitest + Vue Test Utils + jsdom; WebdriverIO packaged desktop smoke. Checks: rustfmt, Clippy `-D warnings`, Prettier, correctness-only ESLint, `vue-tsc`.
+- Each feature SPEC ends with **Required checks**; the implementation PLAN turns them into runnable tests before the work is considered done.
+
+## Commands
+
+There is no runnable code yet — the Cargo workspace and frontend arrive with R0 and R5, and this section grows with them.
+
+Never run `marketrigd` or `marketrig` (once they exist) without `MARKETRIG_TEST_DATA_ROOT` pointing at a scratch directory: without it they write to the real per-user data root and `~/.marketrig`. `MARKETRIG_TEST_NO_TRADING=1` additionally keeps a daemon off the public market feed (per `sdd/SPEC.md` §17).
+
+## Verification philosophy
+
+- The MVP does not need to prove profitable trading, good strategy, or good learning. It must prove the loop: observe → decide → define later work → trigger fires → paper action → authoritative outcome → durable history → queued realized-P&L evaluation → agent retains a lesson or improves a skill → a later session reuses them.
+- Prefer the smallest end-to-end experiment that validates that loop over broad feature completeness.
+- Three layers (per D75, `sdd/SPEC.md` §17): each feature's **Required checks** (unit/module, fakes allowed); the acceptance **gate** (the scenario chain, unattended and deterministic, on stand-ins, grown scenario by scenario from R0); and the same chain attended as the **experiment**, one run per platform/runtime cell on the real CLIs and real Hindsight, whose agent-owned scenarios end inconclusive rather than failed. Do not restate one layer in another; a failure found by the experiment gets its regression in the gate or a module check.
+- When an adjacent capability looks attractive, ask whether the active milestone's evidence needs it; if not, defer it in `sdd/ROADMAP.md`.

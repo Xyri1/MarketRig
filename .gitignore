@@ -1,0 +1,25 @@
+backend/.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.sqlite3*
+
+# Vite output. The directory itself is tracked so `tauri-build` finds the
+# configured `frontendDist` before the frontend has ever been built.
+/dist/*
+!/dist/.gitkeep
+
+# Rust and Tauri build products
+src-tauri/target/
+src-tauri/gen/
+
+# Worktrees
+.worktrees/
+
+# acceptance evidence bundles
+backend/.acceptance/
+
+# WebdriverIO smoke logs
+logs/
