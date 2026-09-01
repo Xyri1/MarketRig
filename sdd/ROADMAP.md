@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestone R0 is delivered; Milestone R1's design is complete, and its implementation slice is the next work.
+Milestone R0 is delivered; Milestone R1's design is complete and its implementation is active in [`slices/002-r1-equity-paper-trading.md`](slices/002-r1-equity-paper-trading.md).
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 

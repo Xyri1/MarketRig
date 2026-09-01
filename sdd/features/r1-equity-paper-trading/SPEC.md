@@ -6,7 +6,7 @@ This specification settles the mechanics Milestone R1 implements. It refines roo
 
 ## 1. Workspace additions
 
-`crates/marketrig-mcp` joins the workspace (root §3): a thin stdio binary on `rmcp =3.2.0` (the line D4's wire evidence was gathered on; re-verified at plan time). `crates/marketrigd` gains the `nautilus-*` crates, every one pinned `=0.62.0` in lockstep (per D39), and the equity feed's endpoint layer (`yahoo_finance_api` is the candidate per D76; it and `nautilus-network` share one reqwest line, 0.13.4 verified 2026-09-01). The workspace does **not** enable NautilusTrader's high-precision feature: 64-bit precision is declared explicitly, and the daemon asserts at node start that the precision the crates report matches (per D39, R1-4). Exact new pins land in the implementing slice per the house rule.
+`crates/marketrig-mcp` joins the workspace (root §3): a thin stdio binary on `rmcp =3.2.0` (the line D4's wire evidence was gathered on; re-verified at plan time). `crates/marketrigd` gains the `nautilus-*` crates, every one pinned `=0.62.0` in lockstep (per D39), and the equity feed's endpoint layer — MarketRig's own thin chart client on the workspace's reqwest line (`=0.13.4`, the line `nautilus-network` pins; D76's `yahoo_finance_api` candidate was replaced at plan time for lacking a chart-URL override, per R1-1). The workspace does **not** enable NautilusTrader's high-precision feature: 64-bit precision is declared explicitly, and the daemon asserts at node start that the precision the crates report matches (per D39, R1-4). Exact new pins land in the implementing slice per the house rule.
 
 New `marketrigd` modules mirror the check prefixes: `feed`, `catalog`, `node`, `trade`; the REST additions extend `api`, the CLI additions `crates/marketrig`.
 
@@ -214,7 +214,7 @@ Registration is operator-performed in R1 (the experiment configures each runtime
 
 ### 10.1 The stand-in feed (R1-9)
 
-The gate serves a harness-owned local HTTP server speaking the chart-endpoint shape with a scripted deterministic price sequence, and sets `MARKETRIG_TEST_QUOTE_URL` to it. The variable is honored only alongside `MARKETRIG_TEST_DATA_ROOT`. Scripts can advance prices, return 429 bursts, and go dark, which is what G18 drives. Real Yahoo appears only in the live and attended legs (per D75, D76).
+The gate serves a harness-owned local HTTP server speaking the chart-endpoint shape with a scripted deterministic price sequence, and sets `MARKETRIG_TEST_QUOTE_URL` to it. The variable is honored only alongside `MARKETRIG_TEST_DATA_ROOT`. `MARKETRIG_TEST_NO_TRADING` (root §17) keeps the daemon off the compiled-in public URL; it does not suppress polling a stand-in named by `MARKETRIG_TEST_QUOTE_URL`. Scripts can advance prices, return 429 bursts, and go dark, which is what G18 drives. Real Yahoo appears only in the live and attended legs (per D75, D76).
 
 ### 10.2 Gate scenarios (continuing R0's chain)
 
