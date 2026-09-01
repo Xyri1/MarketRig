@@ -82,7 +82,6 @@ impl From<io::Error> for DaemonError {
 
 /// Everything a started daemon owns (§4.1). Holding it holds the lifetime lock,
 /// so the glue keeps it alive until the process exits.
-#[derive(Debug)]
 pub struct Startup {
     pub roots: Roots,
     pub store: Store,
@@ -97,6 +96,20 @@ pub struct Startup {
     pub started_at_ns: i64,
     /// The lifetime lock (R0-2), released only when this process exits.
     _lock: File,
+}
+
+// Hand-written so a `{:?}` can never leak the credential into a log line
+// (per D49, D51; `log::secret_free` greps for exactly that).
+impl fmt::Debug for Startup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Startup")
+            .field("roots", &self.roots)
+            .field("port", &self.port)
+            .field("daemon_uuid", &self.daemon_uuid)
+            .field("credential", &"<redacted>")
+            .field("started_at_ns", &self.started_at_ns)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Startup {
@@ -136,9 +149,14 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
     let daemon_uuid = Uuid::now_v7().to_string();
 
     // 5. recovery: reap the predecessor's children, then one transaction that
-    //    appends exactly one RECOVERY event (§4.3).
+    //    appends exactly one RECOVERY event (§4.3). Every record is dropped
+    //    (§4.4), but only once the event evidencing the outcomes has committed.
     let children = reap(&children_path(&roots))?;
     recover(&store, &daemon_uuid, children)?;
+    match fs::remove_file(children_path(&roots)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
 
     // 6. finish every desk a crash left CREATING (§7.3).
     desk::complete_interrupted(&store)?;
@@ -245,8 +263,10 @@ struct ChildrenFile {
 }
 
 /// Recovery's first step (§4.4, per D73): resolve a crashed daemon's recorded
-/// children, drop every record, and report each outcome for the `RECOVERY`
-/// payload. A missing file yields no outcomes.
+/// children and report each outcome for the `RECOVERY` payload. A missing file
+/// yields no outcomes. The file itself is removed by [`start`] only after the
+/// recovery transaction commits, so a failed commit preserves the records as
+/// evidence.
 pub fn reap(path: &Path) -> io::Result<Vec<Value>> {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -264,8 +284,6 @@ pub fn reap(path: &Path) -> io::Result<Vec<Value>> {
         .map(|child| json!({ "pid": child.pid, "kind": child.kind, "outcome": classify(child) }))
         .collect();
 
-    // Every record is dropped either way (§4.4).
-    fs::remove_file(path)?;
     Ok(outcomes)
 }
 
@@ -311,8 +329,8 @@ fn classify(_child: &ChildRecord) -> &'static str {
 }
 
 /// `runtime/endpoint.json` (§5.1): the discovery pointer, never proof of
-/// liveness.
-#[derive(Debug, Serialize, Deserialize)]
+/// liveness. No `Debug`: the credential must never reach a log line.
+#[derive(Serialize, Deserialize)]
 struct Endpoint {
     port: u16,
     credential: String,
@@ -525,9 +543,10 @@ fn reap_identity_check() {
     recycled.kill().unwrap();
     recycled.wait().unwrap();
 
-    // Every record is dropped either way.
-    assert!(!path.exists());
-    assert_eq!(reap(&path).unwrap(), Vec::<Value>::new());
+    // reap classifies only; the records survive until the recovery
+    // transaction commits (start() drops them — asserted in
+    // reap_outcomes_reach_the_recovery_event).
+    assert!(path.exists());
 }
 
 #[cfg(test)]
@@ -556,7 +575,8 @@ fn reap_identity_check() {
     let outcomes = reap(&path).unwrap();
     assert_eq!(outcomes.len(), 2);
     assert!(outcomes.iter().all(|o| o["outcome"] == "DISCARDED"));
-    assert!(!path.exists());
+    // reap classifies only; start() drops the file after the recovery commit.
+    assert!(path.exists());
 }
 
 #[cfg(test)]

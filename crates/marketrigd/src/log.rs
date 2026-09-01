@@ -16,9 +16,10 @@ const KEEP: usize = 7;
 
 /// Installs the process-wide subscriber. Call this once, first, from the binary.
 ///
-/// The file appender writes straight through — a hard-killed daemon must leave
-/// its last lines on disk, since the log root is gate evidence — so there is no
-/// background worker and no guard to hold.
+/// ponytail: the file appender writes straight through — a hard-killed daemon
+/// must leave its last lines on disk, since the log root is gate evidence — so
+/// there is no background worker and no guard to hold; move to
+/// `tracing_appender::non_blocking` only if log volume ever measurably hurts.
 pub fn init(logs: &Path) -> std::io::Result<()> {
     let file = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)

@@ -99,7 +99,7 @@ Format (written by later milestones' launches; R0 defines and consumes it):
 { "children": [ { "pid": 123, "kind": "…", "args": ["…"], "daemon_uuid": "…", "launched_at_ns": 0 } ] }
 ```
 
-On macOS, recovery terminates a recorded child whose pid is alive **and** whose current command line still carries the recorded `args` (a shim may have replaced the executable path, per D73); a pid that is dead or whose command line no longer matches is left untouched. A record whose `args` list is empty carries no identity evidence and never matches — it is treated as `PID_RECYCLED`, never terminated. On Windows, records are discarded without a check. Either way every record is dropped and each outcome — `TERMINATED`, `NOT_RUNNING`, `PID_RECYCLED`, `DISCARDED` — lands in the `RECOVERY` payload.
+On macOS, recovery terminates a recorded child whose pid is alive **and** whose current command line still carries the recorded `args` (a shim may have replaced the executable path, per D73); a pid that is dead or whose command line no longer matches is left untouched. A record whose `args` list is empty carries no identity evidence and never matches — it is treated as `PID_RECYCLED`, never terminated. On Windows, records are discarded without a check. Either way every record is dropped — the file is removed only after the `RECOVERY` transaction commits, so a failed commit preserves the records as evidence — and each outcome — `TERMINATED`, `NOT_RUNNING`, `PID_RECYCLED`, `DISCARDED` — lands in the `RECOVERY` payload.
 
 ## 5. Endpoint discovery and authentication
 
@@ -137,7 +137,7 @@ The `Desk` resource:
   "created_at_ns": 0, "ready_at_ns": 0, "failure_code": "…", "failure_message": "…" }
 ```
 
-`workspace_status` is derived at read time (§7.5), never stored; nullable fields are omitted when null.
+`workspace_status` is derived at read time (§7.5), never stored, and present (with its reason when `UNAVAILABLE`) only on a `READY` desk; nullable fields are omitted when null. A `POST /desks` body that is not a JSON object with a `name` string answers `DESK_NAME_INVALID` — R0's only request body carries nothing but a name, so no generic bad-request code exists yet.
 
 **Error envelope** (per R0-5), the one shape every later group inherits:
 
@@ -200,7 +200,7 @@ Grammar: global flags precede the group (root §13.2) — `marketrig [--json] de
 - `marketrig desk show <name-or-id>`
 - `marketrig desk retry <name-or-id>`
 
-`show` and `retry` accept a name or UUID; the CLI resolves a name through `GET /desks` and never derives a desk any other way. Human output is plain UTF-8 text; `--json` emits the daemon's resource verbatim. On a daemon error the CLI prints `error: <CODE>: <message>` to standard error (or the envelope itself on standard output under `--json`).
+`show` and `retry` accept a name or UUID; the CLI resolves a name through `GET /desks` and never derives a desk any other way. A name that resolves to no desk answers `DESK_NOT_FOUND` client-side — same code, same meaning as the daemon's 404. Human output is plain UTF-8 text; `--json` emits the daemon's resource verbatim. On a daemon error the CLI prints `error: <CODE>: <message>` to standard error (or the envelope itself on standard output under `--json`); the no-usable-daemon diagnosis (`DAEMON_UNREACHABLE`, exit 3) uses the same two shapes.
 
 Discovery follows §5.2 against the resolved data root. HTTP is blocking with a 2-second connect and 10-second total timeout, redirects disabled, no environment proxy (`proxy(None)` — mandatory per R0-8, D50).
 

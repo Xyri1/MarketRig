@@ -6,7 +6,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 
 ## Repository state
 
-- Design phase. The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D76, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Implementation has not started; the next work is Milestone R0 (`sdd/ROADMAP.md`), preceded by its feature design per the SDD process below.
+- The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D76, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Milestone R0 is implemented (slice `sdd/slices/001-r0-foundation.md`, still Active pending two-platform CI); the Cargo workspace, `marketrigd`, `marketrig`, and the acceptance gate exist. Later milestones follow the SDD process below.
 - The daemon `marketrigd`, the CLI `marketrig`, and the stdio adapter `marketrig-mcp` are Rust binaries from one Cargo workspace (`crates/`, with `src-tauri/` a member); the Vue 3 frontend lives at the repository root; the one interpreter MarketRig ships runs only the supervised Hindsight memory child. See `sdd/SPEC.md` §3.
 - When code lands, keep **Commands** below current in the same change. Feature folders under `sdd/features/` are created fresh as milestones activate.
 
@@ -93,7 +93,16 @@ Conventions:
 
 ## Commands
 
-There is no runnable code yet — the Cargo workspace and frontend arrive with R0 and R5, and this section grows with them.
+The frontend arrives with R5; until then everything is Cargo:
+
+```bash
+cargo fmt --check                                  # formatting
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                             # module checks + gate
+cargo test -p marketrig-acceptance --test gate     # the R0 gate alone (G1–G11)
+```
+
+The gate builds and drives the real binaries itself and writes its evidence bundle to `target/acceptance/r0-<stamp>/` (`MARKETRIG_ACCEPTANCE_OUT` overrides). CI (`.github/workflows/ci.yml`) runs the three checks on macOS and Windows.
 
 Never run `marketrigd` or `marketrig` (once they exist) without `MARKETRIG_TEST_DATA_ROOT` pointing at a scratch directory: without it they write to the real per-user data root and `~/.marketrig`. `MARKETRIG_TEST_NO_TRADING=1` additionally keeps a daemon off the public market feed (per `sdd/SPEC.md` §17).
 

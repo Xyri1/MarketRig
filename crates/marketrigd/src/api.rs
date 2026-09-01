@@ -68,9 +68,10 @@ impl IntoResponse for DeskError {
     }
 }
 
-/// Bearer authentication for every route, including `/quit` (per R0-6). Plain
-/// equality: the credential is a fresh 64-hex secret per daemon start on a
-/// loopback listener, so there is no timing oracle worth a constant-time crate.
+/// Bearer authentication for every route, including `/quit` (per R0-6).
+/// ponytail: plain equality — a fresh 64-hex secret per start on a loopback
+/// listener has no timing oracle worth a constant-time crate; swap one in if
+/// the listener ever leaves loopback.
 async fn authorize(State(state): State<Arc<ApiState>>, request: Request, next: Next) -> Response {
     let presented = request
         .headers()
