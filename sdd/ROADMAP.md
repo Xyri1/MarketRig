@@ -4,11 +4,13 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
+Milestone R0 is delivered; the next work is Milestone R1, starting with its feature design.
+
 ## Milestone R0 — Workspace, daemon, and desk identity
 
-This milestone realizes the choices recorded per D7, D15, D20, D23, D42, D43, D44, D45, D46, D48, D49, D50, D51, D53, D54, D60, D61, and D73.
+This milestone realizes the choices recorded per D7, D15, D20, D23, D42, D43, D44, D45, D46, D48, D49, D50, D51, D53, D54, D60, D61, and D73, and settles the daemon's boot contract as D77.
 
-**Design complete** — [`features/r0-workspace-desk-identity/`](features/r0-workspace-desk-identity/PRD.md) (PRD, DECISIONS, SPEC accepted 2026-09-01).
+**Delivered 2026-09-01** — designed in [`features/r0-workspace-desk-identity/`](features/r0-workspace-desk-identity/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/001-r0-foundation.md`](slices/001-r0-foundation.md). Its twelve module checks, the gate's G1–G11, and the static checks are green on macOS and Windows CI.
 
 **Goal:** Stand up the smallest authoritative harness a desk can live in.
 
@@ -31,6 +33,8 @@ create desk A and desk B with isolated workspaces
 -> start marketrigd
 -> both desks, their identities, and their provenance are intact and still isolated
 ```
+
+**Produced** by the gate's G2 and G4 on both platforms: two desks created with isolated workspaces and their seeded files, then a clean shutdown through `POST /quit` and a restart that leaves both identities, creation instants, workspaces, and prior events intact, with the new start's recovery event naming the previous daemon.
 
 **Why here:** nothing else can be desk-scoped until desk identity and a sole-writer durable store exist, and the harness that will judge every later milestone is cheapest to build while there is almost nothing to judge.
 

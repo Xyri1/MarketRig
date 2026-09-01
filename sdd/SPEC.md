@@ -128,7 +128,7 @@ Not a canonical MarketRig entity. UI prose may informally say "pause the run," b
 
 ## 3. Top-level architecture
 
-*Decision basis: per D4, D16, D23, D24, D30, D31, D39, D42, D43, D44, D45, D46, D48, D53, D54, D55, D63, and D64.*
+*Decision basis: per D4, D16, D23, D24, D30, D31, D39, D42, D43, D44, D45, D46, D48, D53, D54, D55, D63, D64, and D77.*
 
 ```text
 Tauri 2 / Vue 3          marketrig CLI          Codex CLI / Claude Code
@@ -167,14 +167,14 @@ One Cargo workspace builds and releases `marketrigd`, `marketrig`, and `marketri
 | Path | Contents |
 | --- | --- |
 | `/` (root) | the Vue 3 / TypeScript / Vite frontend with its `package.json`, `index.html`, and `src/`; the Cargo workspace manifest and `Cargo.lock` |
-| `crates/` | `marketrigd`, `marketrig`, `marketrig-mcp`, and shared internal crates |
+| `crates/` | `marketrigd`, `marketrig`, `marketrig-mcp`, the internal acceptance-harness crate (§17), and shared internal crates |
 | `src-tauri/` | the Tauri 2 Rust shell, a member of the same Cargo workspace |
 
 pnpm and Cargo are used directly. There is no monorepo framework, general task runner, or commit-hook framework (per D54, D61). Dependencies are pinned exactly; bumping a pin is a version change verified by that module's own checks.
 
 ## 4. Installation, platform, and security boundary
 
-*Decision basis: per D3, D11, D13, D14, D18, D25, D42, D44, D47, D48, D49, D52, D58, D59, D66, D68, and D70.*
+*Decision basis: per D3, D11, D13, D14, D18, D25, D42, D44, D47, D48, D49, D52, D58, D59, D66, D68, D70, and D77.*
 
 ### 4.1 Installation
 
@@ -212,11 +212,13 @@ Windows and Apple Silicon macOS expose the same desk, session, trigger, approval
 ### 4.3 Local single-user boundary
 
 - `marketrigd` binds only to TCP loopback and exposes REST/JSON for queries and commands plus WebSocket for terminal bytes and live events, from one listener in one process. No process manager, no reverse proxy, no second transport (per D48).
-- The API is served on one maintained Rust web framework over Tokio and hyper, listening on `127.0.0.1` on an operating-system-assigned port. `axum` is the candidate — verified on crates.io 2026-09-01, 0.8.x line — and the exact pin is set at plan time in the workspace manifest.
-- That framework must emit an OpenAPI document from its own route definitions; a handwritten document is not acceptable input, because generation exists to remove a duplicated contract (per D59). The emitter is chosen alongside the framework at plan time.
-- Each daemon start mints a new high-entropy bearer credential and publishes its selected port, credential, and per-start daemon UUID through OS-permission-protected per-user endpoint metadata at `runtime/endpoint.json` under the application-data root. The daemon lifetime lock lives beside it.
+- The API is served on one maintained Rust web framework over Tokio and hyper, listening on `127.0.0.1` on an operating-system-assigned port. That framework is `axum`, pinned exactly in the workspace manifest (per D77).
+- That framework must emit an OpenAPI document from its own route definitions; a handwritten document is not acceptable input, because generation exists to remove a duplicated contract (per D59). The emitter is `utoipa` with its axum integration; its wiring lands with the milestone whose generated client needs it (§18).
+- Exactly one daemon serves one data root, enforced by an exclusive advisory lock on a file under `runtime/` taken with the standard library before anything is published and held until the process exits. A second daemon on the same root exits nonzero naming `ALREADY_RUNNING` and writes nothing. The lock scope is the data root, not the machine, which is what lets the acceptance harness run concurrent daemons in scratch roots (per D75, D77).
+- Each daemon start mints a new high-entropy bearer credential and publishes its selected port, credential, and per-start daemon UUID through OS-permission-protected per-user endpoint metadata at `runtime/endpoint.json` under the application-data root, written atomically through a temporary file and rename once the listener is live. The daemon lifetime lock lives beside it.
 - REST requests require that credential. WebSocket connections validate an exact allowed origin at the handshake and authenticate with a first-frame bearer credential before any application message is accepted, because the browser WebSocket API cannot send headers and credentials never appear in URLs (per D44, D66).
-- Clients verify the daemon through authenticated health and require its reported UUID to match the endpoint metadata.
+- `runtime/endpoint.json` is a pointer, never proof of liveness. Clients verify the daemon through authenticated health and require its reported UUID to match the endpoint metadata; a connection failure, a `401`, or a UUID mismatch means no usable daemon. A stale file a dead daemon left behind therefore fails verification instead of misleading a client, and no client ever starts a daemon of its own — the operator owns that, and from the desktop milestone the shell does (per D66, D77).
+- Every daemon error crosses REST as one JSON envelope carrying a stable SCREAMING_SNAKE machine code and an English message (per D68). Codes are append-only across milestones: a later feature group adds codes but redefines neither the envelope nor a code's meaning, and a message may improve while its code cannot.
 - Loopback location and a random port are not authentication.
 - The frontend REST client is generated from the daemon's OpenAPI document with exactly pinned `@hey-api/openapi-ts` and `@hey-api/client-fetch`, committed, and re-checked in CI so client and daemon cannot drift (per D59). Terminal bytes and live events use the browser's native WebSocket API separately.
 - The supervised Hindsight child binds only to loopback, requires a MarketRig-owned bearer credential, and exposes neither its MCP server nor its control plane. Only `marketrigd` calls it.
@@ -253,9 +255,28 @@ Everything the agent consumes has one English source and is byte-identical under
 
 Detection, endpoints, catalog mechanics, font and input-method requirements, and parity checks are **deferred** to the localization feature specification.
 
+### 4.6 Daemon startup and shutdown
+
+*Decision basis: per D66, D73, and D77.*
+
+Every `marketrigd` start follows one fixed order, so a daemon a client can reach is a daemon whose own state is already resolved:
+
+```text
+1. resolve the data, desks, and log roots through the test seam (§17), creating what is missing
+2. acquire the runtime lock exclusively (§4.3); on failure exit nonzero: ALREADY_RUNNING
+3. open SQLite, set WAL and enforced foreign keys, apply pending migrations (§15)
+4. mint the per-start daemon UUID, which the recovery event itself names
+5. run the recovery transaction (§15)
+6. complete every interrupted CREATING desk (§5.2)
+7. bind 127.0.0.1 on an operating-system-assigned port and mint the bearer credential
+8. write runtime/endpoint.json atomically — the daemon is now discoverable
+```
+
+Shutdown is an authenticated route, `POST /quit`, from the first milestone; the desktop's Quit (§14) uses that same route, and Ctrl+C on a terminal-attached daemon takes the same path. It stops accepting work, drains the database thread, removes `runtime/endpoint.json`, and exits within a bounded wait, after which it exits regardless. A hard kill leaves the endpoint file behind; the operating system releases the lock, and the stale file fails client verification (§4.3).
+
 ## 5. Desk model and ownership
 
-*Decision basis: per D7, D8, D15, D20, D21, D22, and D46.*
+*Decision basis: per D7, D8, D15, D20, D21, D22, D46, and D77.*
 
 MarketRig supports multiple durable concurrent desks from day one.
 
@@ -277,7 +298,7 @@ Desk
 
 Desk invariants:
 
-- each desk has one lowercase textual UUIDv7 identity and one unique immutable lowercase-kebab name;
+- each desk has one lowercase textual UUIDv7 identity and one unique immutable lowercase-kebab name of 1 to 40 characters over `a`–`z`, `0`–`9`, and single interior hyphens, with no leading, trailing, or consecutive hyphen;
 - its default workspace is `~/.marketrig/desks/<desk-name>/`, with no UUID in the final folder name;
 - one desk is exactly one trader identity;
 - at most one agent session is active for a desk, while trigger code is separate and may run concurrently;
@@ -309,13 +330,13 @@ new row -> CREATING -> READY
                     -> FAILED -> CREATING on explicit retry
 ```
 
-`marketrigd` persists a `CREATING` desk row before touching its workspace. It bootstraps `AGENTS.md`, the exact `CLAUDE.md` shim, `.agents/skills/` with the seeded improvement skill, and the `.claude/skills` link idempotently, then marks the same row `READY`. A failure preserves the row and partial workspace as `FAILED`; retry reuses its UUID, name, and path. Startup completes every interrupted `CREATING` desk before accepting work.
+`marketrigd` persists a `CREATING` desk row before touching its workspace. It bootstraps `AGENTS.md`, the exact `CLAUDE.md` shim, `.agents/skills/` with the seeded improvement skill, and the `.claude/skills` link idempotently, then marks the same row `READY`. A failure preserves the row and partial workspace as `FAILED` with a failure code and message; retry reuses its UUID, name, and path. Creation answers only once the row is `READY` or `FAILED`, so a client observes `CREATING` only after a crash, and startup completes every interrupted `CREATING` desk before accepting work.
 
 Readiness covers only the durable row and the local workspace. Hindsight bank setup, trading-node and paper-book setup, runtime activation, and trigger work stay lazy and keyed by the desk UUID.
 
-For a `READY` desk, startup validates the workspace without recreating or rewriting agent-owned material. A missing or unusable workspace, or an unreadable `AGENTS.md`, produces a derived workspace-unavailable status while the durable desk stays `READY`, and blocks neither other desks nor daemon startup.
+For a `READY` desk, startup validates the workspace without recreating or rewriting agent-owned material. A missing or unusable workspace, or an unreadable `AGENTS.md`, produces a derived workspace-unavailable status — computed at read time with a one-line reason, never stored, and carried only by a `READY` desk — while the durable desk stays `READY`, and blocks neither other desks nor daemon startup.
 
-The schema, creation sequence, retry behavior, and verification contract are **deferred** to the desk feature specification.
+The desk schema, the creation and retry sequences, the workspace-status derivation, and the desk group's own verification are settled in [`features/r0-workspace-desk-identity/SPEC.md`](features/r0-workspace-desk-identity/SPEC.md) (per D77); later milestones extend those tables by migration.
 
 ## 6. Managed runtime lifecycle
 
@@ -635,7 +656,7 @@ Three things the 2026-09-01 spikes leave unproven become required checks in the 
 
 ## 13. Agent surface
 
-*Decision basis: per D4, D50, D63, D68, D69, and D71.*
+*Decision basis: per D4, D50, D63, D68, D69, D71, and D77.*
 
 The agent surface is split by what the agent is doing, and no capability appears on both halves (per D4). **MCP is the market plane** — what the agent does *in the market*: observe and act. **The `marketrig` CLI is the continuity plane** — what the agent does *in the harness*: durable records, structure, and cognition. The daemon's SQLite is the evidence authority for every action either plane performs; the transcript never is.
 
@@ -667,7 +688,9 @@ Exact resource URI grammar, resource and tool schemas, instrument normalization,
 
 The CLI carries everything else: `history`, `desk`, `trigger`, `memory`, `prompt`, and `session hook` — durable records, file-payload actions such as trigger code and recurrence rules, and cognition. Live positions, open orders, and instrument discovery belong to the market plane; the CLI's trading half is the durable record, including historical orders and closed position cycles.
 
-The CLI is a thin client of `marketrigd` and never a generated SDK of it. It parses with one maintained argument parser and calls the authenticated loopback API with a blocking HTTP client using finite timeouts, no environment proxy inheritance, and redirects disabled (crate selections at plan time, per D50). Commands are deterministic; `--json` produces machine output and plain text produces human output, carrying the same facts. Its text is English only and identical under every installation locale (§4.5).
+The CLI is a thin client of `marketrigd` and never a generated SDK of it. It parses with `clap` and calls the authenticated loopback API with `ureq`, blocking, with finite connect and total timeouts, no environment proxy inheritance, and redirects disabled — both pinned exactly (per D50, D77). Commands are deterministic; `--json` produces machine output and plain text produces human output, carrying the same facts. Its text is English only and identical under every installation locale (§4.5).
+
+A daemon error reaches the caller as §4.3's envelope and nothing else: `error: <CODE>: <message>` on standard error, or the envelope itself on standard output under `--json`. Exit codes are one small fixed set every command group inherits and none redefines: `0` success, `1` a daemon-reported error, `2` a usage error, `3` no usable daemon — diagnosed as `DAEMON_UNREACHABLE` in the same two shapes, because the CLI reports an unreachable daemon and never starts one (§4.3).
 
 Every agent-facing command provides concise human-readable output, stable machine-readable output, non-secret provider and observation timing where applicable, and explicit failure rather than silent provider fallback.
 
@@ -675,7 +698,7 @@ Two rules constrain what the CLI may become. It never exposes a session lifecycl
 
 One command is deliberately none of the above, because it is not the agent speaking: `marketrig session hook` exists only because Claude Code reports a session event by running a command. It forwards the hook object from standard input to the daemon unchanged, carries no attribution, prints nothing, and exits `0` on every outcome — including no daemon and any rejection — so MarketRig's evidence can never become the agent's problem (per D69).
 
-Global flags precede the group. Desk scope is explicit or resolved by the daemon from the caller's working directory; the CLI never derives a desk itself. Mutating requests carry the trigger environment as attribution, and nothing else is inferred. The invocation grammar, desk-resolution route, attribution headers, error envelope, exit codes, pagination, idempotency-key mechanics, and per-command output shapes are **deferred** to the feature specifications that own each group.
+Global flags precede the group. Desk scope is explicit or resolved by the daemon from the caller's working directory; the CLI never derives a desk itself, and it resolves a desk name to its UUID through the daemon's own listing. Mutating requests carry the trigger environment as attribution, and nothing else is inferred. The per-group invocation grammar beyond `desk`, the desk-resolution route, attribution headers, pagination, idempotency-key mechanics, and per-command output shapes are **deferred** to the feature specifications that own each group.
 
 ## 14. Desktop and application lifecycle
 
@@ -726,7 +749,7 @@ The REST surface, the per-desk terminal socket, the live-event socket, the right
 
 ## 15. Persistence, crash recovery, and history
 
-*Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, and D73.*
+*Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, D73, and D77.*
 
 Durable state covers desk identity and configuration, runtime selection and last native pointers, triggers and code snapshots, daemon prompts and delivery, approvals and provenance, paper-book restoration state, and complete trading history. The current market-observation cache and the MCP adapter's state are deliberately non-durable: after a restart each quote stays unavailable until a new observation arrives.
 
@@ -734,7 +757,7 @@ MarketRig-owned structured state lives in one installation-wide SQLite database 
 
 Storage conventions (per D45), stated explicitly because the ecosystem's gravity pulls toward an ORM and gravity is not evidence of need:
 
-- SQLite is reached through a thin binding that keeps plain SQL in view (`rusqlite` is the candidate — verified on crates.io 2026-09-01, 0.40.x line; the exact pin is set at plan time);
+- SQLite is reached through a thin binding that keeps plain SQL in view (`rusqlite`, pinned exactly, with SQLite compiled into the daemon so binary and schema stay one release unit — per D53, D77);
 - `marketrigd` is the sole writer, and persistence stays cohesive and private to it;
 - transactions are explicit `BEGIN IMMEDIATE`; the journal mode is WAL; tables are `STRICT` with enforced foreign keys;
 - MarketRig-owned durable identifiers are lowercase UUIDv7 text, and source-native identities stay canonical text;
@@ -743,11 +766,13 @@ Storage conventions (per D45), stated explicitly because the ecosystem's gravity
 - opaque source payloads stay versioned bytes beside the normalized fields;
 - no ORM, no query builder, no compile-time query-checking layer, and no alternate-storage interface for one implementation.
 
-Schema evolution uses numbered forward-only migrations. A newer database is rejected; there is no downgrade path and no alternate database location. One connection is owned by one database thread that accepts submitted units and read functions; no connection, cursor, or transaction handle escapes it, and callers that must be atomic across modules submit one unit rather than composing several. The daemon relocates its whole root through one test seam (§17), which is load-bearing for both developer safety and acceptance evidence.
+Schema evolution uses numbered forward-only migrations. The daemon embeds its ordered migration list, applies whatever is pending at startup before recovery and before serving, and records the applied number in SQLite's own `PRAGMA user_version`: no bookkeeping table, no external migration file, and no down migration. A database whose `user_version` exceeds the binary's newest migration is rejected with `DATABASE_NEWER` and the daemon refuses to start; there is no downgrade path and no alternate database location. One connection is owned by one database thread that accepts submitted units and read functions; no connection, cursor, or transaction handle escapes it, and callers that must be atomic across modules submit one unit rather than composing several. The daemon relocates its whole root through one test seam (§17), which is load-bearing for both developer safety and acceptance evidence.
+
+Operational evidence has one home: the installation-wide append-only `operational_events` table. Every row commits inside the transaction of the change it evidences, its `kind` is a closed vocabulary that each milestone extends by migration, and its `(occurred_at_ns, id)` order is the cursor the live-event socket tails (per D71). There are no per-domain event tables.
 
 MarketRig history is structured operational evidence, not a conversation archive: native session pointers and managed-process lifecycle, trigger execution and delivery, trigger-code diagnostics, approvals and actions, and the immutable sandbox-produced trading facts with their provenance. Raw trading facts stay retained even when MarketRig builds normalized projections. MarketRig persists no canonical decision trajectory, no normalized transcript, and no Run history; Codex and Claude Code own their own session catalogs.
 
-Diagnostic logs are separate from that authoritative history. `marketrigd` writes bounded JSON Lines through one structured-logging facade (`tracing` is the candidate — verified on crates.io 2026-09-01, 0.1.x line), and the desktop writes a separate bounded local file through Tauri's official log plugin. Both use the operating system's application-log directory, separate from the application-data root that holds the database. The daemon additionally emits to standard error when it is a terminal. Nothing is uploaded automatically, and no log contains a provider secret or a loopback credential (per D51).
+Diagnostic logs are separate from that authoritative history. `marketrigd` writes bounded JSON Lines through `tracing`, pinned exactly, rotating daily and keeping the newest seven files, and the desktop writes a separate bounded local file through Tauri's official log plugin. Both use the operating system's application-log directory, separate from the application-data root that holds the database. The daemon additionally emits to standard error when it is a terminal. Nothing is uploaded automatically, and no log contains a provider secret or a loopback credential (per D51).
 
 After an unclean daemon or process failure:
 
@@ -759,7 +784,7 @@ After an unclean daemon or process failure:
 
 Recovery is one pre-service transaction owned by the new daemon start. Each module registers its step, the transaction runs the registered steps in one fixed order, and it appends one recovery event naming the previous and new daemon UUIDs on every start, including a clean one with nothing to resolve. Never-attempted prompts stay queued; attempts without confirmed handoff completion fail as completion-unknown; completed handoffs stay delivered; uncertain trading actions are never blindly resubmitted; in-flight rows identify the daemon that started them.
 
-Long-lived children a crashed daemon left running are recorded in `runtime/children.json` when launched and removed when stopped. Recovery's first step terminates any recorded child of a prior daemon whose process is alive and whose command line still carries the recorded arguments, drops every record either way, and reports each outcome in the recovery event. Windows discards records only, because its Job Object has already ended the children. Nothing is recorded for trigger scripts (per D73).
+Long-lived children a crashed daemon left running are recorded in `runtime/children.json` when launched and removed when stopped. Recovery's first step terminates any recorded child of a prior daemon whose process is alive and whose command line still carries the recorded arguments, drops every record either way, and reports each outcome — terminated, not running, pid recycled, or discarded — in the recovery event. A record carrying no arguments carries no identity evidence, so it never matches and is never terminated. Windows discards records only, because its Job Object has already ended the children. `runtime/children.json` is removed only after the recovery transaction commits, so a failed commit keeps its records as evidence for the next start. Nothing is recorded for trigger scripts (per D73).
 
 ## 16. Memory and skills
 
@@ -792,7 +817,7 @@ The exact dependency pin, child and database lifecycle, bank derivation, setting
 
 ## 17. Verification
 
-*Decision basis: per D60, D61, D67, D75, and D76.*
+*Decision basis: per D60, D61, D67, D75, D76, and D77.*
 
 Verification has three layers, and no layer restates another:
 
@@ -813,6 +838,7 @@ The **acceptance chain** is one ordered sequence of scenarios that asserts the r
 Rules both modes share (per D67, D75):
 
 - the chain drives **public surfaces only** — the CLI's machine output, the loopback API, the desk's MCP surface through the harness's own MCP client, the per-desk terminal socket, workspace files, and read-only SQLite. There is no test-only product surface;
+- the harness is one internal workspace crate of its own, carrying the gate and the experiment as two test targets and spawning the shipped binaries rather than linking the daemon, so the public-surfaces-only rule is structural rather than a discipline (per D77);
 - both modes relocate the whole data root through the daemon's test seam into the run's evidence directory, so the daemon's log, the desk workspaces, and every socket close code land in the bundle by construction and no run touches the per-user root. The packaged desktop smoke is the one leg that does;
 - the environment seam is two variables: `MARKETRIG_TEST_DATA_ROOT` relocates the root, and `MARKETRIG_TEST_NO_TRADING` additionally keeps a daemon off the public market feed. `marketrigd` and `marketrig` are never run by hand without the first;
 - agent-owned steps are instructed by a user-owned `AGENTS.md` addendum and verified by side effects, with bounded attempts on fresh trade cycles; mechanical assertions get none, because MarketRig must not decide what the agent should learn while still making the learning steps executable;
@@ -827,14 +853,14 @@ Realized P&L is the reward signal. Profitability, strategy quality, and benefici
 
 The following stay intentionally unresolved until their dedicated feature sessions. Every "deferred" in this document points here. These are module-specific design questions, never permission to invent additional product entities or a universal agent protocol.
 
-- REST and WebSocket framing beyond the endpoint-discovery contract, and the shape of the daemon's OpenAPI emission;
+- WebSocket framing, REST mechanics beyond the endpoint-discovery contract and the error envelope (§4.3), and the wiring of the daemon's OpenAPI emission from its chosen emitter;
 - exact packaging layout, launch shims, code signing and notarization, per-user CLI PATH registration, autostart launch arguments and recovery, and notification interaction details;
-- the exact crate selections and pins named as candidates in §4.3, §4.4, §6.5, §9, §10, and §15, each confirmed against current documentation at plan time and pinned in the workspace manifest;
+- the exact crate selections and pins still named as candidates in §4.4, §6.5, §9, and §10, each confirmed against current documentation at plan time and pinned in the workspace manifest; §4.3's web framework and §15's SQLite binding and logging facade are pinned already (per D77);
 - domain-owned SQLite table details for each milestone, including EVENT ingress; approvals own no table of their own, because the code-snapshot and trading-action rows are the records;
 - exact runtime structured-event schemas, control-plane connection mechanics, Channel packaging and allowlist mechanics, hook event handling, and runtime error schemas;
 - the trigger firing document's fields, source and output size bounds, timeout range and default, artifact storage and preview mechanics, and trigger environment variable names;
 - scheduler storage layout and transaction scenarios;
-- CLI invocation grammar, desk-resolution route, attribution headers, error envelope, exit codes, pagination, idempotency-key mechanics, and per-command output shapes;
+- CLI invocation grammar beyond the `desk` group, desk-resolution route, attribution headers, pagination, idempotency-key mechanics, and per-command output shapes;
 - exact market-resource URI grammar, resource and tool schemas, instrument normalization, adapter credential handoff, runtime registration packaging, and feed-health representation;
 - per-exchange equity market-hours and staleness semantics (including non-US delay characteristics), the synthesized book's contract, instrument metadata (tick ladders and lot rules), the multi-currency account details, the per-market equity fee model, and the rate-limit retry policy, all settled before implementation (per D76);
 - sandbox event mappings, book-restoration mechanics, the SQLite representation of trading facts, query projections, and whether MarketRig holds position objects outside the node;
@@ -843,7 +869,7 @@ The following stay intentionally unresolved until their dedicated feature sessio
 - exact localized copy for surfaces later milestones add, renderer-loss recovery details, detailed interaction design, and the design tokens' concrete values;
 - notification platform mechanics;
 - Hindsight bank profile tuning, hosted reranker configuration, embedding-model change, and data erasure and relocation workflows;
-- operational-record and diagnostic-log retention, pruning, fields, and export mechanics;
+- operational-record retention and pruning, diagnostic-log retention beyond the daemon log's rotation bound (§15), and record fields and export mechanics;
 - backpressure policy for the daemon-prompt queue, until EVENT volume makes it necessary;
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
 - the seeded `AGENTS.md` constitution's wording, grown by the milestones that add the surfaces it names (per D20, D22).

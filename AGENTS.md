@@ -6,7 +6,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 
 ## Repository state
 
-- The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D76, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Milestone R0 is implemented (slice `sdd/slices/001-r0-foundation.md`, still Active pending two-platform CI); the Cargo workspace, `marketrigd`, `marketrig`, and the acceptance gate exist. Later milestones follow the SDD process below.
+- The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D77, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Milestone R0 is delivered (slice `sdd/slices/001-r0-foundation.md`, frozen; per D77): the Cargo workspace, `marketrigd`, `marketrig`, and the acceptance gate exist. Next is Milestone R1's feature design, per the SDD process below.
 - The daemon `marketrigd`, the CLI `marketrig`, and the stdio adapter `marketrig-mcp` are Rust binaries from one Cargo workspace (`crates/`, with `src-tauri/` a member); the Vue 3 frontend lives at the repository root; the one interpreter MarketRig ships runs only the supervised Hindsight memory child. See `sdd/SPEC.md` §3.
 - When code lands, keep **Commands** below current in the same change. Feature folders under `sdd/features/` are created fresh as milestones activate.
 
@@ -15,7 +15,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 | Need | File |
 | --- | --- |
 | Why the product exists, MVP scope, success criteria | `sdd/PRD.md` |
-| Settled decisions with rationale (`D1`…`D76`) | `sdd/DECISIONS.md` |
+| Settled decisions with rationale (`D1`…`D77`) | `sdd/DECISIONS.md` |
 | Current mechanical contract and invariants — the source of truth | `sdd/SPEC.md` |
 | Milestones R0–R7, order, non-goals, deferred work | `sdd/ROADMAP.md` |
 | One feature's motivation / decisions / spec delta | `sdd/features/<slug>/{PRD,DECISIONS,SPEC}.md` (created per milestone) |

@@ -1,6 +1,6 @@
 # Slice 001 — R0 foundation
 
-**Status:** Active — frozen when the exit checks are green
+**Status:** Frozen 2026-09-01 — exit checks green on macOS and Windows CI (run 33494211710, commit 07faea6)
 **Implements:** all of [`features/r0-workspace-desk-identity/`](../features/r0-workspace-desk-identity/SPEC.md)
 **Exit:** feature SPEC §11 in full — the 12 module checks, gate G1–G11, and the static checks — green on macOS and Windows CI.
 
