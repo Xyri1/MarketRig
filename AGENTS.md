@@ -19,6 +19,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 | Current mechanical contract and invariants — the source of truth | `sdd/SPEC.md` |
 | Milestones R0–R7, order, non-goals, deferred work | `sdd/ROADMAP.md` |
 | One feature's motivation / decisions / spec delta | `sdd/features/<slug>/{PRD,DECISIONS,SPEC}.md` (created per milestone) |
+| One slice's implementation plan (frozen once implemented) | `sdd/slices/NNN-<slug>.md` |
 | Mechanics intentionally left unresolved | `sdd/SPEC.md` §18 |
 
 Reading order for any task: `PRD.md` → `DECISIONS.md` → `SPEC.md` → `ROADMAP.md` → the relevant `sdd/features/<slug>/`. Feature specs refine the product spec; they never contradict it without a recorded decision.
@@ -27,7 +28,7 @@ Reading order for any task: `PRD.md` → `DECISIONS.md` → `SPEC.md` → `ROADM
 
 1. Create `sdd/features/<slug>/` only when real content exists; never scaffold empty templates.
 2. Write the feature PRD (motivation, outcome, scope, non-goals, success criteria), then DECISIONS, then SPEC with concrete scenarios and a closing **Required checks** section.
-3. Create a PLAN only when implementation is about to start. Implement and verify, then merge durable spec changes into `sdd/SPEC.md`, durable decisions into `sdd/DECISIONS.md`, and refresh `sdd/ROADMAP.md`.
+3. Implementation proceeds in slices: `sdd/slices/NNN-<slug>.md`, numbered sequentially, each the implementation plan for one or more features (or part of one), created only when that implementation is about to start. An active slice is the working plan; drift discovered during implementation is corrected in the feature docs in the same change — `sdd/features/` stays canonical, a slice never does. When a slice's exit checks are green, freeze it (status line; never edited again), then merge durable spec changes into `sdd/SPEC.md`, durable decisions into `sdd/DECISIONS.md`, and refresh `sdd/ROADMAP.md`.
 4. Mark a roadmap item "design complete" only once its feature folder has all three documents.
 
 Decision rules:
@@ -88,7 +89,7 @@ Conventions:
 - Pin dependencies exactly. Bumping a pin is a version change verified by that module's checks, not a new decision. Crates named in DECISIONS as candidates (axum, rusqlite, keyring, tracing, …) are pinned at plan time.
 - No ORM, no abstraction with one implementation, no framework where the standard library or platform covers it.
 - Tests: `cargo test` per Rust crate with both acceptance modes as workspace test targets; Vitest + Vue Test Utils + jsdom; WebdriverIO packaged desktop smoke. Checks: rustfmt, Clippy `-D warnings`, Prettier, correctness-only ESLint, `vue-tsc`.
-- Each feature SPEC ends with **Required checks**; the implementation PLAN turns them into runnable tests before the work is considered done.
+- Each feature SPEC ends with **Required checks**; the implementing slice turns them into runnable tests before the work is considered done.
 
 ## Commands
 

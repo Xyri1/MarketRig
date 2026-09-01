@@ -845,4 +845,5 @@ The following stay intentionally unresolved until their dedicated feature sessio
 - Hindsight bank profile tuning, hosted reranker configuration, embedding-model change, and data erasure and relocation workflows;
 - operational-record and diagnostic-log retention, pruning, fields, and export mechanics;
 - backpressure policy for the daemon-prompt queue, until EVENT volume makes it necessary;
-- pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt.
+- pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
+- the seeded `AGENTS.md` constitution's wording, grown by the milestones that add the surfaces it names (per D20, D22).

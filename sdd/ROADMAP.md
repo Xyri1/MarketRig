@@ -8,6 +8,8 @@ Every milestone names the evidence that closes it, never a date. A milestone is 
 
 This milestone realizes the choices recorded per D7, D15, D20, D23, D42, D43, D44, D45, D46, D48, D49, D50, D51, D53, D54, D60, D61, and D73.
 
+**Design complete** — [`features/r0-workspace-desk-identity/`](features/r0-workspace-desk-identity/PRD.md) (PRD, DECISIONS, SPEC accepted 2026-09-01).
+
 **Goal:** Stand up the smallest authoritative harness a desk can live in.
 
 Expected outcomes:
