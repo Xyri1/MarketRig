@@ -1,3 +1,3 @@
 fn main() {
-    marketrig::run();
+    std::process::exit(marketrig::run());
 }

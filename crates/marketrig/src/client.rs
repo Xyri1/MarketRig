@@ -1,0 +1,170 @@
+//! Endpoint discovery, verification, and the one blocking HTTP client.
+//!
+//! Feature SPEC `r0-workspace-desk-identity` §2 (roots), §5.2 (verification),
+//! §6 (routes and envelope), §8 (timeouts and proxy rules).
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// A failure with the exit code it maps to (feature SPEC §8).
+pub struct Fault {
+    pub code: String,
+    pub message: String,
+    pub exit: i32,
+}
+
+impl Fault {
+    /// No usable daemon: missing pointer, connection failure, `401`, or a
+    /// daemon-UUID mismatch. Exit `3`; the CLI never spawns a daemon (R0-1).
+    pub fn unreachable(message: impl Into<String>) -> Self {
+        Self {
+            code: "DAEMON_UNREACHABLE".to_string(),
+            message: message.into(),
+            exit: 3,
+        }
+    }
+
+    /// A daemon-reported error envelope. Exit `1`.
+    pub fn reported(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            exit: 1,
+        }
+    }
+}
+
+/// The application-data root (feature SPEC §2).
+///
+/// Deliberately duplicated from the daemon: ten lines of `std` beat a
+/// dependency edge from the CLI onto `marketrigd`.
+fn data_root() -> Option<PathBuf> {
+    if let Some(scratch) = std::env::var_os("MARKETRIG_TEST_DATA_ROOT") {
+        return Some(PathBuf::from(scratch).join("data"));
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("MarketRig"))
+    }
+    // R0 ships macOS and Windows only (feature SPEC §2).
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .map(|d| PathBuf::from(d).join("Library/Application Support/MarketRig"))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct EndpointFile {
+    port: u16,
+    credential: String,
+    daemon_uuid: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Health {
+    daemon_uuid: String,
+}
+
+/// A verified daemon endpoint. Constructing one proves §5.2 passed.
+pub struct Endpoint {
+    agent: ureq::Agent,
+    base: String,
+    credential: String,
+}
+
+impl Endpoint {
+    pub fn discover() -> Result<Self, Fault> {
+        let path = data_root()
+            .ok_or_else(|| Fault::unreachable("Cannot resolve the MarketRig data root."))?
+            .join("runtime")
+            .join("endpoint.json");
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| Fault::unreachable(format!("Cannot read {}: {e}.", path.display())))?;
+        let file: EndpointFile = serde_json::from_str(&raw)
+            .map_err(|e| Fault::unreachable(format!("Cannot parse {}: {e}.", path.display())))?;
+
+        let endpoint = Self {
+            agent: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .timeout_connect(Some(Duration::from_secs(2)))
+                    .timeout_global(Some(Duration::from_secs(10)))
+                    .max_redirects(0)
+                    .proxy(None)
+                    .http_status_as_error(false)
+                    .build(),
+            ),
+            base: format!("http://127.0.0.1:{}", file.port),
+            credential: file.credential,
+        };
+
+        let health: Health = serde_json::from_str(&endpoint.get("/health")?).map_err(|e| {
+            Fault::unreachable(format!("The daemon health response is unusable: {e}."))
+        })?;
+        if health.daemon_uuid != file.daemon_uuid {
+            return Err(Fault::unreachable(format!(
+                "{} names daemon {} but the listener reports {}.",
+                path.display(),
+                file.daemon_uuid,
+                health.daemon_uuid
+            )));
+        }
+        Ok(endpoint)
+    }
+
+    pub fn get(&self, path: &str) -> Result<String, Fault> {
+        let request = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.credential));
+        finish(request.call())
+    }
+
+    pub fn post(&self, path: &str, body: Option<serde_json::Value>) -> Result<String, Fault> {
+        let request = self
+            .agent
+            .post(format!("{}{path}", self.base))
+            .header("Authorization", format!("Bearer {}", self.credential));
+        finish(match body {
+            Some(body) => request.send_json(body),
+            None => request.send_empty(),
+        })
+    }
+}
+
+/// Map a response to the raw success body or the §6 envelope.
+fn finish(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<String, Fault> {
+    let mut response = response
+        .map_err(|e| Fault::unreachable(format!("Cannot reach the MarketRig daemon: {e}.")))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| Fault::unreachable(format!("Cannot read the daemon response: {e}.")))?;
+    match status {
+        200..=299 => Ok(body),
+        // A 401 against the discovered endpoint is "no usable daemon" (§8).
+        401 => Err(Fault::unreachable(
+            "The daemon rejected the credential in runtime/endpoint.json.",
+        )),
+        _ => Err(envelope(status, &body)),
+    }
+}
+
+fn envelope(status: u16, body: &str) -> Fault {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => match (value["code"].as_str(), value["message"].as_str()) {
+            (Some(code), Some(message)) => Fault::reported(code, message),
+            _ => Fault::reported(
+                "INTERNAL",
+                format!("The daemon answered {status} without an error envelope."),
+            ),
+        },
+        Err(_) => Fault::reported(
+            "INTERNAL",
+            format!("The daemon answered {status} with an unreadable body."),
+        ),
+    }
+}
