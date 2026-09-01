@@ -1,5 +1,6 @@
 //! `marketrig` — the continuity-plane CLI (feature SPEC
-//! `r0-workspace-desk-identity` §8). R0 ships exactly the `desk` group.
+//! `r0-workspace-desk-identity` §8, extended with the `history` group by
+//! `r1-equity-paper-trading` §9).
 //!
 //! The crate is also the shared daemon-access library: `marketrig-mcp` reuses
 //! [`client::Endpoint`] for discovery, verification, and HTTP rather than
@@ -7,7 +8,7 @@
 
 pub mod client;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use client::{Endpoint, Fault};
 
 /// Global flags precede the group (root SPEC §13.2).
@@ -28,6 +29,20 @@ enum Group {
         #[command(subcommand)]
         command: DeskCommand,
     },
+    /// Durable trading records, newest first.
+    // R1 feature SPEC §9; live positions and open orders are the MCP plane's.
+    History {
+        record: HistoryRecord,
+        /// Desk name or UUID.
+        desk: String,
+    },
+}
+
+#[derive(Clone, ValueEnum)]
+enum HistoryRecord {
+    Orders,
+    Fills,
+    Cycles,
 }
 
 #[derive(Subcommand)]
@@ -66,20 +81,30 @@ pub fn run() -> i32 {
 }
 
 fn dispatch(group: &Group) -> Result<String, Fault> {
-    let Group::Desk { command } = group;
     let endpoint = Endpoint::discover()?;
-    match command {
-        DeskCommand::Create { name } => {
-            endpoint.post("/desks", Some(serde_json::json!({ "name": name })))
-        }
-        DeskCommand::List => endpoint.get("/desks"),
-        DeskCommand::Show { desk } => {
+    match group {
+        Group::Desk { command } => match command {
+            DeskCommand::Create { name } => {
+                endpoint.post("/desks", Some(serde_json::json!({ "name": name })))
+            }
+            DeskCommand::List => endpoint.get("/desks"),
+            DeskCommand::Show { desk } => {
+                let id = resolve(&endpoint, desk)?;
+                endpoint.get(&format!("/desks/{id}"))
+            }
+            DeskCommand::Retry { desk } => {
+                let id = resolve(&endpoint, desk)?;
+                endpoint.post(&format!("/desks/{id}/retry"), None)
+            }
+        },
+        Group::History { record, desk } => {
             let id = resolve(&endpoint, desk)?;
-            endpoint.get(&format!("/desks/{id}"))
-        }
-        DeskCommand::Retry { desk } => {
-            let id = resolve(&endpoint, desk)?;
-            endpoint.post(&format!("/desks/{id}/retry"), None)
+            let segment = match record {
+                HistoryRecord::Orders => "orders",
+                HistoryRecord::Fills => "fills",
+                HistoryRecord::Cycles => "cycles",
+            };
+            endpoint.get(&format!("/desks/{id}/history/{segment}"))
         }
     }
 }
@@ -103,6 +128,44 @@ fn resolve(endpoint: &Endpoint, desk: &str) -> Result<String, Fault> {
         .ok_or_else(|| Fault::reported("DESK_NOT_FOUND", format!("No desk is named {desk}.")))
 }
 
+/// The list bodies the CLI renders as tab-separated rows, in the daemon's own
+/// order — newest first for the history routes (R1 feature SPEC §7, §9).
+///
+/// `a|b` prints the first field present: a history order carries the sandbox's
+/// `status`, or its latest event `kind` before a status exists. The daemon owns
+/// every shape, so a missing or unknown field prints blank and never panics.
+const LISTS: [(&str, &[&str]); 4] = [
+    ("desks", &["name", "state", "id"]),
+    (
+        "orders",
+        &[
+            "client_order_id",
+            "instrument_id",
+            "side",
+            "type",
+            "quantity",
+            "price",
+            "status|kind",
+        ],
+    ),
+    (
+        "fills",
+        &[
+            "occurred_at_ns",
+            "instrument_id",
+            "side",
+            "quantity",
+            "price",
+            "commission",
+            "currency",
+        ],
+    ),
+    (
+        "cycles",
+        &["closed_at_ns", "instrument_id", "realized_pnl", "currency"],
+    ),
+];
+
 /// `--json` passes the daemon's body through untouched; human output is plain
 /// UTF-8 text carrying the same facts.
 fn emit(json: bool, body: &str) {
@@ -114,36 +177,40 @@ fn emit(json: bool, body: &str) {
         println!("{}", body.trim_end());
         return;
     };
-    match value["desks"].as_array() {
-        Some(desks) => {
-            for desk in desks {
-                println!(
-                    "{}\t{}\t{}",
-                    text(&desk["name"]),
-                    text(&desk["state"]),
-                    text(&desk["id"])
-                );
-            }
+    if let Some((rows, columns)) = LISTS
+        .iter()
+        .find_map(|(key, columns)| Some((value[key].as_array()?, columns)))
+    {
+        for row in rows {
+            let cells: Vec<String> = columns.iter().map(|column| cell(row, column)).collect();
+            println!("{}", cells.join("\t"));
         }
-        None => {
-            for field in [
-                "id",
-                "name",
-                "state",
-                "workspace_path",
-                "workspace_status",
-                "workspace_status_reason",
-                "created_at_ns",
-                "ready_at_ns",
-                "failure_code",
-                "failure_message",
-            ] {
-                if !value[field].is_null() {
-                    println!("{field}: {}", text(&value[field]));
-                }
-            }
+        return;
+    }
+    for field in [
+        "id",
+        "name",
+        "state",
+        "workspace_path",
+        "workspace_status",
+        "workspace_status_reason",
+        "created_at_ns",
+        "ready_at_ns",
+        "failure_code",
+        "failure_message",
+    ] {
+        if !value[field].is_null() {
+            println!("{field}: {}", text(&value[field]));
         }
     }
+}
+
+fn cell(row: &serde_json::Value, column: &str) -> String {
+    column
+        .split('|')
+        .map(|field| &row[field])
+        .find(|value| !value.is_null())
+        .map_or(String::new(), text)
 }
 
 fn text(value: &serde_json::Value) -> String {
