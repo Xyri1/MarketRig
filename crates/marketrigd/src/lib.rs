@@ -6,6 +6,7 @@ pub mod feed;
 pub mod log;
 pub mod node;
 pub mod store;
+pub mod trade;
 
 use std::process::ExitCode;
 use std::sync::Arc;

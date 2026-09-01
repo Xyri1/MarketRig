@@ -44,6 +44,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::catalog::{self, Entry, Market};
 use crate::feed::{self, ChartClient, IDLE_INTERVAL, MarketState, next_delay, phase};
 use crate::store::{Store, now_ns};
+use crate::trade;
 
 /// The name of the one out-of-tree data client every node registers (§2.1).
 const DATA_CLIENT: &str = "MARKETRIG";
@@ -76,7 +77,7 @@ pub fn assert_precision() {
 pub struct NodeError(String);
 
 impl NodeError {
-    fn new(message: impl Into<String>) -> NodeError {
+    pub(crate) fn new(message: impl Into<String>) -> NodeError {
         NodeError(message.into())
     }
 
@@ -103,6 +104,8 @@ type Job = Box<dyn FnOnce(&NodeContext) + Send + 'static>;
 pub struct NodeContext {
     /// The node's own cache — the live authority for orders and positions (R1-5).
     pub cache: Rc<RefCell<Cache>>,
+    /// The node's clock, which every order NautilusTrader builds is stamped by.
+    pub clock: Rc<RefCell<dyn Clock>>,
     pub trader_id: TraderId,
 }
 
@@ -268,11 +271,22 @@ impl Registry {
             thread::sleep(Duration::from_millis(10));
         }
 
-        Ok(Arc::new(Node {
+        let node = Arc::new(Node {
             jobs,
             control,
             thread: Mutex::new(Some(thread)),
-        }))
+        });
+
+        // Restoration closes node start (§4.3, R1-6). It runs here, on the
+        // running node, because the sandbox seeds the desk's account when its
+        // client connects and only a running execution engine can hand a resting
+        // order to a venue's matching engine — so the snapshot is applied the
+        // moment the node is able to hold it, and before any caller can reach it.
+        if let Err(e) = trade::restore(&self.store, desk_id, &node) {
+            node.stop_and_join();
+            return Err(e);
+        }
+        Ok(node)
     }
 
     /// One `operational_events` row for a node lifecycle fact (§5, migration 2).
@@ -314,7 +328,7 @@ fn node_thread(
     // polling task and the job loop are its neighbours on this one thread.
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let mut node = match build(&desk_id, &store, feed_base, market) {
+        let mut node = match build(&desk_id, feed_base, market) {
             Ok(node) => node,
             Err(e) => {
                 let _ = ready.send(Err(e));
@@ -323,8 +337,12 @@ fn node_thread(
         };
         let context = NodeContext {
             cache: node.kernel().cache(),
+            clock: node.kernel().clock(),
             trader_id: node.trader_id(),
         };
+        // The message bus is thread-local, so durable capture is subscribed here,
+        // on the node thread, and sees exactly this desk's events (§5).
+        trade::install_capture(desk_id.clone(), store, Rc::clone(&context.cache));
         let mut jobs = jobs;
         tokio::task::spawn_local(async move {
             while let Some(job) = jobs.recv().await {
@@ -343,11 +361,11 @@ fn node_thread(
 }
 
 /// Node start in the §4.3 order: assert precision, build, load the catalog into
-/// the cache, restore the book. The data client is registered on the builder and
-/// subscribes the catalog when its engine starts it, on this thread.
+/// the cache. The data client is registered on the builder and subscribes the
+/// catalog when its engine starts it, on this thread; restoration closes the
+/// sequence from [`Registry::start`], once the node is running.
 fn build(
     desk_id: &str,
-    store: &Store,
     feed_base: Option<String>,
     market: Arc<MarketState>,
 ) -> Result<LiveNode, String> {
@@ -390,7 +408,6 @@ fn build(
 
     let node = builder.build().map_err(|e| e.to_string())?;
     load_catalog(&node)?;
-    restore(store, desk_id)?;
     Ok(node)
 }
 
@@ -434,38 +451,6 @@ fn equity(entry: &Entry, ts: UnixNanos) -> InstrumentAny {
         ts,
         ts,
     ))
-}
-
-/// Restoration at node start (§4.3, R1-6).
-///
-/// An absent snapshot is a fresh book, and a fresh book needs nothing done here:
-/// the sandbox client seeds the desk's cash account from its own starting
-/// balances when it connects (§4.1), which is the whole of this path.
-///
-/// The present-snapshot branch — rebuild account and positions, re-place resting
-/// limit orders under their original client order identifiers — lands with the
-/// snapshot writer, since until that writer exists no row can be present. A row
-/// that appears without a reader stops the node rather than trading a book
-/// MarketRig cannot account for.
-fn restore(store: &Store, desk_id: &str) -> Result<(), String> {
-    let desk = desk_id.to_owned();
-    let snapshot: Option<i64> = store
-        .call(move |conn| {
-            use rusqlite::OptionalExtension;
-            conn.query_row(
-                "SELECT payload_version FROM book_snapshots WHERE desk_id = ?1",
-                [desk],
-                |r| r.get(0),
-            )
-            .optional()
-        })
-        .map_err(|e| e.to_string())?;
-    match snapshot {
-        None => Ok(()),
-        Some(version) => Err(format!(
-            "book snapshot (payload version {version}) cannot be restored by this build"
-        )),
-    }
 }
 
 /// One sandbox execution client per venue (root §12.1): the fee model is set
@@ -820,7 +805,7 @@ fn precision_asserted() {
 /// A desk row a node can be started against (the `operational_events` foreign
 /// key), plus its UUID.
 #[cfg(test)]
-fn seeded_desk(store: &Store, name: &'static str) -> String {
+pub(crate) fn seeded_desk(store: &Store, name: &'static str) -> String {
     let id = uuid::Uuid::now_v7().to_string();
     let row = id.clone();
     store
@@ -853,7 +838,7 @@ fn events(store: &Store, desk_id: &str) -> Vec<String> {
 /// Polls `check` until it holds or the bound expires.
 #[cfg(test)]
 #[track_caller]
-fn within(seconds: u64, what: &str, mut check: impl FnMut() -> bool) {
+pub(crate) fn within(seconds: u64, what: &str, mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < deadline {
         if check() {
@@ -937,15 +922,16 @@ fn sender_on_node_thread() {
     );
     dark.stop_all();
 
-    // A start that fails is evidenced and retryable (§4.3): a book snapshot this
-    // build cannot restore stops the node, and the desk gets its node once the
-    // obstacle is gone.
+    // A start that fails is evidenced and retryable (§4.3): a book snapshot
+    // stamped with a payload version this build does not know stops the node
+    // rather than trading a book it cannot account for, and the desk gets its
+    // node once the obstacle is gone.
     let desk = seeded_desk(&store, "gamma");
     let snapshot = desk.clone();
     store
         .unit(move |tx| {
             tx.execute(
-                "INSERT INTO book_snapshots VALUES (?1, 1, '{}', 3000)",
+                "INSERT INTO book_snapshots VALUES (?1, 99, '{}', 3000)",
                 [snapshot],
             )
         })

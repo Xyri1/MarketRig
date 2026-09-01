@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use crate::desk::{self, Desk, DeskError};
 use crate::store::Store;
+use crate::trade::{self, TradeError};
 
 /// Everything the routes need. The daemon builds one and hands it to
 /// [`router`]; nothing here is process-global (root SPEC §5.1).
@@ -42,6 +43,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks", get(list).post(create))
         .route("/desks/{desk_id}", get(show))
         .route("/desks/{desk_id}/retry", post(retry))
+        .route("/desks/{desk_id}/orders", post(submit_order))
+        .route(
+            "/desks/{desk_id}/orders/{client_order_id}/cancel",
+            post(cancel_order),
+        )
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -66,6 +72,26 @@ impl IntoResponse for DeskError {
             DeskError::NotFound(_) => StatusCode::NOT_FOUND,
             DeskError::NameTaken(_) | DeskError::StateInvalid(_) => StatusCode::CONFLICT,
             DeskError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The R1 §7 code-to-status map, appended to R0's per D68. `TradeError::code()`
+/// owns the code; this owns the status.
+impl IntoResponse for TradeError {
+    fn into_response(self) -> Response {
+        // A desk lookup or store failure keeps R0's own mapping.
+        if let TradeError::Desk(e) = self {
+            return e.into_response();
+        }
+        let status = match &self {
+            TradeError::Invalid(_) => StatusCode::BAD_REQUEST,
+            TradeError::InstrumentUnknown(_) | TradeError::OrderNotFound(_) => {
+                StatusCode::NOT_FOUND
+            }
+            TradeError::Rejected(_) | TradeError::NotReady(_) => StatusCode::CONFLICT,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -152,6 +178,38 @@ async fn retry(
     Ok(Json(desk::retry(&state.store, &desk_id)?))
 }
 
+// The two mutating market-plane routes (R1 feature SPEC §7). The body arrives as
+// text so the `trading_actions` row keeps the caller's own request verbatim
+// (§5); `trade` owns every rule about its content.
+
+async fn submit_order(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    body: String,
+) -> Result<Response, TradeError> {
+    let (record, replayed) = trade::submit(&state.store, &state.registry, &desk_id, &body)?;
+    let status = if replayed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(record)).into_response())
+}
+
+async fn cancel_order(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, client_order_id)): Path<(String, String)>,
+    body: String,
+) -> Result<Json<trade::ActionRecord>, TradeError> {
+    Ok(Json(trade::cancel(
+        &state.store,
+        &state.registry,
+        &desk_id,
+        &client_order_id,
+        &body,
+    )?))
+}
+
 /// Answers, then asks the daemon to shut down (§4.2). A full or closed channel
 /// means a stop is already under way, so a second `/quit` is a no-op.
 async fn quit(State(state): State<Arc<ApiState>>) -> Response {
@@ -178,15 +236,29 @@ struct Served {
     desks_home: PathBuf,
     base: String,
     quit: tokio::sync::mpsc::Receiver<()>,
+    store: Store,
+    registry: Arc<crate::node::Registry>,
 }
 
 #[cfg(test)]
 async fn serve() -> Served {
+    // No feed base: these routes never start a node, and nothing may reach the
+    // public endpoint from a test.
+    serve_with(None).await
+}
+
+#[cfg(test)]
+async fn serve_with(feed_base: Option<String>) -> Served {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
     let desks_home = dir.path().join("desks");
     std::fs::create_dir_all(&desks_home).unwrap();
     let (quit, quit_rx) = tokio::sync::mpsc::channel(1);
+    let registry = Arc::new(crate::node::Registry::new(
+        store.clone(),
+        Arc::new(crate::feed::MarketState::new()),
+        feed_base,
+    ));
     let state = ApiState {
         store: store.clone(),
         desks_home: desks_home.clone(),
@@ -194,13 +266,7 @@ async fn serve() -> Served {
         credential: CREDENTIAL.to_string(),
         started_at_ns: 1_700_000_000_000_000_000,
         quit,
-        // No feed base: these routes never start a node, and nothing may reach
-        // the public endpoint from a test.
-        registry: Arc::new(crate::node::Registry::new(
-            store,
-            Arc::new(crate::feed::MarketState::new()),
-            None,
-        )),
+        registry: registry.clone(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -211,6 +277,8 @@ async fn serve() -> Served {
         desks_home,
         base,
         quit: quit_rx,
+        store,
+        registry,
     }
 }
 
@@ -424,4 +492,137 @@ async fn envelope_stability() {
     assert_eq!(call_post(url("/quit"), ok, None).0, 202);
     served.quit.close();
     assert_eq!(call_post(url("/quit"), ok, None).0, 202);
+}
+
+// ---------------------------------------------------------------------------
+// api::action_replay (R1 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+/// A repeated `action_id` returns the original record and acts on nothing — the
+/// whole idempotency contract (R1-8, §6). Driven through the real route against
+/// a real node on the scripted feed.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn action_replay() {
+    let aapl = crate::catalog::find("AAPL.XNAS").unwrap();
+    let (feed, _hits) = crate::feed::scripted_server(vec![(
+        200,
+        crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let served = serve_with(Some(feed)).await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+
+    let (status, body) = call_post(
+        url("/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"alpha"}"#)),
+    );
+    assert_eq!(status, 201, "{body}");
+    let desk_id = json(&body)["id"].as_str().unwrap().to_string();
+
+    // Start the node and wait for its first observation, so the order below
+    // matches against a book rather than racing the feed.
+    served.registry.ensure(&desk_id).expect("the node starts");
+    let market = std::sync::Arc::clone(served.registry.market());
+    crate::node::within(10, "the first observation", || {
+        market.read(aapl, crate::store::now_ns()).sequence == 1
+    });
+
+    let orders = url(&format!("/desks/{desk_id}/orders"));
+    // One lot: the synthesized book is one lot a side (§4.1), so this is exactly
+    // one order and exactly one fill.
+    let request = r#"{"action_id":"buy-aapl-1","instrument_id":"AAPL.XNAS",
+                      "side":"BUY","type":"MARKET","quantity":"1","price":null}"#;
+
+    // First acceptance: 201, one order in the sandbox.
+    let (status, body) = call_post(orders.clone(), ok, Some(("application/json", request)));
+    assert_eq!(status, 201, "{body}");
+    let record = json(&body);
+    // The ActionRecord is the trading_actions row and nothing else (§7); the
+    // keys come back sorted because `serde_json::Value` is a map.
+    assert_eq!(
+        record.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["action_id", "created_at_ns", "id", "kind", "outcome"],
+        "the ActionRecord is the trading_actions row: {record}"
+    );
+    assert_eq!(record["action_id"], "buy-aapl-1");
+    assert_eq!(record["kind"], "SUBMIT");
+    assert_eq!(record["outcome"]["client_order_id"], "buy-aapl-1");
+    assert_eq!(record["outcome"]["status"], "FILLED");
+    assert_eq!(record["outcome"]["filled_quantity"], "1");
+    assert_eq!(record["outcome"]["average_price"], "316.85");
+
+    let orders_placed = |served: &Served| {
+        served
+            .store
+            .call(|c| {
+                c.query_row("SELECT count(*) FROM trading_actions", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+    let fills = |served: &Served| {
+        served
+            .store
+            .call(|c| c.query_row("SELECT count(*) FROM fills", [], |r| r.get::<_, i64>(0)))
+            .unwrap()
+    };
+    let sandbox_orders = |served: &Served| {
+        served
+            .registry
+            .ensure(&desk_id)
+            .unwrap()
+            .call(|context| {
+                context
+                    .cache
+                    .borrow()
+                    .orders(None, None, None, None, None)
+                    .len()
+            })
+            .unwrap()
+    };
+    assert_eq!((orders_placed(&served), fills(&served)), (1, 1));
+    assert_eq!(sandbox_orders(&served), 1, "one order reached the sandbox");
+
+    // The same action_id again: 200, byte-identical record, no second order.
+    let (status, replay) = call_post(orders.clone(), ok, Some(("application/json", request)));
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(json(&replay), record, "the stored record, byte for byte");
+    assert_eq!((orders_placed(&served), fills(&served)), (1, 1));
+    assert_eq!(sandbox_orders(&served), 1, "and created no second order");
+
+    // A different body under the same action_id replays too: the record, not the
+    // request, is the contract.
+    let (status, replay) = call_post(
+        orders.clone(),
+        ok,
+        Some((
+            "application/json",
+            r#"{"action_id":"buy-aapl-1","instrument_id":"MSFT.XNAS",
+                "side":"SELL","type":"LIMIT","quantity":"1","price":"1.00"}"#,
+        )),
+    );
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(json(&replay), record);
+    assert_eq!((orders_placed(&served), fills(&served)), (1, 1));
+    assert_eq!(sandbox_orders(&served), 1);
+
+    // And a fresh action_id still acts.
+    let (status, body) = call_post(
+        orders,
+        ok,
+        Some((
+            "application/json",
+            r#"{"action_id":"buy-aapl-2","instrument_id":"AAPL.XNAS",
+                "side":"BUY","type":"LIMIT","quantity":"5","price":"200.00"}"#,
+        )),
+    );
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(json(&body)["outcome"]["status"], "ACCEPTED");
+    assert_eq!(orders_placed(&served), 2);
+
+    served.registry.stop_all();
 }

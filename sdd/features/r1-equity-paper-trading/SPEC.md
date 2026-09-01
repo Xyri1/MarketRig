@@ -72,7 +72,7 @@ One NautilusTrader **cash** account with netting positions per desk, created wit
 
 Fee rates by market (R1-4, `ponytail:` ceiling recorded there): `US` 0 bp, `HK` 11 bp, `CN` 3 bp per side.
 
-The synthesized book (per D76): both sides equal the last observation at the instrument's precision, both sizes one lot. Everything that exposes the book says `book_synthesized: true`. A market order therefore fills at last; a limit order rests until last crosses it; round trips cost only fees.
+The synthesized book (per D76): both sides equal the last observation at the instrument's precision, both sizes one lot. Everything that exposes the book says `book_synthesized: true`. A market order therefore fills at last for up to the displayed one-lot size — a larger quantity may fill in several parts stepping past last, the sandbox's own matching physics, which the recorded fills expose; a limit order rests until last crosses it; round trips cost only fees.
 
 ### 4.2 Order validation
 
@@ -83,13 +83,13 @@ The synthesized book (per D76): both sides equal the last observation at the ins
   "side": "BUY", "type": "MARKET", "quantity": "100", "price": null }
 ```
 
-The daemon validates **form**, and nowhere else validates anything (per D4): `action_id` matches `[a-z0-9-]{1,64}` and is new for the desk (a repeat replays, §6); the instrument is cataloged; `side` is `BUY | SELL`, `type` is `MARKET | LIMIT`; `quantity` is a positive multiple of the lot; `price` is required for `LIMIT`, forbidden for `MARKET`, and a positive multiple of the tick — each failure `ORDER_INVALID`. Sufficiency is the sandbox's judgment, not the daemon's (per D38, R1-4): a sandbox refusal of any kind — insufficient balance, a sell beyond the held quantity, or any other denial — answers `ORDER_REJECTED` with the sandbox's own reason in the message. Time in force is GTC and implicit. Cancel takes the resting order's `client_order_id` plus its own `action_id`; an unknown or already-terminal order answers `ORDER_NOT_FOUND`.
+The daemon validates **form**, and nowhere else validates anything (per D4): `action_id` matches `[a-z0-9-]{1,64}` and is new for the desk (a repeat replays, §6); the instrument is cataloged; `side` is `BUY | SELL`, `type` is `MARKET | LIMIT`; `quantity` is a positive multiple of the lot; `price` is required for `LIMIT`, forbidden for `MARKET`, and a positive multiple of the tick — each failure `ORDER_INVALID`. Sufficiency is the trading node's judgment, never the daemon's (per D38, R1-4) — in the pinned crates the balance and notional checks live in the node's risk engine, ahead of the sandbox's matching: a refusal of any kind — insufficient balance, a sell beyond the held quantity, or any other denial — answers `ORDER_REJECTED` with the node's own reason in the message. Time in force is GTC and implicit. Cancel takes the resting order's `client_order_id` — which is the submit's own `action_id`, reused as the client order identifier — plus its own `action_id`; an unknown or already-terminal order answers `ORDER_NOT_FOUND`.
 
 Submission is synchronous through the sandbox: the route answers after the sandbox accepts (and, for a marketable order, fills) or refuses. Orders on a desk that is not `READY` answer `DESK_NOT_READY`.
 
 ### 4.3 Node lifecycle and restoration (R1-6)
 
-A desk's node starts on its first market-plane operation after daemon start, on its own OS thread with a current-thread Tokio runtime (root §12.1). Start order: assert precision → build node (the data client is registered on the builder, which is where NautilusTrader constructs clients) → load catalog instruments into the cache → run restoration from `book_snapshots` (rebuild account and positions; re-place resting limit orders under their **original client order identifiers**) → subscribe the catalog, the data engine starting the client on the node thread where the data-event sender is taken → append `TRADING_NODE_STARTED`. A start failure appends `TRADING_NODE_FAILED`, answers `MARKET_UNAVAILABLE` to market-plane operations for that desk, blocks nothing else, and the next operation may retry the start. Daemon shutdown stops every node inside root §4.6's bound.
+A desk's node starts on its first market-plane operation after daemon start, on its own OS thread with a current-thread Tokio runtime (root §12.1). Start order: assert precision → build node (the data client is registered on the builder, which is where NautilusTrader constructs clients) → load catalog instruments into the cache → run the node: the data engine starts the client on the node thread where the data-event sender is taken, the catalog is subscribed, and the sandbox clients connect and seed the venue accounts → run restoration from `book_snapshots` before the node is published to any caller (rebuild account and positions; re-place resting limit orders under their **original client order identifiers** — only a running execution engine can hand a resting order to a matching engine) → append `TRADING_NODE_STARTED`. A start failure appends `TRADING_NODE_FAILED`, answers `MARKET_UNAVAILABLE` to market-plane operations for that desk, blocks nothing else, and the next operation may retry the start. Daemon shutdown stops every node inside root §4.6's bound.
 
 ## 5. Durable schema (R1-5)
 
@@ -163,7 +163,7 @@ Migration 2 also widens `operational_events.kind` with `TRADING_NODE_STARTED` an
 
 ## 6. Actions, replay, and the evaluation queue
 
-An accepted mutating command inserts its `trading_actions` row **before** the sandbox sees the order, in its own unit; the outcome lands on the row when the command answers. A repeated `(desk_id, action_id)` returns the stored outcome with `200` and acts on nothing — that is the whole idempotency contract (R1-8, root §12.3). Every action carries `source: SESSION` in R1; trigger attribution widens the vocabulary in R2 by migration.
+An accepted mutating command inserts its `trading_actions` row **before** the sandbox sees the order, in its own unit; the outcome lands on the row when the command answers. A repeated `(desk_id, action_id)` returns the stored outcome with `200` and acts on nothing — that is the whole idempotency contract (R1-8, root §12.3), and it holds for refused actions too: the original may have answered `ORDER_REJECTED`, while its repeat answers `200` with the stored record — the record, not the original status code, is the contract. Every action carries `source: SESSION` in R1; trigger attribution widens the vocabulary in R2 by migration.
 
 A fill that carries the netting position through zero closes one cycle (root §12.4): one unit inserts the `position_cycles` row and its `prompts` row and rewrites the snapshot. The prompt payload:
 
