@@ -485,6 +485,11 @@ pub fn open_positions(node: &Node) -> Result<Vec<Value>, NodeError> {
 /// instrument's own price precision — the same precision the position itself
 /// carries — rather than emitted as a float. Nothing here is recalculated
 /// (per D38).
+///
+/// ponytail: `average_open_price` is therefore a nautilus-owned float *formatted*
+/// as decimal text, so it inherits whatever rounding that `f64` already carries;
+/// MarketRig never recomputes it. The upgrade path is reading the decimal
+/// directly if nautilus ever exposes one.
 fn position_projection(position: &Position) -> Value {
     let precision = position.price_precision as usize;
     let mut value = json!({
@@ -960,6 +965,10 @@ fn capture_order(desk_id: &str, store: &Store, cache: &Rc<RefCell<Cache>>, event
             fill.order_side.to_string(),
             fill.last_qty.to_string(),
             fill.last_px.to_string(),
+            // ponytail: with the explicit fee model the sandbox is configured
+            // with, nautilus always reports a commission; the "0" exists only
+            // because `fills.commission` is STRICT NOT NULL. The upgrade path is
+            // a nullable column if a legitimate `None` ever appears.
             fill.commission
                 .map_or_else(|| "0".to_string(), |money| money.as_decimal().to_string()),
             fill.currency.code.to_string(),
@@ -1109,6 +1118,10 @@ fn cycle_of(closed: &PositionClosed, cache: &Cache, payload: &str) -> Cycle {
         instrument_id: closed.instrument_id.to_string(),
         opened_at_ns: closed.ts_opened.as_u64() as i64,
         closed_at_ns: closed.ts_closed.unwrap_or(closed.ts_event).as_u64() as i64,
+        // ponytail: a close nautilus reports always carries a realized figure;
+        // the "0" exists only because `position_cycles.realized_pnl` is STRICT
+        // NOT NULL. The upgrade path is a nullable column if a legitimate `None`
+        // ever appears.
         realized_pnl: closed
             .realized_pnl
             .map_or_else(|| "0".to_string(), |money| money.as_decimal().to_string()),
@@ -1401,6 +1414,80 @@ fn cycle_and_prompt_atomic() {
         }),
         "the §6 prompt payload, field for field"
     );
+
+    // A second round trip on the same instrument. NautilusTrader's NETTING
+    // position id is `{instrument_id}-{strategy_id}` and is *reused* once a
+    // position closes, so one id spans every round trip and each close must
+    // still land its own cycle and its own prompt (§5, §6).
+    use std::sync::Arc;
+
+    use crate::feed::{FeedBase, MarketState};
+
+    let aapl = catalog::find("AAPL.XNAS").unwrap();
+    let (base, _hits) = crate::feed::scripted_server(vec![(
+        200,
+        crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let traded = crate::node::seeded_desk(&store, "beta");
+    let registry = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(FeedBase::standin(base)),
+    );
+    registry.ensure(&traded).expect("the node starts");
+    crate::node::within(10, "the first observation", || {
+        registry.market().read(aapl, now_ns()).sequence == 1
+    });
+
+    for round in 1..=2 {
+        for (action, side) in [("buy", "BUY"), ("sell", "SELL")] {
+            submit(
+                &store,
+                &registry,
+                &traded,
+                &format!(
+                    r#"{{"action_id":"{action}-aapl-{round}","instrument_id":"AAPL.XNAS",
+                        "side":"{side}","type":"MARKET","quantity":"10","price":null}}"#
+                ),
+            )
+            .unwrap_or_else(|e| panic!("round {round}'s {action} is accepted: {e}"));
+        }
+    }
+
+    let cycles_of = |desk: String| -> Vec<(String, String)> {
+        store
+            .call(move |conn| {
+                conn.prepare(
+                    "SELECT id, position_id FROM position_cycles \
+                     WHERE desk_id = ?1 ORDER BY closed_at_ns, id",
+                )?
+                .query_map([desk], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+            })
+            .unwrap()
+    };
+    crate::node::within(10, "both closes are captured", || {
+        cycles_of(traded.clone()).len() == 2
+    });
+    let cycles = cycles_of(traded.clone());
+    assert_eq!(
+        cycles[0].1, cycles[1].1,
+        "NETTING reuses the position id across round trips"
+    );
+    assert_ne!(cycles[0].0, cycles[1].0, "each close is its own cycle");
+
+    let desk_prompts = traded.clone();
+    let prompts: Vec<(String, String)> = store
+        .call(move |conn| {
+            conn.prepare("SELECT id, state FROM prompts WHERE desk_id = ?1")?
+                .query_map([desk_prompts], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(prompts.len(), 2, "one evaluation prompt per cycle");
+    assert_ne!(prompts[0].0, prompts[1].0, "each cycle queued its own");
+    assert!(prompts.iter().all(|(_, state)| state == "QUEUED"));
+    registry.stop_all();
 }
 
 #[cfg(test)]

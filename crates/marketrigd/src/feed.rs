@@ -639,16 +639,31 @@ async fn retry_on_429_bounded() {
 
     // Nine straight 429s: the client stops at eight, the observation stands.
     let (base, hits) = scripted_server(vec![(429, String::new()); 9]);
+    let started = std::time::Instant::now();
     let error = ChartClient::new(base)
         .unwrap()
         .fetch(entry.yahoo_symbol)
         .await
         .expect_err("exhaustion is a failure, never a substituted price");
+    let elapsed = started.elapsed();
     assert!(error.contains("429"), "{error}");
     assert_eq!(
         hits.load(Ordering::SeqCst),
         8,
         "the bound is eight attempts"
+    );
+    // Eight attempts are seven waits apart, so the run cannot be quicker than
+    // that — the spacing is the other half of the §2.1 policy, and the policy is
+    // the literal pair, not whatever the constants happen to say.
+    assert_eq!(RETRY_ATTEMPTS, 8);
+    assert_eq!(RETRY_DELAY, Duration::from_millis(400));
+    assert!(
+        elapsed >= RETRY_DELAY * 7,
+        "eight attempts must be {RETRY_DELAY:?} apart, not {elapsed:?}"
+    );
+    assert!(
+        elapsed < RETRY_DELAY * 14,
+        "and the retries must not stretch: {elapsed:?}"
     );
     state.mark_degraded(entry.instrument_id);
     let read = state.read(entry, 2_000_000_000);

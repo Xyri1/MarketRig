@@ -142,7 +142,9 @@ CREATE TABLE position_cycles (
   realized_pnl TEXT NOT NULL,                     -- net of fees (root §12.4)
   currency TEXT NOT NULL,
   payload_version INTEGER NOT NULL, payload TEXT NOT NULL,
-  UNIQUE (desk_id, position_id)
+  -- NETTING reuses one position id per instrument across cycles, so the
+  -- duplicate guard includes the close instant.
+  UNIQUE (desk_id, position_id, closed_at_ns)
 ) STRICT;
 
 CREATE TABLE prompts (
@@ -194,7 +196,7 @@ All routes behind the R0 bearer and envelope. Live-state routes (node-backed) st
 
 The ActionRecord is the `trading_actions` row's JSON: `action_id`, `id`, `kind`, `created_at_ns`, and the outcome (for a submit, the order's current projection including `client_order_id`). History routes return complete newest-first lists; pagination stays deferred (root §18).
 
-Element shapes, one order shape everywhere: an **order** — live, in history, and as an ActionRecord outcome — is `client_order_id`, `instrument_id`, `side`, `type`, `quantity`, `time_in_force`, `status`, `filled_quantity`, `ts_last_ns`, `venue_order_id`, with `price` present on `LIMIT` and `average_price` when filled (enum text is NautilusTrader's own); a **book** entry is the §2.3 observation plus `bid_price`/`ask_price` at the instrument's precision and `bid_size`/`ask_size` of one lot (the §2.3 omission rule covers these four when unobserved); a **position** is `position_id`, `instrument_id`, `side`, `quantity`, `average_open_price` at the instrument's price precision, `currency`, `opened_at_ns`, `ts_last_ns`, and `realized_pnl` when the node reports one; **fills** and **cycles** carry their §5 normalized columns plus `id` and times. Money is decimal text at currency precision throughout.
+Element shapes, one order shape everywhere: an **order** — live, in history, and as an ActionRecord outcome — is `client_order_id`, `instrument_id`, `side`, `type`, `quantity`, `time_in_force`, `status`, `filled_quantity`, `ts_last_ns`, with `venue_order_id` once the venue has named it, `price` present on `LIMIT`, and `average_price` when filled (enum text is NautilusTrader's own); a **book** entry is the §2.3 observation plus `bid_price`/`ask_price` at the instrument's precision and `bid_size`/`ask_size` of one lot (the §2.3 omission rule covers these four when unobserved); a **position** is `position_id`, `instrument_id`, `side`, `quantity`, `average_open_price` at the instrument's price precision, `currency`, `opened_at_ns`, `ts_last_ns`, and `realized_pnl` when the node reports one; **fills** and **cycles** carry their §5 normalized columns plus `id` and times. Money is decimal text at currency precision throughout.
 
 Readiness follows the D4 plane split: the five routes §8 proxies as MCP resources answer `DESK_NOT_READY` off a desk that is not `READY` (the same gate as submit); the three history routes are daemon-local, refuse only an unknown desk, and answer their possibly-empty listings in any desk state. Only quotes, book, positions, and orders are node-backed: `market/instruments` is the compiled catalog and history is SQLite, so neither starts a node and both keep answering when a desk's node cannot start.
 

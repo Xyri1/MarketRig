@@ -46,7 +46,11 @@ CREATE TABLE position_cycles (
   realized_pnl TEXT NOT NULL,                     -- net of fees (root §12.4)
   currency TEXT NOT NULL,
   payload_version INTEGER NOT NULL, payload TEXT NOT NULL,
-  UNIQUE (desk_id, position_id)
+  -- NautilusTrader's netting position id is `{instrument_id}-{strategy_id}` and
+  -- is reused after a close, so one id spans every round trip on an instrument;
+  -- the close instant is what makes a cycle unique, and the pair still refuses
+  -- capturing the same close twice.
+  UNIQUE (desk_id, position_id, closed_at_ns)
 ) STRICT;
 
 CREATE TABLE prompts (

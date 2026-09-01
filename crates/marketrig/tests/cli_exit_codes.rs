@@ -1,96 +1,14 @@
 //! `cli::exit_codes` — the 0/1/2/3 mapping of feature SPEC §8 against a fake endpoint.
 //!
-//! The fake endpoint is a plain `TcpListener` serving canned responses by
-//! "METHOD /path", so the CLI is exercised through its real binary over real
+//! The fake endpoint (`common`) is a plain `TcpListener` serving canned responses
+//! by "METHOD /path", so the CLI is exercised through its real binary over real
 //! HTTP with only `MARKETRIG_TEST_DATA_ROOT` pointing at a scratch root.
 
-use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::path::Path;
-use std::process::{Command, Output};
 
-/// Serve canned responses until the test process exits.
-///
-/// ponytail: the thread is never joined — the listener dies with the test
-/// binary. Add a shutdown signal only if a test ever needs the port back.
-fn fake_daemon(respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 'static) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake endpoint");
-    let port = listener.local_addr().expect("local addr").port();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).is_err() {
-                continue;
-            }
-            let mut length = 0usize;
-            let mut authorization = String::new();
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
-                    break;
-                }
-                let lower = header.to_ascii_lowercase();
-                if let Some(value) = lower.strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap_or(0);
-                }
-                if lower.starts_with("authorization:") {
-                    authorization = header["authorization:".len()..].trim().to_string();
-                }
-            }
-            if length > 0 {
-                let mut body = vec![0u8; length];
-                let _ = reader.read_exact(&mut body);
-            }
-            let mut parts = request_line.split_whitespace();
-            let route = format!(
-                "{} {}",
-                parts.next().unwrap_or(""),
-                parts.next().unwrap_or("")
-            );
-            let (status, body) = respond(&route, &authorization);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.flush();
-        }
-    });
-    port
-}
+mod common;
 
-const DAEMON_UUID: &str = "01997f00-0000-7000-8000-000000000001";
-
-fn health_ok() -> &'static str {
-    r#"{"daemon_uuid":"01997f00-0000-7000-8000-000000000001","version":"0.1.0","started_at_ns":1}"#
-}
-
-fn write_endpoint(root: &Path, port: u16, daemon_uuid: &str) {
-    let runtime = root.join("data").join("runtime");
-    std::fs::create_dir_all(&runtime).expect("create runtime dir");
-    std::fs::write(
-        runtime.join("endpoint.json"),
-        format!(
-            r#"{{"port":{port},"credential":"{}","daemon_uuid":"{daemon_uuid}","pid":1,"started_at_ns":1}}"#,
-            "a".repeat(64)
-        ),
-    )
-    .expect("write endpoint.json");
-}
-
-fn marketrig(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_marketrig"))
-        .args(args)
-        .env("MARKETRIG_TEST_DATA_ROOT", root)
-        .output()
-        .expect("run marketrig")
-}
-
-fn code(output: &Output) -> i32 {
-    output.status.code().expect("exit code")
-}
+use common::{code, fake_daemon, health_ok, marketrig, write_endpoint};
 
 #[test]
 fn success_exits_zero() {
@@ -103,7 +21,7 @@ fn success_exits_zero() {
         ),
         _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let human = marketrig(root.path(), &["desk", "list"]);
     assert_eq!(code(&human), 0, "{human:?}");
@@ -138,7 +56,7 @@ fn show_resolves_a_name_through_the_desk_list() {
             r#"{"code":"DESK_NOT_FOUND","message":"No such desk."}"#,
         ),
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let by_name = marketrig(root.path(), &["desk", "show", "alpha"]);
     assert_eq!(code(&by_name), 0, "{by_name:?}");
@@ -161,7 +79,7 @@ fn daemon_error_exits_one() {
         ),
         _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let human = marketrig(root.path(), &["desk", "create", "alpha"]);
     assert_eq!(code(&human), 1, "{human:?}");
@@ -211,7 +129,7 @@ fn unreachable_port_exits_three() {
     let closed = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = closed.local_addr().expect("addr").port();
     drop(closed);
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let output = marketrig(root.path(), &["desk", "list"]);
     assert_eq!(code(&output), 3, "{output:?}");
@@ -226,7 +144,7 @@ fn rejected_credential_exits_three() {
             r#"{"code":"UNAUTHORIZED","message":"Missing or wrong credential."}"#,
         )
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let output = marketrig(root.path(), &["desk", "list"]);
     assert_eq!(code(&output), 3, "{output:?}");
@@ -249,7 +167,7 @@ fn daemon_uuid_mismatch_exits_three() {
         ),
         _ => (200, r#"{"desks":[]}"#),
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let output = marketrig(root.path(), &["desk", "list"]);
     assert_eq!(code(&output), 3, "{output:?}");
@@ -275,7 +193,7 @@ fn bearer_credential_is_sent_and_never_printed() {
             _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
         }
     });
-    write_endpoint(root.path(), port, DAEMON_UUID);
+    write_endpoint(root.path(), port);
 
     let output = marketrig(root.path(), &["--json", "desk", "list"]);
     assert_eq!(code(&output), 0, "{output:?}");

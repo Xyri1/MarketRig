@@ -35,6 +35,10 @@ pub fn run() -> ExitCode {
 }
 
 fn start() -> Result<daemon::Startup, (&'static str, String)> {
+    // The precision the whole build depends on, asserted before the daemon does
+    // anything at all — a node start is far too late to learn a `high-precision`
+    // feature reached the graph (per D39, R1-4).
+    node::assert_precision();
     let roots = store::Roots::from_env().map_err(|e| ("INTERNAL", e.to_string()))?;
     roots
         .create_dirs()

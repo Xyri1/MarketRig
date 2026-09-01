@@ -67,7 +67,7 @@ Product boundary:
 Identity and state:
 
 - One desk is one trader identity (UUIDv7 plus immutable kebab name); runtimes and native sessions are replaceable. There is no `Run` entity and no `INACTIVE | IDLE | WORKING | WAITING` agent-status state machine.
-- Every desk-scoped operation carries the desk UUID end to end; desk-owned rows use composite `(desk_id, …)` foreign keys; the daemon has no process-global selected desk.
+- Every desk-scoped operation carries the desk UUID end to end; desk-owned rows are keyed and scoped by `desk_id` referencing `desks`; the daemon has no process-global selected desk.
 - `marketrigd` is the sole writer of authoritative state: SQLite through a thin binding, plain SQL, explicit `BEGIN IMMEDIATE`, WAL, `STRICT` tables, UUIDv7 text IDs, `*_ns` nanosecond instants, and decimal **text** for money — never `REAL`, never a float, never an ORM.
 - NautilusTrader computes every trading fact; MarketRig stores its payloads verbatim and never recalculates P&L, fees, or averages. The daemon consumes the `nautilus-*` Rust crates pinned in lockstep (`=0.62.0`), never the Python/PyO3 surface (per D39); the numeric precision feature is set explicitly and asserted at startup.
 - After a desk is `READY`, never rewrite agent-owned files (`AGENTS.md`, `.agents/skills/`); MarketRig reconciles only `CLAUDE.md` and the `.claude/skills` link.

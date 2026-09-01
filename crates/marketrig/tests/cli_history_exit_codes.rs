@@ -1,95 +1,18 @@
 //! `cli::history_exit_codes` — the `history` group's 0/1/2/3 mapping (feature
 //! SPEC `r1-equity-paper-trading` §9) against a fake endpoint.
 //!
-//! The fake endpoint is the R0 check's: a plain `TcpListener` serving canned
-//! responses by "METHOD /path", copied rather than shared because integration
-//! test binaries cannot import each other.
+//! The fake endpoint is the R0 check's, shared through `tests/common/mod.rs`: a
+//! plain `TcpListener` serving canned responses by "METHOD /path".
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
-use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
-/// Serve canned responses until the test process exits.
-///
-/// ponytail: the thread is never joined — the listener dies with the test
-/// binary. Add a shutdown signal only if a test ever needs the port back.
-fn fake_daemon(respond: impl Fn(&str) -> (u16, &'static str) + Send + 'static) -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake endpoint");
-    let port = listener.local_addr().expect("local addr").port();
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
-            let mut request_line = String::new();
-            if reader.read_line(&mut request_line).is_err() {
-                continue;
-            }
-            let mut length = 0usize;
-            loop {
-                let mut header = String::new();
-                if reader.read_line(&mut header).unwrap_or(0) == 0 || header.trim().is_empty() {
-                    break;
-                }
-                if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = value.trim().parse().unwrap_or(0);
-                }
-            }
-            if length > 0 {
-                let mut body = vec![0u8; length];
-                let _ = reader.read_exact(&mut body);
-            }
-            let mut parts = request_line.split_whitespace();
-            let route = format!(
-                "{} {}",
-                parts.next().unwrap_or(""),
-                parts.next().unwrap_or("")
-            );
-            let (status, body) = respond(&route);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.flush();
-        }
-    });
-    port
-}
+mod common;
 
-const DAEMON_UUID: &str = "01997f00-0000-7000-8000-000000000001";
+use common::{code, fake_daemon, health_ok, marketrig, write_endpoint};
+
 const DESK: &str = "01997f00-0000-7000-8000-00000000000a";
 
-fn health_ok() -> &'static str {
-    r#"{"daemon_uuid":"01997f00-0000-7000-8000-000000000001","version":"0.1.0","started_at_ns":1}"#
-}
-
 const FILLS: &str = r#"{"fills":[{"id":"f2","client_order_id":"o-2","trade_id":"t2","instrument_id":"0700.XHKG","side":"SELL","quantity":"100","price":"301.00","commission":"33.11","currency":"HKD","occurred_at_ns":400},{"id":"f1","client_order_id":"o-1","trade_id":"t1","instrument_id":"AAPL.XNAS","side":"BUY","quantity":"1","price":"191.20","commission":"0","currency":"USD","occurred_at_ns":300}]}"#;
-
-fn write_endpoint(root: &Path, port: u16) {
-    let runtime = root.join("data").join("runtime");
-    std::fs::create_dir_all(&runtime).expect("create runtime dir");
-    std::fs::write(
-        runtime.join("endpoint.json"),
-        format!(
-            r#"{{"port":{port},"credential":"{}","daemon_uuid":"{DAEMON_UUID}","pid":1,"started_at_ns":1}}"#,
-            "a".repeat(64)
-        ),
-    )
-    .expect("write endpoint.json");
-}
-
-fn marketrig(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_marketrig"))
-        .args(args)
-        .env("MARKETRIG_TEST_DATA_ROOT", root)
-        .output()
-        .expect("run marketrig")
-}
-
-fn code(output: &Output) -> i32 {
-    output.status.code().expect("exit code")
-}
 
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("utf-8 stdout")
@@ -98,7 +21,7 @@ fn stdout(output: &Output) -> String {
 #[test]
 fn history_exit_codes_zero_on_success() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route| match route {
+    let port = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (
             200,
@@ -166,7 +89,7 @@ fn history_exit_codes_zero_on_success() {
 #[test]
 fn history_exit_codes_one_on_unknown_desk() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route| match route {
+    let port = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (200, r#"{"desks":[]}"#),
         _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
@@ -184,7 +107,7 @@ fn history_exit_codes_one_on_unknown_desk() {
 #[test]
 fn history_exit_codes_one_on_daemon_error() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route| match route {
+    let port = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         _ => (
             409,

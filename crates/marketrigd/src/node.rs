@@ -598,6 +598,11 @@ struct ChartDataClient {
     chart: Option<ChartClient>,
     /// A stand-in feed lifts the calendar gate on cadence (§10.1, R1-9): the gate
     /// must tick at any wall-clock hour. Observations still label the real phase.
+    ///
+    /// ponytail: the test seam therefore polls on a cadence the real feed would
+    /// not — a stand-in run never exercises the CLOSED branch of [`next_delay`].
+    /// The upgrade path is a controllable clock behind [`phase`] if the gate ever
+    /// needs the real phase transitions rather than a bypass.
     assume_open: bool,
     market: Arc<MarketState>,
     cache: CacheView,
