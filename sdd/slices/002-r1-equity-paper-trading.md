@@ -19,7 +19,7 @@ Verified against crates.io and the crate sources on 2026-09-01. Chunk numbering,
 | `chrono-tz` | `=0.10.4` | marketrigd | the three IANA zones, DST-correct |
 | `rmcp` | `=3.2.0` | marketrig-mcp, acceptance | the line D4's wire evidence was gathered on, still newest today; server features in the adapter, client features in the harness — G19's own MCP client per D75 |
 
-Reused R0 pins: `axum =0.8.9` (the stand-in feed server inside `marketrig-acceptance`), `ureq =3.4.0` + `serde`/`serde_json` (the adapter's daemon calls, through the shared lib target below), `tokio =1.53.1` (`nautilus-network` wants `^1.53.1` — compatible).
+Reused R0 pins: `axum =0.8.9` (the stand-in feed server inside `marketrig-acceptance`), `ureq =3.4.0` + `serde`/`serde_json` (the adapter's daemon calls, through the shared lib target below), `tokio =1.53.1` (`nautilus-network` wants `^1.53.1` — compatible; gained the `time` feature at C10 for the retry backoff, recorded while Active as slice 001 did for `sync`).
 
 **Endpoint layer — replaced, not pinned** (the choice D76 left to plan time): `yahoo_finance_api` 5.0.0 compiles its chart URL in privately — no builder override, its mock server is `#[cfg(test)]`-internal — so the R1-9 seam cannot pass through it. The feed's endpoint layer is MarketRig's own thin chart client (URL construction plus serde parsing of the chart response) on the pinned reqwest line. R1-1, feature SPEC §1, and D76 record this in the same change as this slice.
 

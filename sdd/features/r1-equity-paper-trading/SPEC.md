@@ -17,7 +17,7 @@ New `marketrigd` modules mirror the check prefixes: `feed`, `catalog`, `node`, `
 One out-of-tree `DataClient` per node polls Yahoo's chart endpoint per catalog instrument:
 
 - once at subscription, whatever the phase — so a desk always has a last close to look at;
-- then, only while the instrument's market phase is `OPEN`: every **30 seconds**, tightened to every **10 seconds** while the desk holds an open order or a nonflat position in that instrument (R1-1);
+- then, only while the instrument's market phase is `OPEN`: every **30 seconds**, tightened to every **10 seconds** while the desk holds an open order or a nonflat position in that instrument (R1-1); while `CLOSED` the poller re-consults the calendar at the 30-second idle interval without polling;
 - HTTP 429: up to **8 attempts, 400 ms apart** (the spike-verified counts, per D76); exhaustion or any other failure leaves the last accepted observation standing and marks health `DEGRADED` — never a silent provider substitution (root §12.2);
 - the endpoint base URL is compiled in; `MARKETRIG_TEST_QUOTE_URL` (§10.1) is its only override.
 
@@ -45,7 +45,7 @@ Every read (REST §7, MCP §8) returns, per instrument:
   "book_synthesized": true }
 ```
 
-Health vocabulary: `LIVE` (the most recent poll cycle succeeded), `DEGRADED` (a failure since the last success; the shown observation is the last accepted one, aging), `UNAVAILABLE` (no observation ever accepted, or the desk's node is down — price fields are omitted). The feed declares no delay figure — verified 2026-09-01: `exchangeDataDelayedBy` is null on all three exchanges (R1-1) — so `source_time_ns` versus `received_at_ns` is the delay evidence, exposed rather than summarized.
+Health vocabulary: `LIVE` (the most recent poll cycle succeeded), `DEGRADED` (a failure since the last success; the shown observation is the last accepted one, aging), `UNAVAILABLE` (no observation ever accepted, or the desk's node is down — the omitted price fields are exactly `last`, `currency`, `source_time_ns`, `received_at_ns`, and `age_ms`; `sequence` reads 0 and the identity, `read_at_ns`, `market_phase`, `health`, and `book_synthesized` fields remain). The feed declares no delay figure — verified 2026-09-01: `exchangeDataDelayedBy` is null on all three exchanges (R1-1) — so `source_time_ns` versus `received_at_ns` is the delay evidence, exposed rather than summarized.
 
 ## 3. Instrument catalog (R1-2)
 
