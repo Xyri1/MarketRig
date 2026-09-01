@@ -1,0 +1,17 @@
+[package]
+name = "marketrig-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+clap.workspace = true
+marketrig = { path = "../marketrig" }
+# `server` carries the handler surface, `transport-io` the stdio transport.
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# The checks drive the real binary with rmcp's own client over a child process.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tempfile.workspace = true
