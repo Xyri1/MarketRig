@@ -3,3 +3,10 @@ name = "marketrig-acceptance"
 version.workspace = true
 edition.workspace = true
 publish = false
+
+# The gate drives public surfaces only (per R0-7): spawned binaries, the loopback
+# API, workspace files, and read-only SQLite. It never depends on marketrigd.
+[dev-dependencies]
+rusqlite.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
