@@ -1,3 +1,5 @@
-fn main() {
-    marketrigd::run();
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    marketrigd::run()
 }

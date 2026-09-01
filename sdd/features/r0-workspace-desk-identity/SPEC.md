@@ -99,7 +99,7 @@ Format (written by later milestones' launches; R0 defines and consumes it):
 { "children": [ { "pid": 123, "kind": "…", "args": ["…"], "daemon_uuid": "…", "launched_at_ns": 0 } ] }
 ```
 
-On macOS, recovery terminates a recorded child whose pid is alive **and** whose current command line still carries the recorded `args` (a shim may have replaced the executable path, per D73); a pid that is dead or whose command line no longer matches is left untouched. On Windows, records are discarded without a check. Either way every record is dropped and each outcome — `TERMINATED`, `NOT_RUNNING`, `PID_RECYCLED`, `DISCARDED` — lands in the `RECOVERY` payload.
+On macOS, recovery terminates a recorded child whose pid is alive **and** whose current command line still carries the recorded `args` (a shim may have replaced the executable path, per D73); a pid that is dead or whose command line no longer matches is left untouched. A record whose `args` list is empty carries no identity evidence and never matches — it is treated as `PID_RECYCLED`, never terminated. On Windows, records are discarded without a check. Either way every record is dropped and each outcome — `TERMINATED`, `NOT_RUNNING`, `PID_RECYCLED`, `DISCARDED` — lands in the `RECOVERY` payload.
 
 ## 5. Endpoint discovery and authentication
 
