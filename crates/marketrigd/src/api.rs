@@ -2,7 +2,8 @@
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §6 (routes,
 //! `Desk` resource, error envelope), §4.2 (`POST /quit`), §5.2 (`GET /health`
-//! serves client verification).
+//! serves client verification); `sdd/features/r1-equity-paper-trading/SPEC.md`
+//! §7 (the market-plane and history additions).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::desk::{self, Desk, DeskError};
-use crate::store::Store;
+use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
 
 /// Everything the routes need. The daemon builds one and hands it to
@@ -43,11 +44,21 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks", get(list).post(create))
         .route("/desks/{desk_id}", get(show))
         .route("/desks/{desk_id}/retry", post(retry))
-        .route("/desks/{desk_id}/orders", post(submit_order))
+        .route("/desks/{desk_id}/market/instruments", get(instruments))
+        .route("/desks/{desk_id}/market/quotes", get(quotes))
+        .route("/desks/{desk_id}/market/book", get(book))
+        .route("/desks/{desk_id}/positions", get(positions))
+        .route(
+            "/desks/{desk_id}/orders",
+            get(open_orders).post(submit_order),
+        )
         .route(
             "/desks/{desk_id}/orders/{client_order_id}/cancel",
             post(cancel_order),
         )
+        .route("/desks/{desk_id}/history/orders", get(history_orders))
+        .route("/desks/{desk_id}/history/fills", get(history_fills))
+        .route("/desks/{desk_id}/history/cycles", get(history_cycles))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -176,6 +187,94 @@ async fn retry(
     Path(desk_id): Path<String>,
 ) -> Result<Json<Desk>, DeskError> {
     Ok(Json(desk::retry(&state.store, &desk_id)?))
+}
+
+// The market-plane reads (R1 feature SPEC §7). The catalog is compiled in and the
+// history tables are the daemon's own, so those routes start no node; every
+// live-state read starts the desk's node lazily (§4.3) and answers
+// `MARKET_UNAVAILABLE` when it cannot. The market plane needs a READY desk, the
+// same rule the order routes carry (§4.2).
+
+async fn instruments(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TradeError> {
+    trade::require_ready(&state.store, &desk_id)?;
+    Ok(Json(
+        serde_json::json!({ "instruments": crate::catalog::ENTRIES }),
+    ))
+}
+
+async fn quotes(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TradeError> {
+    trade::require_ready(&state.store, &desk_id)?;
+    state.registry.ensure(&desk_id)?;
+    let quotes = state.registry.market().read_all(store::now_ns());
+    Ok(Json(serde_json::json!({ "quotes": quotes })))
+}
+
+async fn book(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TradeError> {
+    trade::require_ready(&state.store, &desk_id)?;
+    state.registry.ensure(&desk_id)?;
+    let book = state.registry.market().book_all(store::now_ns());
+    Ok(Json(serde_json::json!({ "book": book })))
+}
+
+async fn positions(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TradeError> {
+    trade::require_ready(&state.store, &desk_id)?;
+    let node = state.registry.ensure(&desk_id)?;
+    Ok(Json(
+        serde_json::json!({ "positions": trade::open_positions(&node)? }),
+    ))
+}
+
+async fn open_orders(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TradeError> {
+    trade::require_ready(&state.store, &desk_id)?;
+    let node = state.registry.ensure(&desk_id)?;
+    Ok(Json(
+        serde_json::json!({ "orders": trade::open_orders(&node)? }),
+    ))
+}
+
+// The history group (§7): complete newest-first projections over the desk's own
+// event tables, which exist whatever the desk's state.
+
+async fn history_orders(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    desk::get(&state.store, &desk_id)?;
+    let orders = trade::history_orders(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "orders": orders })))
+}
+
+async fn history_fills(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    desk::get(&state.store, &desk_id)?;
+    let fills = trade::history_fills(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "fills": fills })))
+}
+
+async fn history_cycles(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    desk::get(&state.store, &desk_id)?;
+    let cycles = trade::history_cycles(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "cycles": cycles })))
 }
 
 // The two mutating market-plane routes (R1 feature SPEC §7). The body arrives as
@@ -623,6 +722,340 @@ async fn action_replay() {
     assert_eq!(status, 201, "{body}");
     assert_eq!(json(&body)["outcome"]["status"], "ACCEPTED");
     assert_eq!(orders_placed(&served), 2);
+
+    served.registry.stop_all();
+}
+
+// ---------------------------------------------------------------------------
+// api::market_codes (R1 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+/// The §7 reads: each answers its documented body key, and every documented
+/// error path answers the one envelope with its documented code. Driven through
+/// the real routes against one real node on the scripted feed.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn market_codes() {
+    let (feed, _hits) = crate::feed::scripted_server(vec![(
+        200,
+        crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let served = serve_with(Some(feed)).await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+    let create = |name: &str| {
+        let (status, body) = call_post(
+            url("/desks"),
+            ok,
+            Some(("application/json", &format!(r#"{{"name":"{name}"}}"#))),
+        );
+        assert_eq!(status, 201, "{body}");
+        json(&body)
+    };
+
+    let alpha = create("alpha")["id"].as_str().unwrap().to_string();
+    // A planted file leaves this desk FAILED: not READY, so not tradable.
+    std::fs::write(served.desks_home.join("beta"), "not a directory").unwrap();
+    let beta = create("beta");
+    assert_eq!(beta["state"], "FAILED");
+    let beta = beta["id"].as_str().unwrap().to_string();
+    // READY, but its book snapshot carries a payload version this build cannot
+    // restore, so its node never starts (the §4.3 start failure).
+    let gamma = create("gamma")["id"].as_str().unwrap().to_string();
+    let poisoned = gamma.clone();
+    served
+        .store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO book_snapshots VALUES (?1, 99, '{}', 3000)",
+                [poisoned],
+            )
+        })
+        .unwrap();
+
+    // The node-backed reads (§7) and the daemon-local ones.
+    let live = ["/market/quotes", "/market/book", "/positions", "/orders"];
+    let local = [
+        "/market/instruments",
+        "/history/orders",
+        "/history/fills",
+        "/history/cycles",
+    ];
+    let paths: Vec<&str> = live.iter().chain(local.iter()).copied().collect();
+
+    // --- Every new route sits behind the bearer ----------------------------
+    for path in &paths {
+        for bearer in [None, Some("wrong-credential")] {
+            expect_envelope(
+                call_get(url(&format!("/desks/{alpha}{path}")), bearer),
+                401,
+                "UNAUTHORIZED",
+            );
+        }
+    }
+
+    // --- An unknown desk is R0's own refusal, on every route ---------------
+    for path in &paths {
+        for id in ["01999999-0000-7000-8000-0000000000ff", "not-a-uuid"] {
+            expect_envelope(
+                call_get(url(&format!("/desks/{id}{path}")), ok),
+                404,
+                "DESK_NOT_FOUND",
+            );
+        }
+    }
+
+    // --- A desk that is not READY refuses the market plane (§4.2) ----------
+    for path in live.iter().chain(["/market/instruments"].iter()) {
+        expect_envelope(
+            call_get(url(&format!("/desks/{beta}{path}")), ok),
+            409,
+            "DESK_NOT_READY",
+        );
+    }
+    expect_envelope(
+        call_post(
+            url(&format!("/desks/{beta}/orders")),
+            ok,
+            Some((
+                "application/json",
+                r#"{"action_id":"a-1","instrument_id":"AAPL.XNAS",
+                    "side":"BUY","type":"MARKET","quantity":"1","price":null}"#,
+            )),
+        ),
+        409,
+        "DESK_NOT_READY",
+    );
+    // History is daemon-local and answers a FAILED desk its (empty) rows.
+    for what in ["orders", "fills", "cycles"] {
+        let (status, body) = call_get(url(&format!("/desks/{beta}/history/{what}")), ok);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json(&body)[what].as_array().map(Vec::len), Some(0));
+    }
+
+    // --- A node that will not start is MARKET_UNAVAILABLE, and only there ---
+    for path in &live {
+        expect_envelope(
+            call_get(url(&format!("/desks/{gamma}{path}")), ok),
+            503,
+            "MARKET_UNAVAILABLE",
+        );
+    }
+    for path in &local {
+        assert_eq!(call_get(url(&format!("/desks/{gamma}{path}")), ok).0, 200);
+    }
+
+    // --- The catalog (§3) ---------------------------------------------------
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/market/instruments")), ok);
+    assert_eq!(status, 200);
+    let instruments = json(&body)["instruments"].clone();
+    assert_eq!(
+        instruments.as_array().map(Vec::len),
+        Some(crate::catalog::ENTRIES.len())
+    );
+    assert_eq!(instruments[0]["instrument_id"], "AAPL.XNAS");
+    assert_eq!(instruments[0]["yahoo_symbol"], "AAPL");
+    assert_eq!(instruments[0]["price_increment"], "0.01");
+    assert_eq!(instruments[0]["lot_size"], 1);
+
+    // --- Quotes: the first read starts the node (§4.3), and shows §2.3 ------
+    let quotes_of = |desk: &str| {
+        let (status, body) = call_get(url(&format!("/desks/{desk}/market/quotes")), ok);
+        assert_eq!(status, 200, "{body}");
+        json(&body)["quotes"].clone()
+    };
+    crate::node::within(10, "the first observation through the route", || {
+        quotes_of(&alpha)[0]["sequence"] == serde_json::json!(1)
+    });
+    let quotes = quotes_of(&alpha);
+    assert_eq!(
+        quotes.as_array().map(Vec::len),
+        Some(crate::catalog::ENTRIES.len())
+    );
+    let aapl = quotes[0].clone();
+    assert_eq!(aapl["instrument_id"], "AAPL.XNAS");
+    assert_eq!(aapl["provider"], "yahoo");
+    assert_eq!(aapl["venue"], "XNAS");
+    assert_eq!(aapl["last"], "316.85");
+    assert_eq!(aapl["currency"], "USD");
+    assert_eq!(aapl["health"], "LIVE");
+    assert_eq!(aapl["book_synthesized"], true);
+    for field in [
+        "source_time_ns",
+        "received_at_ns",
+        "read_at_ns",
+        "age_ms",
+        "sequence",
+        "market_phase",
+    ] {
+        assert!(!aapl[field].is_null(), "§2.3 field {field}: {aapl}");
+    }
+
+    // --- The synthesized book (§4.1): bid = ask = last, one lot a side ------
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/market/book")), ok);
+    assert_eq!(status, 200);
+    let top = json(&body)["book"][0].clone();
+    assert_eq!(top["instrument_id"], "AAPL.XNAS");
+    assert_eq!(top["bid_price"], "316.85");
+    assert_eq!(top["ask_price"], "316.85");
+    assert_eq!(top["bid_size"], "1");
+    assert_eq!(top["ask_size"], "1");
+    assert_eq!(top["book_synthesized"], true);
+    // An instrument nothing has observed carries no price or size fields at
+    // all, exactly as §2.3 omits them.
+    let dark = crate::feed::MarketState::new().book_all(1_788_206_401_000_000_000);
+    let unobserved = serde_json::to_value(&dark[0]).unwrap();
+    assert_eq!(unobserved["health"], "UNAVAILABLE");
+    for field in [
+        "last",
+        "currency",
+        "bid_price",
+        "ask_price",
+        "bid_size",
+        "ask_size",
+        "age_ms",
+    ] {
+        assert!(unobserved.get(field).is_none(), "{field}: {unobserved}");
+    }
+    assert_eq!(unobserved["book_synthesized"], true);
+    assert_eq!(unobserved["sequence"], 0);
+
+    // --- Live positions and open orders (§7), through one round trip -------
+    let orders_url = url(&format!("/desks/{alpha}/orders"));
+    let submit =
+        |body: &str| json(&call_post(orders_url.clone(), ok, Some(("application/json", body))).1);
+    // One lot: the synthesized book is one lot a side (§4.1), so this fills whole.
+    let filled = submit(
+        r#"{"action_id":"buy-aapl-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"MARKET","quantity":"1","price":null}"#,
+    );
+    assert_eq!(filled["outcome"]["status"], "FILLED", "{filled}");
+    let resting = submit(
+        r#"{"action_id":"rest-aapl-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"LIMIT","quantity":"5","price":"200.00"}"#,
+    );
+    assert_eq!(resting["outcome"]["status"], "ACCEPTED", "{resting}");
+
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/positions")), ok);
+    assert_eq!(status, 200);
+    let positions = json(&body)["positions"].clone();
+    assert_eq!(positions.as_array().map(Vec::len), Some(1), "{positions}");
+    assert_eq!(positions[0]["instrument_id"], "AAPL.XNAS");
+    assert_eq!(positions[0]["side"], "LONG");
+    assert_eq!(positions[0]["quantity"], "1");
+    assert_eq!(positions[0]["average_open_price"], "316.85");
+    assert_eq!(positions[0]["currency"], "USD");
+    assert!(!positions[0]["opened_at_ns"].is_null());
+
+    let (status, body) = call_get(orders_url.clone(), ok);
+    assert_eq!(status, 200);
+    let open = json(&body)["orders"].clone();
+    assert_eq!(open.as_array().map(Vec::len), Some(1), "{open}");
+    assert_eq!(open[0]["client_order_id"], "rest-aapl-1");
+    assert_eq!(open[0]["status"], "ACCEPTED");
+    assert_eq!(open[0]["price"], "200.00");
+
+    // Flat again: the closing fill closes the cycle (§6).
+    let sold = submit(
+        r#"{"action_id":"sell-aapl-1","instrument_id":"AAPL.XNAS",
+            "side":"SELL","type":"MARKET","quantity":"1","price":null}"#,
+    );
+    assert_eq!(sold["outcome"]["status"], "FILLED", "{sold}");
+    let positions = json(&call_get(url(&format!("/desks/{alpha}/positions")), ok).1)["positions"]
+        .as_array()
+        .map(Vec::len);
+    assert_eq!(positions, Some(0), "the desk is flat again");
+
+    // --- History: complete, newest first, over the event tables (§5) --------
+    let history = |what: &str| {
+        let (status, body) = call_get(url(&format!("/desks/{alpha}/history/{what}")), ok);
+        assert_eq!(status, 200, "{body}");
+        json(&body)[what].clone()
+    };
+    let orders = history("orders");
+    assert_eq!(orders.as_array().map(Vec::len), Some(3), "{orders}");
+    assert_eq!(orders[0]["client_order_id"], "sell-aapl-1");
+    assert_eq!(orders[0]["status"], "FILLED");
+    assert_eq!(orders[0]["side"], "SELL");
+    assert_eq!(orders[0]["average_price"], "316.85");
+    assert_eq!(orders[1]["client_order_id"], "rest-aapl-1");
+    assert_eq!(orders[1]["status"], "ACCEPTED");
+    assert_eq!(orders[2]["client_order_id"], "buy-aapl-1");
+    assert_eq!(orders[2]["filled_quantity"], "1");
+
+    let fills = history("fills");
+    assert_eq!(fills.as_array().map(Vec::len), Some(2), "{fills}");
+    assert_eq!(fills[0]["client_order_id"], "sell-aapl-1");
+    assert_eq!(fills[0]["side"], "SELL");
+    assert_eq!(fills[0]["quantity"], "1");
+    assert_eq!(fills[0]["price"], "316.85");
+    assert_eq!(fills[0]["currency"], "USD");
+    assert_eq!(fills[0]["commission"], "0.00", "the US rate is 0 bp");
+    assert!(fills[0]["trade_id"].is_string() && fills[0]["id"].is_string());
+    assert!(
+        fills[0]["occurred_at_ns"].as_i64() >= fills[1]["occurred_at_ns"].as_i64(),
+        "newest first: {fills}"
+    );
+
+    let cycles = history("cycles");
+    assert_eq!(cycles.as_array().map(Vec::len), Some(1), "{cycles}");
+    assert_eq!(cycles[0]["instrument_id"], "AAPL.XNAS");
+    assert_eq!(cycles[0]["currency"], "USD");
+    assert_eq!(cycles[0]["realized_pnl"], "0.00", "bought and sold at last");
+    assert!(cycles[0]["position_id"].is_string() && cycles[0]["id"].is_string());
+    assert!(cycles[0]["closed_at_ns"].as_i64() >= cycles[0]["opened_at_ns"].as_i64());
+
+    // --- The order path's own refusals, through the same fixture -----------
+    expect_envelope(
+        call_post(
+            orders_url.clone(),
+            ok,
+            Some((
+                "application/json",
+                r#"{"action_id":"unknown-1","instrument_id":"NOPE.XNAS",
+                    "side":"BUY","type":"MARKET","quantity":"1","price":null}"#,
+            )),
+        ),
+        404,
+        "INSTRUMENT_UNKNOWN",
+    );
+    expect_envelope(
+        call_post(
+            orders_url.clone(),
+            ok,
+            Some((
+                "application/json",
+                r#"{"action_id":"off-lot-1","instrument_id":"0700.XHKG",
+                    "side":"BUY","type":"MARKET","quantity":"150","price":null}"#,
+            )),
+        ),
+        400,
+        "ORDER_INVALID",
+    );
+    // Beyond the desk's 100,000 USD: the sandbox's own refusal, verbatim.
+    expect_envelope(
+        call_post(
+            orders_url,
+            ok,
+            Some((
+                "application/json",
+                r#"{"action_id":"too-big-1","instrument_id":"AAPL.XNAS",
+                    "side":"BUY","type":"MARKET","quantity":"1000","price":null}"#,
+            )),
+        ),
+        409,
+        "ORDER_REJECTED",
+    );
+    expect_envelope(
+        call_post(
+            url(&format!("/desks/{alpha}/orders/no-such-order/cancel")),
+            ok,
+            Some(("application/json", r#"{"action_id":"cancel-unknown-1"}"#)),
+        ),
+        404,
+        "ORDER_NOT_FOUND",
+    );
 
     served.registry.stop_all();
 }

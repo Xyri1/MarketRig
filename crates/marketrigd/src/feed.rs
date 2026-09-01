@@ -303,6 +303,40 @@ pub struct Observation {
     pub book_synthesized: bool,
 }
 
+/// One instrument's synthesized top of book (§4.1, per D76): the observation it
+/// is derived from, plus both sides equal to its last price at the instrument's
+/// precision and both sizes one lot. An instrument with no observation carries no
+/// price or size fields at all, exactly as §2.3 omits them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BookTop {
+    #[serde(flatten)]
+    pub observation: Observation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bid_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bid_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ask_size: Option<String>,
+}
+
+impl BookTop {
+    fn of(observation: Observation, entry: &Entry) -> BookTop {
+        let size = observation
+            .last
+            .is_some()
+            .then(|| entry.lot_size.to_string());
+        BookTop {
+            bid_price: observation.last.clone(),
+            ask_price: observation.last.clone(),
+            bid_size: size.clone(),
+            ask_size: size,
+            observation,
+        }
+    }
+}
+
 /// The latest accepted observation for one instrument.
 #[derive(Debug, Clone)]
 struct Accepted {
@@ -399,6 +433,14 @@ impl MarketState {
         crate::catalog::ENTRIES
             .iter()
             .map(|e| self.read(e, read_at_ns))
+            .collect()
+    }
+
+    /// The whole catalog's synthesized top of book — the `market/book` body (§7).
+    pub fn book_all(&self, read_at_ns: i64) -> Vec<BookTop> {
+        crate::catalog::ENTRIES
+            .iter()
+            .map(|e| BookTop::of(self.read(e, read_at_ns), e))
             .collect()
     }
 

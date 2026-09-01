@@ -438,13 +438,186 @@ fn valid_action_id(action_id: String) -> Result<String, TradeError> {
     }
 }
 
-fn require_ready(store: &Store, desk_id: &str) -> Result<(), TradeError> {
+pub(crate) fn require_ready(store: &Store, desk_id: &str) -> Result<(), TradeError> {
     let desk = desk::get(store, desk_id)?;
     if desk.state == "READY" {
         Ok(())
     } else {
         Err(TradeError::NotReady(desk.state))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Listings (§7): live from the node, history from the event tables (R1-5)
+// ---------------------------------------------------------------------------
+
+/// `GET /desks/{desk_id}/orders` (§7): the desk's open orders, read live off the
+/// node's own cache — the authority for what the sandbox is holding (R1-5).
+pub fn open_orders(node: &Node) -> Result<Vec<Value>, NodeError> {
+    node.call(|context| {
+        context
+            .cache
+            .borrow()
+            .orders_open(None, None, None, None, None)
+            .iter()
+            .map(|order| order_projection(order))
+            .collect()
+    })
+}
+
+/// `GET /desks/{desk_id}/positions` (§7): the desk's open positions, live.
+pub fn open_positions(node: &Node) -> Result<Vec<Value>, NodeError> {
+    node.call(|context| {
+        context
+            .cache
+            .borrow()
+            .positions_open(None, None, None, None, None)
+            .iter()
+            .map(|position| position_projection(position))
+            .collect()
+    })
+}
+
+/// The position as the agent reads it: identity, size, and the node's own money
+/// figures as decimal text (§7).
+///
+/// NautilusTrader keeps the average prices as `f64`, so they are rendered at the
+/// instrument's own price precision — the same precision the position itself
+/// carries — rather than emitted as a float. Nothing here is recalculated
+/// (per D38).
+fn position_projection(position: &Position) -> Value {
+    let precision = position.price_precision as usize;
+    let mut value = json!({
+        "position_id": position.id.to_string(),
+        "instrument_id": position.instrument_id.to_string(),
+        "side": position.side.to_string(),
+        "quantity": position.quantity.to_string(),
+        "average_open_price": format!("{:.precision$}", position.avg_px_open),
+        "currency": position.settlement_currency.code.to_string(),
+        "opened_at_ns": position.ts_opened.as_u64() as i64,
+        "ts_last_ns": position.ts_last.as_u64() as i64,
+    });
+    if let Some(realized) = position.realized_pnl {
+        value["realized_pnl"] = json!(realized.as_decimal().to_string());
+    }
+    value
+}
+
+/// `GET /desks/{desk_id}/history/orders` (§7): one element per client order id in
+/// its latest known projection, newest first — the order rebuilt from its own
+/// verbatim event payloads, never a stored projection (§5, R1-5).
+///
+/// ponytail: the desk's whole order-event history is read and replayed per call.
+/// One desk's R1 history is a handful of orders; the upgrade path is the deferred
+/// pagination (root §18) plus a bounded window here.
+pub fn history_orders(store: &Store, desk_id: &str) -> Result<Vec<Value>, StoreError> {
+    let desk = desk_id.to_owned();
+    let rows: Vec<(String, String)> = store.call(move |conn| {
+        conn.prepare(
+            "SELECT client_order_id, payload FROM order_events \
+             WHERE desk_id = ?1 ORDER BY occurred_at_ns, id",
+        )?
+        .query_map([desk], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect()
+    })?;
+
+    // Group in the table's own order, remembering where each order's last event
+    // sat: that position, descending, is "newest first".
+    let mut grouped: Vec<(String, usize, Vec<OrderEventAny>)> = Vec::new();
+    for (at, (client_order_id, payload)) in rows.into_iter().enumerate() {
+        let event: OrderEventAny = match serde_json::from_str(&payload) {
+            Ok(event) => event,
+            Err(e) => {
+                tracing::error!(
+                    client_order_id,
+                    "an order event could not be read back: {e}"
+                );
+                continue;
+            }
+        };
+        match grouped.iter_mut().find(|(id, _, _)| *id == client_order_id) {
+            Some((_, last, events)) => {
+                *last = at;
+                events.push(event);
+            }
+            None => grouped.push((client_order_id, at, vec![event])),
+        }
+    }
+    grouped.sort_by_key(|(_, last, _)| std::cmp::Reverse(*last));
+
+    Ok(grouped
+        .into_iter()
+        .filter_map(
+            |(client_order_id, _, events)| match OrderAny::from_events(events) {
+                Ok(order) => Some(order_projection(&order)),
+                Err(e) => {
+                    tracing::error!(client_order_id, "an order could not be replayed: {e}");
+                    None
+                }
+            },
+        )
+        .collect())
+}
+
+/// `GET /desks/{desk_id}/history/fills` (§7): the desk's fills, newest first.
+pub fn history_fills(store: &Store, desk_id: &str) -> Result<Vec<Value>, StoreError> {
+    listing(
+        store,
+        desk_id,
+        "SELECT id, client_order_id, trade_id, instrument_id, side, quantity, price, \
+                commission, currency, occurred_at_ns \
+         FROM fills WHERE desk_id = ?1 ORDER BY occurred_at_ns DESC, id DESC",
+        |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?,
+                "client_order_id": r.get::<_, String>(1)?,
+                "trade_id": r.get::<_, String>(2)?,
+                "instrument_id": r.get::<_, String>(3)?,
+                "side": r.get::<_, String>(4)?,
+                "quantity": r.get::<_, String>(5)?,
+                "price": r.get::<_, String>(6)?,
+                "commission": r.get::<_, String>(7)?,
+                "currency": r.get::<_, String>(8)?,
+                "occurred_at_ns": r.get::<_, i64>(9)?,
+            }))
+        },
+    )
+}
+
+/// `GET /desks/{desk_id}/history/cycles` (§7): the desk's closed position cycles,
+/// newest first. The realized P&L is the closing event's own net-of-fees figure
+/// (root §12.4).
+pub fn history_cycles(store: &Store, desk_id: &str) -> Result<Vec<Value>, StoreError> {
+    listing(
+        store,
+        desk_id,
+        "SELECT id, position_id, instrument_id, opened_at_ns, closed_at_ns, \
+                realized_pnl, currency \
+         FROM position_cycles WHERE desk_id = ?1 ORDER BY closed_at_ns DESC, id DESC",
+        |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?,
+                "position_id": r.get::<_, String>(1)?,
+                "instrument_id": r.get::<_, String>(2)?,
+                "opened_at_ns": r.get::<_, i64>(3)?,
+                "closed_at_ns": r.get::<_, i64>(4)?,
+                "realized_pnl": r.get::<_, String>(5)?,
+                "currency": r.get::<_, String>(6)?,
+            }))
+        },
+    )
+}
+
+/// One desk-scoped listing: the query, its row projection, complete (pagination
+/// stays deferred, root §18).
+fn listing(
+    store: &Store,
+    desk_id: &str,
+    sql: &'static str,
+    row: fn(&rusqlite::Row<'_>) -> rusqlite::Result<Value>,
+) -> Result<Vec<Value>, StoreError> {
+    let desk = desk_id.to_owned();
+    store.call(move |conn| conn.prepare(sql)?.query_map([desk], row)?.collect())
 }
 
 // ---------------------------------------------------------------------------
