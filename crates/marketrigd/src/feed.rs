@@ -100,6 +100,10 @@ const CHART_BASE_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart"
 /// alongside [`crate::store::TEST_DATA_ROOT_ENV`].
 pub const TEST_QUOTE_URL_ENV: &str = "MARKETRIG_TEST_QUOTE_URL";
 
+/// Keeps the daemon off the compiled-in public endpoint (root §17). It does not
+/// suppress polling a stand-in named by [`TEST_QUOTE_URL_ENV`] (§10.1).
+pub const TEST_NO_TRADING_ENV: &str = "MARKETRIG_TEST_NO_TRADING";
+
 /// The 429 retry policy (§2.1, per D76): 8 attempts in all, 400 ms apart.
 pub const RETRY_ATTEMPTS: u32 = 8;
 pub const RETRY_DELAY: Duration = Duration::from_millis(400);
@@ -113,15 +117,20 @@ pub fn resolve_base_url(test_data_root: Option<&Path>, test_quote_url: Option<&s
     }
 }
 
-/// Reads both seam variables once; call this at startup and pass the result down
+/// The one feed base this daemon run polls, read once at startup and passed down
 /// so nothing else depends on process environment ([`crate::store::Roots::from_env`]).
-pub fn base_url_from_env() -> String {
-    resolve_base_url(
-        env::var_os(crate::store::TEST_DATA_ROOT_ENV)
-            .map(PathBuf::from)
-            .as_deref(),
-        env::var(TEST_QUOTE_URL_ENV).ok().as_deref(),
-    )
+///
+/// `None` is "no feed at all": nodes still start, no polling task runs, and every
+/// quote stays `UNAVAILABLE`. That is what `MARKETRIG_TEST_NO_TRADING` buys — and
+/// a stand-in named by both seam variables outranks it (§10.1).
+pub fn feed_base_from_env() -> Option<String> {
+    let test_data_root = env::var_os(crate::store::TEST_DATA_ROOT_ENV).map(PathBuf::from);
+    let test_quote_url = env::var(TEST_QUOTE_URL_ENV).ok();
+    match (test_data_root.as_deref(), test_quote_url.as_deref()) {
+        (Some(root), Some(url)) => Some(resolve_base_url(Some(root), Some(url))),
+        _ if env::var_os(TEST_NO_TRADING_ENV).is_some() => None,
+        _ => Some(CHART_BASE_URL.to_owned()),
+    }
 }
 
 /// One accepted chart response: the three metadata fields the observation needs.
@@ -142,7 +151,7 @@ pub struct ChartClient {
 }
 
 impl ChartClient {
-    /// Builds the client against `base_url` (from [`base_url_from_env`]).
+    /// Builds the client against `base_url` (from [`feed_base_from_env`]).
     pub fn new(base_url: String) -> Result<ChartClient, String> {
         let http = reqwest::Client::builder()
             // slice §1: never detour the gate's loopback stand-in through a
@@ -406,8 +415,10 @@ fn venue_of(instrument_id: &'static str) -> &'static str {
 }
 
 /// Canonical decimal text at the instrument's precision — the decimal places of
-/// its tick, never a formatting choice (§2.1, per D76).
-fn at_precision(price: Decimal, price_increment: &str) -> String {
+/// its tick, never a formatting choice (§2.1, per D76). The node's polling task
+/// builds its synthesized `QuoteTick` prices from this same text, so the sandbox
+/// never sees a precision the instrument does not carry.
+pub(crate) fn at_precision(price: Decimal, price_increment: &str) -> String {
     let tick: Decimal = price_increment
         .parse()
         .expect("catalog tick is decimal text (catalog::entries_valid)");
@@ -479,7 +490,9 @@ fn phase_from_calendar() {
 /// order (the last one repeating), counting what it served. Small enough to keep
 /// the retry check honest about the wire without an HTTP framework in the test.
 #[cfg(test)]
-fn scripted_server(replies: Vec<(u16, String)>) -> (String, std::sync::Arc<AtomicUsize>) {
+pub(crate) fn scripted_server(
+    replies: Vec<(u16, String)>,
+) -> (String, std::sync::Arc<AtomicUsize>) {
     use std::io::{BufRead, BufReader, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -527,7 +540,7 @@ fn scripted_server(replies: Vec<(u16, String)>) -> (String, std::sync::Arc<Atomi
 
 /// The chart-endpoint body shape, trimmed to what [`ChartEnvelope`] reads.
 #[cfg(test)]
-fn chart_body(symbol: &str, currency: &str, price: &str, time_s: i64) -> String {
+pub(crate) fn chart_body(symbol: &str, currency: &str, price: &str, time_s: i64) -> String {
     format!(
         r#"{{"chart":{{"result":[{{"meta":{{"currency":"{currency}","symbol":"{symbol}",
         "regularMarketTime":{time_s},"regularMarketPrice":{price},"priceHint":2}},

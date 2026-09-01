@@ -272,7 +272,7 @@ fn prepare(path: &Path) -> Result<Connection, StoreError> {
 }
 
 #[cfg(test)]
-fn open_temp() -> (tempfile::TempDir, Store) {
+pub(crate) fn open_temp() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
     (dir, store)

@@ -4,9 +4,11 @@ pub mod daemon;
 pub mod desk;
 pub mod feed;
 pub mod log;
+pub mod node;
 pub mod store;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The daemon entry point: §4.1 startup, serve the §6 routes, §4.2 shutdown.
@@ -18,7 +20,10 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match serve(&startup) {
+    // The feed's seam variables are read once here and passed down, like the data
+    // roots (R1 feature SPEC §10.1).
+    let feed_base = feed::feed_base_from_env();
+    match serve(&startup, feed_base) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("serve failed: {e}");
@@ -40,9 +45,14 @@ fn start() -> Result<daemon::Startup, (&'static str, String)> {
     })
 }
 
-fn serve(startup: &daemon::Startup) -> std::io::Result<()> {
+fn serve(startup: &daemon::Startup, feed_base: Option<String>) -> std::io::Result<()> {
     let std_listener = startup.listener.try_clone()?;
     std_listener.set_nonblocking(true)?;
+    let registry = Arc::new(node::Registry::new(
+        startup.store.clone(),
+        Arc::new(feed::MarketState::new()),
+        feed_base,
+    ));
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -64,6 +74,7 @@ fn serve(startup: &daemon::Startup) -> std::io::Result<()> {
             credential: startup.credential.clone(),
             started_at_ns: startup.started_at_ns,
             quit: quit_tx,
+            registry: registry.clone(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -75,8 +86,15 @@ fn serve(startup: &daemon::Startup) -> std::io::Result<()> {
         );
         let mut began = shut_rx.clone();
         let _ = began.changed().await;
-        // §4.2: bounded end to end at 5 seconds, after which the daemon exits anyway.
-        let _ = tokio::time::timeout(Duration::from_secs(5), serving).await;
+        // §4.2: bounded end to end at 5 seconds, after which the daemon exits
+        // anyway. The desks' trading nodes stop inside that same budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let _ = tokio::time::timeout_at(deadline, serving).await;
+        let _ = tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || registry.stop_all()),
+        )
+        .await;
         startup.shutdown()
     })
 }

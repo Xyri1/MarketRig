@@ -12,7 +12,9 @@ Verified against crates.io and the crate sources on 2026-09-01. Chunk numbering,
 
 | Crate | Pin | Used by | Notes |
 | --- | --- | --- | --- |
-| `nautilus-common`, `-core`, `-data`, `-execution`, `-live`, `-model`, `-sandbox` | `=0.62.0` | marketrigd | lockstep per D39; **`default-features = false` on every entry** — `nautilus-sandbox` alone defaults `high-precision`, and Cargo feature unification would silently flip the whole graph to 128-bit (the D76 landmine). The direct set may shrink at chunk time; the lockstep pin is the invariant. |
+| `nautilus-common`, `-core`, `-data`, `-execution`, `-live`, `-model`, `-sandbox` | `=0.62.0` | marketrigd | lockstep per D39; **`default-features = false` on every entry** — `nautilus-sandbox` alone defaults `high-precision`, and Cargo feature unification would silently flip the whole graph to 128-bit (the D76 landmine). The direct set may shrink at chunk time; the lockstep pin is the invariant. C11 found `LiveNode` and the data-event sender behind non-default features: `nautilus-live` needs `node`, `nautilus-common` needs `live` — both precision-neutral. |
+| `anyhow` | `=1.0.104` | marketrigd | the `DataClient` trait's return type (found at C11; the line the nautilus graph already resolves) |
+| `async-trait` | `=0.1.92` | marketrigd | the `DataClient` trait is `#[async_trait(?Send)]` (found at C11; same line as the nautilus graph) |
 | `reqwest` | `=0.13.4` | marketrigd | the feed's transport — the exact line `nautilus-network` requires (`^0.13.4`), so one HTTP stack per D76; feature `json`; built with `Proxy::no_proxy()` so the gate's stand-in is never detoured through a machine proxy |
 | `rust_decimal` | `=1.42.1` | marketrigd | fee rates on the catalog instruments (§2 below); equals nautilus-model's own requirement |
 | `chrono` | `=0.4.45` | marketrigd | feature SPEC §2.2 calendars; the line the nautilus graph already carries |

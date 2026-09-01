@@ -8,13 +8,19 @@ use std::path::Path;
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 /// The newest files kept; rotation is time-based, so boundedness is file count
 /// (per R0-8).
 const KEEP: usize = 7;
 
 /// Installs the process-wide subscriber. Call this once, first, from the binary.
+///
+/// Only the `tracing` global default is claimed, never the `log` crate's global
+/// logger: a NautilusTrader kernel installs its own on the first node build and
+/// permanently disables its logging if that fails, which would make every desk's
+/// node unstartable (verified against the pinned 0.62.0 kernel). That is why this
+/// is `set_global_default` and not `SubscriberInitExt::try_init`, which would
+/// also install the `tracing-log` bridge.
 ///
 /// ponytail: the file appender writes straight through — a hard-killed daemon
 /// must leave its last lines on disk, since the log root is gate evidence — so
@@ -33,16 +39,16 @@ pub fn init(logs: &Path) -> std::io::Result<()> {
         .is_terminal()
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stderr));
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
                 .json()
                 .with_ansi(false)
                 .with_writer(file),
         )
-        .with(human)
-        .try_init()
-        .map_err(std::io::Error::other)
+        .with(human);
+
+    tracing::subscriber::set_global_default(subscriber).map_err(std::io::Error::other)
 }
 
 #[cfg(test)]

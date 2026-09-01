@@ -29,6 +29,9 @@ pub struct ApiState {
     pub started_at_ns: i64,
     /// Signals the daemon's shutdown path once `POST /quit` has answered (§4.2).
     pub quit: tokio::sync::mpsc::Sender<()>,
+    /// Every desk's trading node, started lazily on first market-plane use
+    /// (R1 feature SPEC §4.3).
+    pub registry: Arc<crate::node::Registry>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -185,12 +188,19 @@ async fn serve() -> Served {
     std::fs::create_dir_all(&desks_home).unwrap();
     let (quit, quit_rx) = tokio::sync::mpsc::channel(1);
     let state = ApiState {
-        store,
+        store: store.clone(),
         desks_home: desks_home.clone(),
         daemon_uuid: DAEMON_UUID.to_string(),
         credential: CREDENTIAL.to_string(),
         started_at_ns: 1_700_000_000_000_000_000,
         quit,
+        // No feed base: these routes never start a node, and nothing may reach
+        // the public endpoint from a test.
+        registry: Arc::new(crate::node::Registry::new(
+            store,
+            Arc::new(crate::feed::MarketState::new()),
+            None,
+        )),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

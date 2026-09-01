@@ -12,6 +12,12 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+# The error type the `nautilus-*` client traits return; pinned at the line the
+# nautilus graph already resolves, so there is one copy.
+anyhow = "=1.0.104"
+# The `nautilus-*` client traits are `#[async_trait(?Send)]`, so implementing
+# one needs the same macro; pinned at the line the nautilus graph resolves.
+async-trait = "=0.1.92"
 axum = "=0.8.9"
 chrono = "=0.4.45"
 chrono-tz = "=0.10.4"
@@ -20,11 +26,13 @@ getrandom = "=0.4.3"
 # The nautilus set is pinned in lockstep (per D39) and every entry disables
 # default features: `nautilus-sandbox` alone defaults `high-precision`, and
 # Cargo's feature unification would flip the whole graph to 128-bit (D76).
-nautilus-common = { version = "=0.62.0", default-features = false }
+nautilus-common = { version = "=0.62.0", default-features = false, features = ["live"] }
 nautilus-core = { version = "=0.62.0", default-features = false }
 nautilus-data = { version = "=0.62.0", default-features = false }
 nautilus-execution = { version = "=0.62.0", default-features = false }
-nautilus-live = { version = "=0.62.0", default-features = false }
+# `node` is a default feature and carries `LiveNode` itself; `live` on
+# nautilus-common carries the data-event sender. Neither touches precision.
+nautilus-live = { version = "=0.62.0", default-features = false, features = ["node"] }
 nautilus-model = { version = "=0.62.0", default-features = false }
 nautilus-sandbox = { version = "=0.62.0", default-features = false }
 reqwest = { version = "=0.13.4", features = ["json"] }

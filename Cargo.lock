@@ -1586,6 +1586,8 @@ dependencies = [
 name = "marketrigd"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "chrono-tz",
@@ -1649,6 +1651,20 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "nautilus-analysis"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab3a38a153bfe95b08ae78d9f8e78ad016e9fd2c5c6f356df0f76b4c3a6b706"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "indexmap",
+ "nautilus-core",
+ "nautilus-model",
+ "rust_decimal",
 ]
 
 [[package]]
@@ -1774,8 +1790,13 @@ dependencies = [
  "log",
  "nautilus-common",
  "nautilus-core",
+ "nautilus-data",
  "nautilus-execution",
  "nautilus-model",
+ "nautilus-portfolio",
+ "nautilus-risk",
+ "nautilus-system",
+ "nautilus-trading",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1814,6 +1835,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "nautilus-portfolio"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68a9cf5b7198bbaab988626dc243d012937782defa6e45c0e4633e35df03db9d"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "bon",
+ "indexmap",
+ "log",
+ "nautilus-analysis",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-model",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+]
+
+[[package]]
+name = "nautilus-risk"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b82953097690a608996a5dbfcbd14811f173f748a660f914c7e1a5d5a166d0df"
+dependencies = [
+ "ahash 0.8.12",
+ "bon",
+ "indexmap",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-portfolio",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "ustr",
+]
+
+[[package]]
 name = "nautilus-sandbox"
 version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1830,6 +1892,57 @@ dependencies = [
  "nautilus-model",
  "rust_decimal",
  "serde",
+ "ustr",
+]
+
+[[package]]
+name = "nautilus-system"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32c47f60d1e8e45e8005e28b0ef31eff7f5db989e5f029c1981706c4a5f3e434"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "bon",
+ "futures",
+ "indexmap",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-data",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-portfolio",
+ "nautilus-risk",
+ "nautilus-trading",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "ustr",
+]
+
+[[package]]
+name = "nautilus-trading"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a98cb59519bb42efad5efde263327be282b76673b7e35a72b183b183a93c7a63"
+dependencies = [
+ "ahash 0.8.12",
+ "anyhow",
+ "bon",
+ "indexmap",
+ "jiff",
+ "log",
+ "nautilus-analysis",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-execution",
+ "nautilus-model",
+ "nautilus-portfolio",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "strum",
  "ustr",
 ]
 
