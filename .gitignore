@@ -12,6 +12,7 @@ __pycache__/
 !/dist/.gitkeep
 
 # Rust and Tauri build products
+/target/
 src-tauri/target/
 src-tauri/gen/
 
