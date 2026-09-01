@@ -1,6 +1,8 @@
 pub mod api;
+pub mod catalog;
 pub mod daemon;
 pub mod desk;
+pub mod feed;
 pub mod log;
 pub mod store;
 

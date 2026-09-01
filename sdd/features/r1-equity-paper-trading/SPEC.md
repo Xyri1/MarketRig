@@ -60,7 +60,7 @@ price_increment    decimal text                          the fixed tick (R1-2)
 lot_size           integer                               order-quantity multiple
 ```
 
-Starter set (fifteen; tick and lot venue-verified when the implementing slice lands the data, per R1-2): US — AAPL.XNAS, MSFT.XNAS, NVDA.XNAS, AMZN.XNAS, TSLA.XNAS (tick 0.01, lot 1); HK — 0700.XHKG (0.20/100), 9988.XHKG (0.10/100), 0005.XHKG (0.05/400), 1299.XHKG (0.05/200), 3690.XHKG (0.10/100); CN — 600519.XSHG, 601318.XSHG (tick 0.01, lot 100), 000001.XSHE, 000858.XSHE, 300750.XSHE (tick 0.01, lot 100).
+Starter set (fifteen; tick and lot venue-verified when the implementing slice lands the data, per R1-2): US — AAPL.XNAS, MSFT.XNAS, NVDA.XNAS, AMZN.XNAS, TSLA.XNAS (tick 0.01, lot 1); HK — 0700.XHKG (0.20/100), 9988.XHKG (0.10/100), 0005.XHKG (0.10/400), 1299.XHKG (0.05/200), 3690.XHKG (0.05/100); CN — 600519.XSHG, 601318.XSHG (tick 0.01, lot 100), 000001.XSHE, 000858.XSHE, 300750.XSHE (tick 0.01, lot 100).
 
 Any operation naming an instrument outside the catalog answers `INSTRUMENT_UNKNOWN`. The catalog is the polling universe and the `instruments` resource's content. Extending it is a data change verified by `catalog::entries_valid`, not a new decision.
 
