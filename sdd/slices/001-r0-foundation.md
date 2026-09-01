@@ -13,7 +13,7 @@ Verified against crates.io on 2026-09-01. Toolchain: `rust-toolchain.toml` pins 
 | Crate | Pin | Used by | Notes |
 | --- | --- | --- | --- |
 | `axum` | `=0.8.9` | marketrigd | per D48 |
-| `tokio` | `=1.53.1` | marketrigd | features `rt-multi-thread`, `net`, `signal` (cross-platform Ctrl+C, §4.2), `macros` |
+| `tokio` | `=1.53.1` | marketrigd | features `rt-multi-thread`, `net`, `signal` (cross-platform Ctrl+C, §4.2), `macros`, `sync` (the `/quit` channel) |
 | `rusqlite` | `=0.40.2` | marketrigd | feature `bundled` — SQLite compiled in, one release unit per D53 |
 | `uuid` | `=1.26.0` | marketrigd, marketrig | feature `v7` |
 | `getrandom` | `=0.4.3` | marketrigd | bearer credential bytes (§4.1); already in-tree via `uuid` |
