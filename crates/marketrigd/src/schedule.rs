@@ -177,19 +177,23 @@ impl Schedule {
                     return (0, false);
                 };
                 let mut count = 0u32;
+                let mut scanned = 0usize;
                 for candidate in candidates {
+                    scanned += 1;
                     if candidate < from_ns {
                         continue;
                     }
                     if candidate > through_ns {
-                        break;
+                        return (count, false);
                     }
-                    count += 1;
                     if count == COUNT_CAP {
                         return (COUNT_CAP, true);
                     }
+                    count += 1;
                 }
-                (count, false)
+                // The walk ended before the range did: when the scan bound ended
+                // it, the count is a floor, reported as capped.
+                (count, scanned >= SCAN_LIMIT)
             }
         }
     }
@@ -237,7 +241,10 @@ fn candidates(rrule: &str, dtstart: &str, tz: &str) -> Option<impl Iterator<Item
         .ok()?
         .validate(anchor)
         .ok()?;
-    let set = RRuleSet::new(anchor).rrule(rule);
+    // `limit()` arms the crate's own 100,000-iteration guard, so a rule that
+    // can never match (`BYMONTH=2;BYMONTHDAY=30`) ends instead of walking the
+    // whole year range; `take` bounds what is yielded.
+    let set = RRuleSet::new(anchor).rrule(rule).limit();
     Some(set.into_iter().take(SCAN_LIMIT).filter_map(move |wall| {
         match zone.from_local_datetime(&wall.naive_utc()) {
             MappedLocalTime::None => None,
@@ -331,11 +338,16 @@ pub fn accept_or_miss(
                 ],
             ) {
                 Ok(_) => {}
-                // Another wake already accepted this occurrence: leave the
-                // trigger untouched and carry on (§3.2).
+                // Another wake already accepted this occurrence: advance the
+                // projection exactly as that acceptance did, so the row never
+                // stays due, and carry on (§3.2).
                 Err(rusqlite::Error::SqliteFailure(f, _))
                     if f.code == ErrorCode::ConstraintViolation =>
                 {
+                    let next = (!one_off)
+                        .then(|| trigger.schedule.next_after(trigger.occurrence_ns))
+                        .flatten();
+                    project(tx, &trigger.id, next)?;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -669,7 +681,7 @@ fn dst_gap_skipped_overlap_earlier() {
         weekdays.next_after(friday),
         Some(utc_ns(2026, 11, 2, 14, 30, 0))
     );
-    // Five candidates in the week that spans the change.
+    // Six candidates in the week that spans the change.
     assert_eq!(
         weekdays.count_between(friday, utc_ns(2026, 11, 6, 14, 30, 0)),
         (6, false)
@@ -1037,8 +1049,8 @@ fn duplicate_wake_no_second_firing() {
         .call(|c| c.query_row("SELECT count(*) FROM prompts", [], |r| r.get(0)))
         .unwrap();
     assert_eq!(prompts, 1, "one prompt only");
-    // The loser leaves the row untouched, projection included.
-    assert_eq!(projection(&store, "t1"), Some(occurrence));
+    // The loser advances the projection as the winner did: consumed.
+    assert_eq!(projection(&store, "t1"), None);
 }
 
 /// §3.1: the sleep bound, and a mutation's wake reaching the task.

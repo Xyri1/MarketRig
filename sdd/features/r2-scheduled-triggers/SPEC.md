@@ -4,7 +4,7 @@ Refines root [`SPEC.md`](../../SPEC.md) §8, §9, §10, §11.1, §12.3, §13.2, 
 
 ## 1. Workspace additions
 
-New exact pins in the workspace manifest (verified 2026-09-02): `rrule =0.14.0` (default features off; requires `chrono ^0.4.39` and `chrono-tz ^0.10.1`, both already pinned), `process-wrap =9.1.0` (already in the graph under `rmcp =3.2.0`; features `tokio1`, `process-session`, `job-object`), and `ring =0.17.14` (already in the graph under rustls; the fingerprint's SHA-256). The `tokio` pin gains the `process` feature. `rrule` is the only crate new to the graph; the other two are already compiled into it.
+New exact pins in the workspace manifest (verified 2026-09-02): `rrule =0.14.0` (default features off; requires `chrono ^0.4.39` and `chrono-tz ^0.10.1`, both already pinned), `process-wrap =9.1.0` (already in the graph under `rmcp =3.2.0`; features `tokio1`, `process-session`, `job-object`, `kill-on-drop`), and `ring =0.17.14` (already in the graph under rustls; the fingerprint's SHA-256). The `tokio` pin gains the `process` feature. `rrule` is the only crate new to the graph; the other two are already compiled into it.
 
 New daemon modules: `schedule` (§2, §3), `trigger` (§7, §8's handlers' logic), `exec` (§4, §5). The `marketrig` library gains the attribution headers (§6) and the CLI two groups (§9); `marketrig-mcp` changes nothing and inherits §6 through the shared client. `marketrig-acceptance` gains the `trigger-code` binary (§10.1).
 
@@ -56,9 +56,9 @@ The `Notify` lives in the API state; every trigger create, patch, enable, disabl
 One `BEGIN IMMEDIATE` unit reads every eligible trigger with `next_occurrence_ns <= now` and, for each, in `(next_occurrence_ns, id)` order:
 
 - **accept** when `next_occurrence_ns >= daemon.started_at_ns` and `now - next_occurrence_ns <= 60 s`: insert the firing (`id`, `desk_id`, `trigger_id`, `occurrence_ns = next_occurrence_ns`, `accepted_at_ns = now`, `trigger_revision`, `brief`, `context`, `code_snapshot_id`); when `code_snapshot_id` is `NULL`, insert the `TRIGGER_RESULT` prompt (§5) in the same statement group; then set the projection to `NULL` for a one-off or to `next_after(occurrence_ns)` for a recurring rule;
-- **miss** otherwise: append `TRIGGER_MISSED` (§7) with `missed_from_ns = next_occurrence_ns`, `missed_through_ns = now`, `count` = the number of candidates in `[missed_from_ns, now]` (one for a one-off; capped at 10,000 with `count_capped: true`), and `next_occurrence_ns` = the new projection; then set the projection to `NULL` for a one-off or to `next_after(now)` for a recurring rule.
+- **miss** otherwise: append `TRIGGER_MISSED` (§7) with `missed_from_ns = next_occurrence_ns`, `missed_through_ns = now`, `count` = the number of candidates in `[missed_from_ns, now]` (one for a one-off; `count_capped: true` when more than 10,000 fall in the range, reported as 10,000, or when the projection's 100,000-candidate bound from the anchor ended the walk before the range did, reported as the floor counted), and `next_occurrence_ns` = the new projection; then set the projection to `NULL` for a one-off or to `next_after(now)` for a recurring rule.
 
-A firing insert that violates `UNIQUE (desk_id, trigger_id, occurrence_ns)` means a concurrent or repeated wake already accepted the occurrence: the unit skips that trigger untouched and continues. Nothing in the unit reads wall time twice — `now` is taken once at entry.
+A firing insert that violates `UNIQUE (desk_id, trigger_id, occurrence_ns)` means a concurrent or repeated wake already accepted the occurrence: the unit advances that trigger's projection exactly as the acceptance did (`NULL` for a one-off, `next_after(occurrence)` for a rule), so the row never stays due, and continues. Nothing in the unit reads wall time twice — `now` is taken once at entry.
 
 ### 3.3 Transaction scenarios
 
@@ -70,7 +70,7 @@ A firing insert that violates `UNIQUE (desk_id, trigger_id, occurrence_ns)` mean
 | recurring, clock jumps forward 2 hours | one `TRIGGER_MISSED` for the range; no catch-up firing |
 | recurring, accepted 30 s late | accepted; projection = next candidate after the occurrence, never after now — under the R2 form (finest cadence a minute, window 60 s) that candidate is always still ahead |
 | disabled for a day, then enabled | no miss record; projection = first candidate after now |
-| two wakes race on the same occurrence | one firing; the loser's insert violates the unique index and skips |
+| two wakes race on the same occurrence | one firing; the loser's insert violates the unique index, advances the projection as the winner did, and skips |
 | trigger deleted while due | ineligible; nothing |
 
 ## 4. Code snapshots and execution (R2-3, R2-4)
@@ -139,7 +139,7 @@ Recovery (root §15) registers one step after reaping: every `executions` row `R
 
 ### 4.5 Containment
 
-`exec::spawn(command) -> Contained` is the one primitive: on macOS it wraps the tokio command in `process-wrap`'s `ProcessSession` — `setsid` before exec, so the child leads a new session and process group — and `terminate` sends `SIGKILL` to the group; on Windows it wraps in `JobObject` with kill-on-close, and `terminate` ends the job. Both platforms expose the same handle (`id`, piped stdin/stdout/stderr, `wait`, `terminate`) and nothing else, so R3's app-server and R4's memory child reuse it unchanged (per D73). Trigger scripts are not recorded in `runtime/children.json` (root §15); on macOS a script outlives a hard-killed daemon in its own session and is resolved by recovery as `DAEMON_LOST`, never resumed.
+`exec::spawn(command) -> Contained` is the one primitive: on macOS it wraps the tokio command in `process-wrap`'s `ProcessSession` — `setsid` before exec, so the child leads a new session and process group — and `terminate` sends `SIGKILL` to the group; on Windows it wraps in `JobObject` with kill-on-close — which the crate grants only when `KillOnDrop` is wrapped too, so every spawn wraps `KillOnDrop` first — and `terminate` ends the job. Both platforms expose the same handle (`id`, piped stdin/stdout/stderr, `wait`, `terminate`) and nothing else, so R3's app-server and R4's memory child reuse it unchanged (per D73). Trigger scripts are not recorded in `runtime/children.json` (root §15); on macOS a script outlives a hard-killed daemon in its own session and is resolved by recovery as `DAEMON_LOST`, never resumed.
 
 ## 5. Results and the queued prompt (R2-5)
 
