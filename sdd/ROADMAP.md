@@ -79,7 +79,7 @@ Dependencies: Milestone R0.
 
 ## Milestone R2 — Scheduled triggers
 
-**Delivered 2026-09-02** — designed in [`features/r2-scheduled-triggers/`](features/r2-scheduled-triggers/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/003-r2-scheduled-triggers.md`](slices/003-r2-scheduled-triggers.md). Its eighteen module checks, the gate's G21–G26, and the static checks are green on macOS and Windows CI (run 33607212054); E3 attended on the Windows cells on 2026-09-02, the macOS cells pending.
+**Delivered 2026-09-02** — designed in [`features/r2-scheduled-triggers/`](features/r2-scheduled-triggers/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/003-r2-scheduled-triggers.md`](slices/003-r2-scheduled-triggers.md). Its eighteen module checks, the gate's G21–G26, and the static checks are green on macOS and Windows CI (run 33607212054); E3 attended on all four cells on 2026-09-02.
 
 This milestone realizes the choices recorded per D34, D35, D37, D40, and D41, and settles their mechanics as D79.
 
@@ -105,7 +105,7 @@ a scheduled trigger with approved code fires while no agent process is alive
 -> a restart mid-flight loses neither the firing nor the result
 ```
 
-**Produced** by the gate's G22, G25, and G26 on both platforms (macOS bundle `gate-1788336248`) — an `order` trigger firing with no session alive and placing one attributed, idempotent paper action through the real adapter, its result prompt queued before anything is delivered; a one-off and a minutely rule missed across a `POST /quit` becoming one `TRIGGER_MISSED` each and never a firing; and a hard kill mid-execution after which recovery lists the execution under `executions_lost`, completes it `DAEMON_LOST`, and leaves the firing and its prompt intact — and by the attended E3 on the Windows cells on 2026-09-02: a real Codex CLI session and a real Claude Code session each wrote a one-line script and defined a one-off trigger through the CLI, and the daemon fired it with no session alive, ran the code, and recorded one market buy attributed to the firing (Windows bundles `experiment-e3-codex-1788357245` and `experiment-e3-claude-1788356751`).
+**Produced** by the gate's G22, G25, and G26 on both platforms (macOS bundle `gate-1788336248`) — an `order` trigger firing with no session alive and placing one attributed, idempotent paper action through the real adapter, its result prompt queued before anything is delivered; a one-off and a minutely rule missed across a `POST /quit` becoming one `TRIGGER_MISSED` each and never a firing; and a hard kill mid-execution after which recovery lists the execution under `executions_lost`, completes it `DAEMON_LOST`, and leaves the firing and its prompt intact — and by the attended E3 on all four cells on 2026-09-02: a real Codex CLI session and a real Claude Code session each wrote a one-line script and defined a one-off trigger through the CLI, and the daemon fired it with no session alive, ran the code, and recorded one market buy attributed to the firing (macOS bundles `experiment-e3-codex-1788361144` and `experiment-e3-claude-1788360833`; Windows bundles `experiment-e3-codex-1788357245` and `experiment-e3-claude-1788356751`).
 
 **Why here:** later work is the half of the loop R1 cannot produce, and it needs something worth scheduling but not a live session — a trigger fires whether or not a desk has one.
 
