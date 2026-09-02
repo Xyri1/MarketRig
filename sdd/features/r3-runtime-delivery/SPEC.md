@@ -7,7 +7,7 @@
 - `crates/marketrigd/src/runtime.rs` (discovery, the `runtimes` rows), `terminal.rs` (R3-2), `codex.rs` (R3-3), `claude.rs` (R3-4), `dispatch.rs` (R3-5), `session.rs` (R3-6 routes and the `agent_processes` unit helpers); `store/004_r3.sql`.
 - `crates/marketrig-mcp` gains the `--channel` mode (R3-4); `crates/marketrig` gains `session hook` (root §13.2).
 - `crates/marketrig-acceptance/src/bin/runtime-standin.rs` (R3-8).
-- New pins at plan time: `portable-pty =0.9.0`; axum's `ws` feature and the `tokio-tungstenite` line it resolves, used both by the daemon's two sockets and by the app-server client; the already-in-graph `libc` (unix target) and `windows` (windows target) named as marketrigd dependencies for the terminal manager's process-tree termination. No other crate.
+- New pins at plan time: `portable-pty =0.9.0`; axum's `ws` feature and the `tokio-tungstenite` line it resolves, used both by the daemon's two sockets and by the app-server client; the already-in-graph `libc` (unix target) and `windows` (windows target) named as marketrigd dependencies for the terminal manager's process-tree termination; `futures-util =0.3.34` (already in the graph under `tokio-tungstenite` and `rmcp`) for the `StreamExt` the WebSocket clients read with. No other crate.
 
 ## 2. Runtime discovery (R3-1)
 
@@ -104,7 +104,7 @@ A hook whose `session_id` is neither the desk's pointer nor a `clear` transition
 
 ### 5.3 Channel and delivery
 
-`GET /desks/{desk_id}/channel` upgrades to a WebSocket for the bridge; one connection per desk, a second closes the first `4001`. The bridge's connection is readiness (`ready_at_ns`, `SESSION_READY`) provided the process row is open; a connection with no open process is closed `4002`. Deliver(prompt): send one text frame carrying §6.3's rendering; write completion → `DELIVERED`; no connection → wait 30 s for one, then `FAILED CHANNEL_UNAVAILABLE`; write error → `FAILED CHANNEL_UNAVAILABLE`. The bridge (`marketrig-mcp --desk <id> --channel`) serves stdio MCP with `experimental: {"claude/channel": {}}`, `instructions` = one sentence naming the source and that each event is a MarketRig prompt to act on, and forwards each frame as `notifications/claude/channel {content, meta: {prompt_id, kind}}`; it exits when the socket closes or standard input ends.
+`GET /desks/{desk_id}/channel` upgrades to a WebSocket for the bridge; one connection per desk, a second closes the first `4001`. The bridge's connection is readiness (`ready_at_ns`, `SESSION_READY`) provided the process row is open; a connection with no open process is closed `4002`. Deliver(prompt): send one text frame `{"content": <§6.3's rendering>, "prompt_id": …, "kind": …}` — the meta rides in the frame because the bridge republishes it and never sees the daemon's rows; write completion → `DELIVERED`; no connection → wait 30 s for one, then `FAILED CHANNEL_UNAVAILABLE`; write error → `FAILED CHANNEL_UNAVAILABLE`. The bridge (`marketrig-mcp --desk <id> --channel`) serves stdio MCP with `experimental: {"claude/channel": {}}`, `instructions` = one sentence naming the source and that each event is a MarketRig prompt to act on, and forwards each frame as `notifications/claude/channel {content, meta: {prompt_id, kind}}`, taking all three from the frame and dropping a frame that is not that object; it exits when the socket closes or standard input ends.
 
 Interrupt → 409 `INTERRUPT_UNSUPPORTED` before anything is touched.
 

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod catalog;
+pub mod claude;
 pub mod codex;
 pub mod daemon;
 pub mod desk;
@@ -97,6 +98,7 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             scheduler_wake: scheduler_wake.clone(),
             search_path: runtime::search_path(),
             terminals: terminals.clone(),
+            channels: Arc::new(claude::Channels::default()),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(

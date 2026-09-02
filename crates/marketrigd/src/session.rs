@@ -318,7 +318,12 @@ pub enum Hook {
 
 /// Records one Claude Code hook object against the desk (§5.2). The desk must
 /// exist; every other outcome is a row or nothing.
-pub fn hook(store: &Store, desk_id: &str, body: &str) -> Result<Hook, DeskError> {
+pub fn hook(
+    store: &Store,
+    desk_id: &str,
+    body: &str,
+    events: Option<AdapterEvents>,
+) -> Result<Hook, DeskError> {
     let desk = desk::get(store, desk_id)?;
     let Some(event) = serde_json::from_str::<Value>(body)
         .ok()
@@ -356,8 +361,17 @@ pub fn hook(store: &Store, desk_id: &str, body: &str) -> Result<Hook, DeskError>
     }
 
     match name {
-        // Pointer confirmation only; readiness is the adapter's (§5.3).
-        "SessionStart" if matches!(source, Some("startup") | Some("resume")) => {}
+        // Pointer confirmation only; readiness is the channel's (§5.3). The
+        // dispatcher hears the confirmation so it can tell a resume that took
+        // from one that never did (§6.2).
+        "SessionStart" if matches!(source, Some("startup") | Some("resume")) => {
+            if let (Some(events), Some(id)) = (&events, session_id) {
+                let _ = events.send(AdapterEvent::PointerDiscovered {
+                    desk_id: desk.id.clone(),
+                    native_session_id: id.to_string(),
+                });
+            }
+        }
         "SessionStart" => attention(
             store,
             &desk.id,
@@ -509,7 +523,8 @@ fn hook_ingress_records_the_documented_rows() {
             })
             .unwrap()
     };
-    let post = |body: &str| hook(&store, "d1", body).unwrap();
+    let (adapter_events, mut confirmations) = tokio::sync::mpsc::unbounded_channel();
+    let post = |body: &str| hook(&store, "d1", body, Some(adapter_events.clone())).unwrap();
 
     // An unparseable body — and a JSON scalar — is refused; nothing is recorded.
     assert!(matches!(post("not json"), Hook::Unparseable));
@@ -531,9 +546,26 @@ fn hook_ingress_records_the_documented_rows() {
     assert_eq!(changed.0, "SESSION_POINTER_CHANGED");
     assert!(changed.1.contains(r#""cause":"clear""#));
 
-    // With the pointer in place the documented per-event rows land.
-    post(r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s-2"}"#);
-    assert_eq!(events().last().unwrap().0, "SESSION_POINTER_CHANGED");
+    // With the pointer in place a startup or resume hook confirms it: no row,
+    // one `PointerDiscovered` for the dispatcher.
+    for source in ["startup", "resume"] {
+        let before = events().len();
+        post(&format!(
+            r#"{{"hook_event_name":"SessionStart","source":"{source}","session_id":"s-2"}}"#
+        ));
+        assert_eq!(events().len(), before, "confirmation records nothing");
+        assert!(matches!(
+            confirmations.try_recv(),
+            Ok(AdapterEvent::PointerDiscovered { native_session_id, .. })
+                if native_session_id == "s-2"
+        ));
+    }
+
+    // Another `source` is attention only.
+    post(r#"{"hook_event_name":"SessionStart","source":"compact","session_id":"s-2"}"#);
+    let compaction = events().pop().unwrap();
+    assert_eq!(compaction.0, "SESSION_ATTENTION");
+    assert!(compaction.1.contains(r#""kind":"session_start""#));
     post(r#"{"hook_event_name":"Stop","session_id":"s-2"}"#);
     assert_eq!(events().last().unwrap().0, "SESSION_TURN_ENDED");
     post(
@@ -549,7 +581,7 @@ fn hook_ingress_records_the_documented_rows() {
         "the message is not stored"
     );
 
-    // An unknown event is accepted and recorded nowhere.
+    // An unknown event is accepted (the route answers 202) and recorded nowhere.
     let before = events().len();
     post(r#"{"hook_event_name":"PreToolUse","session_id":"s-2"}"#);
     assert_eq!(events().len(), before);
@@ -617,8 +649,16 @@ pub trait Adapter: Send + Sync {
     /// and is `None` for a new session. `Err` is the activation failure detail.
     async fn spawn(&self, desk_id: &str, resume: Option<&str>) -> Result<Activation, String>;
 
-    /// Hands one rendered prompt (§6.3) to the live session.
-    async fn deliver(&self, desk_id: &str, text: &str) -> DeliverOutcome;
+    /// Hands one rendered prompt (§6.3) to the live session. `prompt_id` and
+    /// `kind` ride along because Claude's channel frame carries them as the
+    /// event's meta (§5.3); Codex has no use for them.
+    async fn deliver(
+        &self,
+        desk_id: &str,
+        prompt_id: &str,
+        kind: &str,
+        text: &str,
+    ) -> DeliverOutcome;
 
     /// Interrupts the active turn; `Ok` carries the turn id (§4.3), `Err` a
     /// failure code from §7's answers (`NO_ACTIVE_TURN`, `INTERRUPT_UNSUPPORTED`,

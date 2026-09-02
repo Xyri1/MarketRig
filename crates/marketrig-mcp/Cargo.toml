@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
+futures-util.workspace = true
 marketrig = { path = "../marketrig" }
 # `server` carries the handler surface, `transport-io` the stdio transport.
 rmcp = { workspace = true, features = ["server", "transport-io"] }

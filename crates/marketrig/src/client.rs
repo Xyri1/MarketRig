@@ -141,6 +141,18 @@ impl Endpoint {
         )
     }
 
+    /// The daemon's `http://127.0.0.1:<port>` base, for the one client that
+    /// speaks something other than HTTP to it (the channel bridge, R3 §5.3).
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The per-start bearer, for that same client's upgrade request. It never
+    /// leaves the process any other way.
+    pub fn credential(&self) -> &str {
+        &self.credential
+    }
+
     fn uri(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

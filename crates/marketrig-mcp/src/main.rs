@@ -30,6 +30,12 @@ struct Cli {
     /// The desk this adapter serves, by kebab name or UUID.
     #[arg(long)]
     desk: String,
+
+    /// Serve Claude Code's development channel instead of the market plane
+    /// (R3 feature SPEC §5.3): no tools, no resources — every frame the daemon
+    /// writes for this desk becomes one `notifications/claude/channel`.
+    #[arg(long)]
+    channel: bool,
 }
 
 /// The five resources of §8: URI leaf, and the §7 route each read proxies.
@@ -60,6 +66,9 @@ fn main() -> ExitCode {
         Ok(adapter) => adapter,
         Err(fault) => return fail(&fault.code, &fault.message, fault.exit),
     };
+    if cli.channel {
+        return bridge(adapter);
+    }
     // Blocking daemon calls run inside the handlers, so the runtime is
     // multi-threaded: one stalled worker never stops the stdio reader.
     let runtime = match tokio::runtime::Runtime::new() {
@@ -268,6 +277,152 @@ impl ServerHandler for Adapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The channel bridge (R3 feature SPEC §5.3)
+// ---------------------------------------------------------------------------
+
+/// The bridge's own server: no tools, no resources, one experimental
+/// capability, and a sentence saying what arrives on it.
+struct Bridge;
+
+impl ServerHandler for Bridge {
+    fn get_info(&self) -> ServerInfo {
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.experimental = Some(
+            [("claude/channel".to_string(), JsonObject::new())]
+                .into_iter()
+                .collect(),
+        );
+        ServerInfo::new(capabilities).with_instructions(
+            "Events on this channel come from MarketRig: each one is a prompt from your desk \
+             for you to act on.",
+        )
+    }
+}
+
+/// One daemon frame as the notification the channel publishes. A frame that is
+/// not the documented object is dropped rather than guessed at.
+fn notification(frame: &str) -> Option<rmcp::model::CustomNotification> {
+    let frame: serde_json::Value = serde_json::from_str(frame).ok()?;
+    Some(rmcp::model::CustomNotification::new(
+        "notifications/claude/channel",
+        Some(serde_json::json!({
+            "content": frame.get("content")?,
+            "meta": {
+                "prompt_id": frame.get("prompt_id")?,
+                "kind": frame.get("kind")?,
+            },
+        })),
+    ))
+}
+
+/// Serves the channel over stdio while forwarding the desk's socket, and exits
+/// when either end goes away (§5.3).
+fn bridge(adapter: Adapter) -> ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => return fail("INTERNAL", &format!("Cannot start a runtime: {error}."), 1),
+    };
+    runtime.block_on(async move {
+        let service = match Bridge.serve(rmcp::transport::stdio()).await {
+            Ok(service) => service,
+            Err(error) => {
+                return fail(
+                    "INTERNAL",
+                    &format!("Cannot serve MCP over stdio: {error}."),
+                    1,
+                );
+            }
+        };
+        let peer = service.peer().clone();
+        let socket = tokio::spawn(forward(
+            adapter.endpoint.base().replacen("http://", "ws://", 1)
+                + &format!("/desks/{}/channel", adapter.desk_id),
+            format!("Bearer {}", adapter.endpoint.credential()),
+            peer,
+        ));
+        // Either end going away ends the bridge (§5.3).
+        tokio::select! {
+            _ = socket => {}
+            _ = service.waiting() => {}
+        }
+        ExitCode::SUCCESS
+    })
+}
+
+async fn forward(url: String, bearer: String, peer: rmcp::service::Peer<RoleServer>) {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let Ok(mut request) = url.into_client_request() else {
+        return;
+    };
+    let Ok(bearer) = bearer.parse() else { return };
+    request.headers_mut().insert("authorization", bearer);
+    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(request).await else {
+        return;
+    };
+    while let Some(Ok(message)) = socket.next().await {
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = message
+            && let Some(notification) = notification(&text)
+        {
+            let sent = peer
+                .send_notification(rmcp::model::ServerNotification::CustomNotification(
+                    notification,
+                ))
+                .await;
+            if sent.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 fn path_segment(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bridge_declares_the_channel_and_nothing_else() {
+        let info = Bridge.get_info();
+        assert_eq!(
+            info.capabilities.experimental.as_ref().map(|e| e.len()),
+            Some(1)
+        );
+        assert!(
+            info.capabilities
+                .experimental
+                .as_ref()
+                .is_some_and(|e| e.contains_key("claude/channel"))
+        );
+        assert!(info.capabilities.tools.is_none());
+        assert!(info.capabilities.resources.is_none());
+        assert!(
+            info.instructions
+                .as_deref()
+                .is_some_and(|i| i.contains("MarketRig"))
+        );
+    }
+
+    #[test]
+    fn a_frame_becomes_one_channel_notification() {
+        let frame = r#"{"content":"MarketRig TRIGGER_RESULT p-1:","prompt_id":"p-1",
+                        "kind":"TRIGGER_RESULT"}"#;
+        let published = notification(frame).expect("a documented frame");
+        assert_eq!(published.method, "notifications/claude/channel");
+        assert_eq!(
+            published.params,
+            Some(serde_json::json!({
+                "content": "MarketRig TRIGGER_RESULT p-1:",
+                "meta": { "prompt_id": "p-1", "kind": "TRIGGER_RESULT" },
+            }))
+        );
+        // Anything else is dropped, never guessed at.
+        assert!(notification("not json").is_none());
+        assert!(notification(r#"{"content":"no meta"}"#).is_none());
+    }
 }

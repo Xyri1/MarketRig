@@ -624,7 +624,13 @@ impl Adapter for Codex {
         })
     }
 
-    async fn deliver(&self, desk_id: &str, text: &str) -> DeliverOutcome {
+    async fn deliver(
+        &self,
+        desk_id: &str,
+        _prompt_id: &str,
+        _kind: &str,
+        text: &str,
+    ) -> DeliverOutcome {
         let inner = &self.0;
         let thread = {
             let threads = inner.threads.lock().expect("threads");
@@ -952,10 +958,13 @@ mod tests {
 
         // Gate: an active turn holds the prompt even while the status is idle.
         script.active.store(true, Ordering::SeqCst);
-        assert_eq!(codex.deliver("d1", "hello").await, DeliverOutcome::Waiting);
+        assert_eq!(
+            codex.deliver("d1", "p1", "TRIGGER_RESULT", "hello").await,
+            DeliverOutcome::Waiting
+        );
         script.active.store(false, Ordering::SeqCst);
         assert_eq!(
-            codex.deliver("d1", "hello").await,
+            codex.deliver("d1", "p1", "TRIGGER_RESULT", "hello").await,
             DeliverOutcome::Delivered
         );
 
@@ -969,7 +978,10 @@ mod tests {
             )
             .unwrap();
         settle().await;
-        assert_eq!(codex.deliver("d1", "hello").await, DeliverOutcome::Waiting);
+        assert_eq!(
+            codex.deliver("d1", "p1", "TRIGGER_RESULT", "hello").await,
+            DeliverOutcome::Waiting
+        );
         script
             .broadcast
             .send(
@@ -983,7 +995,7 @@ mod tests {
         // Refusal carries the app-server's own message.
         *script.refuse.lock().unwrap() = Some("no".to_string());
         assert_eq!(
-            codex.deliver("d1", "hello").await,
+            codex.deliver("d1", "p1", "TRIGGER_RESULT", "hello").await,
             DeliverOutcome::Refused("no".to_string())
         );
         *script.refuse.lock().unwrap() = None;
@@ -997,7 +1009,7 @@ mod tests {
         // A socket that goes before the response is an uncertain handoff.
         script.drop_on_turn.store(true, Ordering::SeqCst);
         assert_eq!(
-            codex.deliver("d1", "hello").await,
+            codex.deliver("d1", "p1", "TRIGGER_RESULT", "hello").await,
             DeliverOutcome::HandoffUnknown
         );
         codex.stop().await;

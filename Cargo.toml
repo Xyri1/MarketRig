@@ -18,11 +18,13 @@ anyhow = "=1.0.104"
 # The `nautilus-*` client traits are `#[async_trait(?Send)]`, so implementing
 # one needs the same macro; pinned at the line the nautilus graph resolves.
 async-trait = "=0.1.92"
-futures-util = "=0.3.34"
 axum = { version = "=0.8.9", features = ["ws"] }
 chrono = "=0.4.45"
 chrono-tz = "=0.10.4"
 clap = { version = "=4.6.6", features = ["derive"] }
+# `StreamExt` for the WebSocket clients; already in the graph under
+# tokio-tungstenite and rmcp.
+futures-util = { version = "=0.3.34", default-features = false }
 getrandom = "=0.4.3"
 # The nautilus set is pinned in lockstep (per D39) and every entry disables
 # default features: `nautilus-sandbox` alone defaults `high-precision`, and
