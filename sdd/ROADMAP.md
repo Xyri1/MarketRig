@@ -115,6 +115,8 @@ Dependencies: Milestone R1.
 
 This milestone realizes the choices recorded per D3, D24, D25, D27, D28, D31, D32, D36, and D69.
 
+**Design complete 2026-09-02** — PRD, DECISIONS (R3-1 … R3-8), and SPEC in [`features/r3-runtime-delivery/`](features/r3-runtime-delivery/PRD.md); no slice yet. Runtime facts verified against Codex CLI 0.152.1 and Claude Code 2.1.258, which become the version floors.
+
 **Goal:** Make the harness reach a real agent, and let it exit and come back.
 
 Expected outcomes:
