@@ -156,7 +156,7 @@ Recovery (root §15) registers one step after reaping: every `executions` row `R
                         "started_at_ns": 0, "finished_at_ns": 0 } }
 ```
 
-`execution: null` is a code-free firing, whose prompt commits in the acceptance unit (§3.2). The captured streams are read from the firing route (§8), rendered as lossy UTF-8 with the byte counts beside them.
+`execution: null` is a code-free firing, whose prompt commits in the acceptance unit (§3.2); the payload is stored and answered verbatim, so that `null` is literal there, unlike a resource's omitted keys (§8). The captured streams are read from the firing route (§8), rendered as lossy UTF-8 with the byte counts beside them.
 
 ## 6. Attribution (R2-6)
 

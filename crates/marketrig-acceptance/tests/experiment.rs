@@ -1,14 +1,17 @@
-//! The acceptance experiment: E1 and E2, the first attended scenarios.
+//! The acceptance experiment: E1, E2, and E3, the attended scenarios.
 //!
-//! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3 and root
-//! `sdd/SPEC.md` §17, per D75. One operator-attended run per platform-and-runtime
-//! cell, on real Yahoo and a real runtime CLI, with MCP registration performed by
-//! hand (R1 keeps it operator-performed, feature SPEC §8).
+//! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3,
+//! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3, and root `sdd/SPEC.md` §17,
+//! per D75. One operator-attended run per platform-and-runtime cell, on real
+//! Yahoo and a real runtime CLI, with MCP registration performed by hand (R1
+//! keeps it operator-performed, feature SPEC §8).
 //!
 //! **Operator variable:** `MARKETRIG_EXPERIMENT` selects the cell — `codex` runs
-//! E1, `claude` runs E2. Unset or anything else skips both cleanly, which is what
-//! CI and every unattended `cargo test` do. The instructions are printed, so run
-//! the selected cell with output:
+//! E1 and E3, `claude` runs E2 and E3. Unset or anything else skips them all
+//! cleanly, which is what CI and every unattended `cargo test` do. A cell's two
+//! scenarios run one after the other on their own daemons, desks, and bundles:
+//! they share the operator's terminal, so the harness serializes them. The
+//! instructions are printed, so run the selected cell with output:
 //!
 //! ```text
 //! MARKETRIG_EXPERIMENT=codex cargo test -p marketrig-acceptance --test experiment -- --nocapture
@@ -22,6 +25,7 @@
 //! never persisted, feature SPEC §2.3), so that aspect is inconclusive by
 //! construction and is recorded as such.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use marketrig_acceptance::{Harness, parse, waited};
@@ -29,6 +33,11 @@ use serde_json::json;
 
 /// The operator variable and its two cells.
 const CELL: &str = "MARKETRIG_EXPERIMENT";
+
+/// A cell's scenarios share one operator, one terminal, and one pair of hands,
+/// so they hold this in turn instead of running side by side the way `cargo
+/// test` would otherwise start them.
+static TERMINAL: Mutex<()> = Mutex::new(());
 
 /// How long an attended cell waits on the operator and the agent before an
 /// aspect ends inconclusive. The operator can stop the run sooner.
@@ -56,6 +65,7 @@ fn attended(scenario: &str, cell: &str, runtime: &str) {
         );
         return;
     }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
 
     let mut g = Harness::new(&format!("experiment-{cell}"));
     // Real Yahoo and a real runtime: neither feed seam is set. The data root is
@@ -236,6 +246,306 @@ fn attended(scenario: &str, cell: &str, runtime: &str) {
             json!({ "client_order_id": action_id, "waited_secs": PATIENCE.as_secs() }),
         );
     }
+
+    finish(&mut g, scenario, daemon, &desk_id);
+}
+
+#[test]
+fn e3_codex_cli() {
+    scheduled("E3", "codex", "Codex CLI");
+}
+
+#[test]
+fn e3_claude_code() {
+    scheduled("E3", "claude", "Claude Code");
+}
+
+/// **E3 — a real session defines a trigger whose code trades** (R2 feature SPEC
+/// §10.3). Same cell variable as E1/E2 and the same patience, on its own daemon,
+/// desk, and bundle. What the session does is the agent's; what the daemon does
+/// once a firing exists is mechanical and asserted.
+fn scheduled(scenario: &str, cell: &str, runtime: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e3-{cell}"));
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    let desk = format!("{cell}-e3-{}", marketrig_acceptance::now_secs());
+    let (exit, created) = g.cli_json(scenario, &["--json", "desk", "create", &desk]);
+    assert_eq!(exit, 0, "the cell's desk must be created: {created}");
+    assert_eq!(created["state"], "READY", "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+
+    // Mechanical, and it also picks the instrument the operator names: the
+    // trigger's order should be for something the real feed is observing.
+    let quotes = format!("/desks/{desk_id}/market/quotes");
+    let (status, body) = g.api(scenario, &endpoint, "GET", &quotes, None);
+    assert_eq!(status, 200, "{body}");
+    let live = |g: &Harness| -> Option<String> {
+        g.call(&endpoint, "GET", &quotes, None).1["quotes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|quote| quote["health"] == "LIVE")
+            .and_then(|quote| quote["instrument_id"].as_str().map(str::to_owned))
+    };
+    assert!(
+        waited(SETTLES, "a live observation from Yahoo", || {
+            live(&g).is_some()
+        }),
+        "the real feed never produced an observation; this is a mechanical failure"
+    );
+    let instrument = live(&g).expect("a live instrument");
+
+    // Two minutes: long enough for the session to write the file and issue the
+    // command, short enough that the operator watches it fire.
+    let at = format!(
+        "{}Z",
+        marketrig_acceptance::utc(marketrig_acceptance::now_secs() as i64 + 120)
+    );
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — {runtime} defines a trigger whose code trades (feature SPEC §10.3)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:         {desk}\n\
+         Data root:    {root}\n\
+         Adapter:      {mcp}\n\
+         CLI:          {cli}\n\
+         trigger-code: {runner}\n\
+         Instrument:   {instrument}   (LIVE on the real feed right now)\n\
+         Evidence:     {root}\n\
+         \n\
+         1. Register the adapter with {runtime} exactly as in E1/E2 — the trigger's\n\
+         \x20  code reaches the same daemon through it:\n\
+         \n\
+         \x20  Codex CLI:   codex mcp add marketrig --env MARKETRIG_TEST_DATA_ROOT={root} -- {mcp} --desk {desk}\n\
+         \x20  Claude Code: claude mcp add-json marketrig '{{\"command\":\"{mcp}\",\"args\":[\"--desk\",\"{desk}\"],\"env\":{{\"MARKETRIG_TEST_DATA_ROOT\":\"{root}\"}}}}'\n\
+         \n\
+         2. Start a {runtime} session in that desk's workspace:\n\
+         \x20      {workspace}\n\
+         \n\
+         3. Ask the session to write a one-line script file in the workspace, say\n\
+         \x20  `job.txt`, whose only content is:\n\
+         \n\
+         \x20      order {instrument} BUY 1\n\
+         \n\
+         4. Ask it to define a one-off trigger due in about two minutes that runs\n\
+         \x20  that script through the trigger-code helper. The CLI needs the data\n\
+         \x20  root in its environment, so give the session the whole line:\n\
+         \n\
+         \x20  macOS / Linux:\n\
+         \x20      MARKETRIG_TEST_DATA_ROOT={root} \\\n\
+         \x20        {cli} trigger create {desk} \\\n\
+         \x20        --name e3-order --brief 'place one lot through a scheduled trigger' \\\n\
+         \x20        --at {at} \\\n\
+         \x20        --code job.txt --arg {runner} --arg '{{script}}'\n\
+         \n\
+         \x20  Windows PowerShell:\n\
+         \x20      $env:MARKETRIG_TEST_DATA_ROOT = '{root}'\n\
+         \x20      & '{cli}' trigger create {desk} --name e3-order --brief 'place one lot through a scheduled trigger' --at {at} --code job.txt --arg '{runner}' --arg '{{script}}'\n\
+         \n\
+         \x20  `--at` above is two minutes from when these instructions printed; if\n\
+         \x20  the session takes longer, have it pick a fresh instant a couple of\n\
+         \x20  minutes ahead in the same RFC 3339 UTC form.\n\
+         \n\
+         5. Nothing else. No session need be alive when it fires: the daemon runs\n\
+         \x20  the code itself, the order is attributed to the firing, and the\n\
+         \x20  result is queued back as a TRIGGER_RESULT prompt. Have the session\n\
+         \x20  read it afterwards with:\n\
+         \n\
+         \x20      MARKETRIG_TEST_DATA_ROOT={root} {cli} prompt list {desk}\n\
+         \n\
+         The harness now watches the daemon's own durable rows. It waits up to\n\
+         {patience} minutes per step; stop it whenever you like.\n\
+         ===========================================================================\n",
+        root = g.out.display(),
+        mcp = g.mcp.display(),
+        cli = g.cli.display(),
+        runner = g.trigger_code.display(),
+        workspace = g.workspace(&desk).display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e3.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; instructions issued to the operator",
+        json!({
+            "desk": desk, "desk_id": desk_id, "instrument": instrument,
+            "adapter": g.mcp.display().to_string(),
+            "trigger_code": g.trigger_code.display().to_string(),
+        }),
+    );
+
+    // --- The session's own step ---------------------------------------------
+    let defined = waited(PATIENCE, "a trigger defined by the session", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM triggers WHERE desk_id = ?1",
+            &[&desk_id],
+        ) > 0
+    });
+    if !defined {
+        g.inconclusive(
+            scenario,
+            "the session defined no trigger within the cell's patience",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let (trigger_id, trigger_name, schedule): (String, String, String) = g
+        .db()
+        .query_row(
+            "SELECT id, name, coalesce(at_ns, 0) || ' ' || coalesce(rrule, '') FROM triggers \
+             WHERE desk_id = ?1 ORDER BY created_at_ns DESC LIMIT 1",
+            [&desk_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the session's trigger row");
+    g.note(
+        scenario,
+        "the session's trigger reached the daemon's durable rows",
+        json!({ "trigger_id": trigger_id, "name": trigger_name, "schedule": schedule }),
+    );
+
+    // The schedule is the session's, so waiting on the firing still waits on it.
+    let fired = waited(PATIENCE, "the trigger's first firing", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM firings WHERE trigger_id = ?1",
+            &[&trigger_id],
+        ) > 0
+    });
+    if !fired {
+        g.inconclusive(
+            scenario,
+            "the session's trigger never came due within the cell's patience",
+            json!({ "trigger_id": trigger_id, "waited_secs": PATIENCE.as_secs() }),
+        );
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let (firing_id, code_snapshot_id): (String, Option<String>) = g
+        .db()
+        .query_row(
+            "SELECT id, code_snapshot_id FROM firings WHERE trigger_id = ?1 \
+             ORDER BY accepted_at_ns, id LIMIT 1",
+            [&trigger_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the firing row");
+    g.note(
+        scenario,
+        "the daemon accepted the occurrence with no session in the loop",
+        json!({ "firing_id": firing_id, "code_snapshot_id": code_snapshot_id }),
+    );
+
+    if code_snapshot_id.is_none() {
+        g.inconclusive(
+            scenario,
+            "the session's trigger carried no code, so nothing ran: E3 needs `--code`",
+            json!({ "trigger_id": trigger_id, "firing_id": firing_id }),
+        );
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+
+    // --- Mechanical from here: the firing exists, so the daemon owns the rest -
+    assert!(
+        waited(SETTLES, "the execution to complete", || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM executions WHERE firing_id = ?1 AND state = 'COMPLETE'",
+                &[&firing_id],
+            ) == 1
+        }),
+        "a code-bearing firing must leave exactly one completed execution (§4.3, §4.4)"
+    );
+    let (outcome, exit_code, stdout): (String, Option<i64>, Option<Vec<u8>>) = g
+        .db()
+        .query_row(
+            "SELECT outcome, exit_code, stdout FROM executions WHERE firing_id = ?1",
+            [&firing_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the execution row");
+    let captured = String::from_utf8_lossy(&stdout.unwrap_or_default()).into_owned();
+    g.note(
+        scenario,
+        "the daemon ran the session's code and recorded one outcome",
+        json!({ "outcome": outcome, "exit_code": exit_code, "stdout": captured }),
+    );
+
+    // The prompt is the daemon's own half of the loop, queued in the same unit.
+    let queued: Vec<String> = g.column(
+        "SELECT state FROM prompts WHERE desk_id = ?1 AND kind = 'TRIGGER_RESULT' \
+         AND payload LIKE '%' || ?2 || '%'",
+        &[&desk_id, &firing_id],
+    );
+    assert_eq!(
+        queued,
+        ["QUEUED"],
+        "one queued TRIGGER_RESULT per completed execution (§5)"
+    );
+
+    // Whether the code placed an order is the session's script; the attribution
+    // on the row, once there is one, is the daemon's.
+    let placed = waited(SETTLES, "an order attributed to the firing", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM trading_actions WHERE desk_id = ?1 AND firing_id = ?2",
+            &[&desk_id, &firing_id],
+        ) > 0
+    });
+    if !placed {
+        g.inconclusive(
+            scenario,
+            "the trigger's code placed no order attributed to its firing",
+            json!({ "firing_id": firing_id, "outcome": outcome, "stdout": captured }),
+        );
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let (action_id, source, action_trigger, action_outcome): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = g
+        .db()
+        .query_row(
+            "SELECT action_id, source, trigger_id, outcome FROM trading_actions \
+             WHERE desk_id = ?1 AND firing_id = ?2 ORDER BY created_at_ns LIMIT 1",
+            [&desk_id, &firing_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the attributed action row");
+    assert_eq!(
+        source, "TRIGGER",
+        "a firing-attributed action is TRIGGER-sourced (§6)"
+    );
+    assert_eq!(
+        action_trigger.as_deref(),
+        Some(trigger_id.as_str()),
+        "the row names the trigger the firing belongs to (§6)"
+    );
+    g.note(
+        scenario,
+        "the scheduled code placed an attributable paper action with no agent alive",
+        json!({
+            "action_id": action_id, "source": source, "trigger_id": action_trigger,
+            "firing_id": firing_id,
+            "outcome": action_outcome.as_deref().map(parse),
+        }),
+    );
 
     finish(&mut g, scenario, daemon, &desk_id);
 }

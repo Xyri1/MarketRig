@@ -32,6 +32,41 @@ pub fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// `YYYY-MM-DDTHH:MM:SS` in UTC for a Unix second. A schedule is given as text
+/// (R2 feature SPEC §2) and both shapes need it — `--at` appends `Z`, `--dtstart`
+/// takes it as the naive wall clock — and the harness carries no date library,
+/// on purpose: it depends on nothing the daemon depends on.
+pub fn utc(unix_s: i64) -> String {
+    // Howard Hinnant's civil_from_days, the shortest correct proleptic
+    // Gregorian conversion; the era arithmetic is exact for every i64 day.
+    let days = unix_s.div_euclid(86_400);
+    let seconds = unix_s.rem_euclid(86_400);
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let doe = shifted - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        seconds / 3_600,
+        (seconds % 3_600) / 60,
+        seconds % 60,
+    )
+}
+
+#[test]
+fn utc_formats_the_schedule_text() {
+    assert_eq!(utc(0), "1970-01-01T00:00:00");
+    // A leap day, the last second of a year, and the stand-in feed's own base.
+    assert_eq!(utc(1_709_209_845), "2024-02-29T12:30:45");
+    assert_eq!(utc(1_798_761_599), "2026-12-31T23:59:59");
+    assert_eq!(utc(1_788_206_401), "2026-08-31T20:00:01");
+}
+
 #[track_caller]
 pub fn parse(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
@@ -158,6 +193,9 @@ pub struct Harness {
     pub daemond: PathBuf,
     pub cli: PathBuf,
     pub mcp: PathBuf,
+    /// The acceptance modes' own trigger script runner (R2 feature SPEC §10.1),
+    /// which every code-bearing trigger names as `argv[0]`.
+    pub trigger_code: PathBuf,
     observations: File,
     step: u32,
     daemons: u32,
@@ -187,7 +225,7 @@ impl Harness {
                 .join(format!("{prefix}-{}", now_secs())),
         };
         fs::create_dir_all(&out).expect("evidence directory");
-        let (daemond, cli, mcp) = build(&workspace);
+        let (daemond, cli, mcp, trigger_code) = build(&workspace);
         eprintln!("acceptance evidence: {}", out.display());
         Harness {
             observations: File::create(out.join("observations.jsonl")).expect("observations"),
@@ -195,6 +233,7 @@ impl Harness {
             daemond,
             cli,
             mcp,
+            trigger_code,
             step: 0,
             daemons: 0,
             // Same discipline as the CLI (R0 feature SPEC §8): no proxy, no
@@ -583,8 +622,10 @@ impl Harness {
 }
 
 /// The real binaries, located through Cargo's own artifact messages so the
-/// harness is correct under `CARGO_TARGET_DIR` and on Windows.
-fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
+/// harness is correct under `CARGO_TARGET_DIR` and on Windows. `trigger-code`
+/// is built with them and lands beside them, which is how it finds the adapter
+/// (R2 feature SPEC §10.1).
+fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .current_dir(workspace)
@@ -596,6 +637,9 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
             "marketrig",
             "-p",
             "marketrig-mcp",
+            "-p",
+            "marketrig-acceptance",
+            "--bins",
             "--message-format=json",
         ])
         .stderr(Stdio::inherit())
@@ -610,6 +654,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let mut daemond = None;
     let mut cli = None;
     let mut mcp = None;
+    let mut trigger_code = None;
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(message) = serde_json::from_slice::<Value>(line) else {
             continue;
@@ -627,6 +672,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
             "marketrigd" => daemond = Some(PathBuf::from(executable)),
             "marketrig" => cli = Some(PathBuf::from(executable)),
             "marketrig-mcp" => mcp = Some(PathBuf::from(executable)),
+            "trigger-code" => trigger_code = Some(PathBuf::from(executable)),
             _ => {}
         }
     }
@@ -634,5 +680,6 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf) {
         daemond.expect("marketrigd executable"),
         cli.expect("marketrig executable"),
         mcp.expect("marketrig-mcp executable"),
+        trigger_code.expect("trigger-code executable"),
     )
 }

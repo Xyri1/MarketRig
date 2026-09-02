@@ -1,8 +1,10 @@
-//! The acceptance gate: scenarios G1–G20, in order, in one test.
+//! The acceptance gate: scenarios G1–G26, in order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
-//! (the stand-in feed and G12–G20), per D75, R0-7, R1-9. The harness drives
+//! (the stand-in feed and G12–G20) and `sdd/features/r2-scheduled-triggers/SPEC.md`
+//! §10 (the `trigger-code` binary and G21–G26), per D75, R0-7, R1-9, R2-8. The
+//! harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
 //! files, and read-only SQLite. It never links `marketrigd` or `marketrig` as
@@ -12,7 +14,8 @@
 //!
 //! State carries across scenarios: the chain is one run against one data root,
 //! which is also the evidence directory. G12 onwards trade on one desk the
-//! earlier scenarios created, on the stand-in feed.
+//! earlier scenarios created, on the stand-in feed; G21 onwards schedule triggers
+//! on `gamma`, the desk G8 left READY and untraded.
 
 use std::fs::{self, File};
 use std::process::Stdio;
@@ -118,6 +121,83 @@ fn history_counts(g: &Harness, desk_id: &str) -> (i64, i64, i64) {
             &[&desk_id],
         ),
     )
+}
+
+/// One code-bearing trigger's snapshot source: the single line the
+/// `trigger-code` binary reads back (R2 feature SPEC §10.1). The file lives in
+/// the evidence bundle, so every script the gate ran is in it by construction.
+fn script(g: &Harness, name: &str, line: &str) -> String {
+    let dir = g.out.join("scripts");
+    fs::create_dir_all(&dir).expect("the scripts directory");
+    let path = dir.join(format!("{name}.txt"));
+    fs::write(&path, format!("{line}\n")).expect("write the script");
+    path.display().to_string()
+}
+
+/// How many firings one trigger has, read through read-only SQLite.
+fn firings(g: &Harness, trigger_id: &str) -> i64 {
+    g.scalar(
+        "SELECT count(*) FROM firings WHERE trigger_id = ?1",
+        &[&trigger_id],
+    )
+}
+
+/// The trigger's firings, oldest first — the order the scenarios reason in.
+fn firing_ids(g: &Harness, trigger_id: &str) -> Vec<String> {
+    g.column(
+        "SELECT id FROM firings WHERE trigger_id = ?1 ORDER BY accepted_at_ns, id",
+        &[&trigger_id],
+    )
+}
+
+/// Bounded: a trigger due seconds from now fires within one wake of its
+/// instant, because every mutation wakes the scheduler (R2 feature SPEC §3.1),
+/// so the first firing waits 10 s. A later one waits out a whole minutely
+/// cadence, hence 75. Answers the firing's id.
+#[track_caller]
+fn await_firing(g: &Harness, trigger_id: &str, nth: usize) -> String {
+    within(
+        Duration::from_secs(if nth == 0 { 10 } else { 75 }),
+        &format!("firing {} of trigger {trigger_id}", nth + 1),
+        || firings(g, trigger_id) > nth as i64,
+    );
+    firing_ids(g, trigger_id)[nth].clone()
+}
+
+/// Bounded: the executor is woken by the acceptance that produced the firing
+/// (§4.3), and every scenario's script finishes in about a second.
+#[track_caller]
+fn await_execution(g: &Harness, firing_id: &str, bound: Duration) {
+    within(bound, &format!("execution {firing_id} completing"), || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM executions WHERE firing_id = ?1 AND state = 'COMPLETE'",
+            &[&firing_id],
+        ) == 1
+    });
+}
+
+/// The `TRIGGER_RESULT` prompts naming one firing. The payload is stored
+/// verbatim (§5), so the firing id inside it is what ties the two together
+/// without the harness reaching for a JSON function SQLite need not have.
+fn result_prompts(g: &Harness, desk_id: &str, firing_id: &str) -> Vec<String> {
+    g.column(
+        "SELECT id FROM prompts WHERE desk_id = ?1 AND kind = 'TRIGGER_RESULT' \
+         AND payload LIKE '%' || ?2 || '%' ORDER BY created_at_ns, id",
+        &[&desk_id, &firing_id],
+    )
+}
+
+/// Whether a trigger is still due for anything: the projection is `NULL` for a
+/// consumed one-off, a disabled trigger, and a rule with no further candidate
+/// (§3.1), and the resource omits the key when it is null (§8).
+fn projected(g: &Harness, trigger_id: &str) -> Option<i64> {
+    g.db()
+        .query_row(
+            "SELECT next_occurrence_ns FROM triggers WHERE id = ?1",
+            [trigger_id],
+            |row| row.get(0),
+        )
+        .expect("the trigger row")
 }
 
 async fn resource_text(service: &RunningService<RoleClient, ()>, uri: &str) -> String {
@@ -1405,6 +1485,1187 @@ fn gate() {
         json!({ "orders": orders["orders"], "cycles": cycles["cycles"] }),
     );
 
+    // ======================================================================
+    // R2 (feature SPEC `r2-scheduled-triggers` §10.2). The chain continues on
+    // the same root and the same stand-in feed with a fresh daemon. `gamma` is
+    // the trigger desk — READY since G8 and never traded — so G22's position
+    // and its "no session ever existed" are exact facts about the desk rather
+    // than differences against `beta`'s R1 history.
+    //
+    // Timing throughout: the scheduler rechecks every 60 s, but every trigger
+    // mutation wakes it (§3.1), so an occurrence a couple of seconds out is
+    // accepted within about a second of its instant and the code-bearing ones
+    // start immediately. Every wait below is bounded far beyond that.
+    // ======================================================================
+    let daemon8 = g.spawn("G21");
+    endpoint = daemon8.endpoint.clone();
+    let ns = 1_000_000_000i64;
+    let now = || marketrig_acceptance::now_secs() as i64;
+    let trigger_route = |id: &str| format!("/desks/{gamma_id}/triggers/{id}");
+    let runner = g.trigger_code.display().to_string();
+
+    // --- G21 — definitions --------------------------------------------------
+    let soon = now() + 2;
+    let at = format!("{}Z", marketrig_acceptance::utc(soon));
+    let dtstart = marketrig_acceptance::utc(soon);
+    let (exit, once) = g.cli_json(
+        "G21",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g21-once",
+            "--brief",
+            "the code-free one-off",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{once}");
+    let once_id = once["id"].as_str().expect("id").to_owned();
+    assert_eq!(once["desk_id"], gamma_id.as_str());
+    assert_eq!(once["name"], "g21-once");
+    assert_eq!(once["source"], "SCHEDULED");
+    assert_eq!(once["recurrence"], "ONE_OFF");
+    assert_eq!(once["brief"], "the code-free one-off");
+    assert_eq!(once["enabled"], true);
+    assert_eq!(once["revision"], 1);
+    assert_eq!(once["schedule"], json!({ "at_ns": soon * ns }));
+    assert_eq!(once["next_occurrence_ns"], json!(soon * ns));
+    for absent in ["context", "code", "deleted_at_ns"] {
+        assert!(
+            once.get(absent).is_none(),
+            "a null field is omitted, never a literal null (§8): {absent} in {once}"
+        );
+    }
+
+    let (exit, every) = g.cli_json(
+        "G21",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g21-every",
+            "--brief",
+            "the code-free minutely rule",
+            "--rrule",
+            "FREQ=MINUTELY",
+            "--dtstart",
+            &dtstart,
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_eq!(exit, 0, "{every}");
+    let every_id = every["id"].as_str().expect("id").to_owned();
+    assert_eq!(every["recurrence"], "RECURRING");
+    assert_eq!(
+        every["schedule"],
+        json!({ "rrule": "FREQ=MINUTELY", "dtstart": dtstart, "tz": "UTC" })
+    );
+    assert_eq!(every["next_occurrence_ns"], json!(soon * ns));
+
+    let (exit, listing) = g.cli_json("G21", &["--json", "trigger", "list", &gamma]);
+    assert_eq!(exit, 0, "{listing}");
+    let named: Vec<&str> = listing["triggers"]
+        .as_array()
+        .expect("triggers")
+        .iter()
+        .map(|trigger| trigger["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(named, ["g21-once", "g21-every"], "creation order (§8)");
+    let (exit, shown) = g.cli_json("G21", &["--json", "trigger", "show", &gamma, "g21-once"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert_eq!(shown["id"], once_id.as_str(), "name-or-id resolution (§9)");
+
+    // The firing and its queued prompt in one read-only query: a code-free
+    // firing's prompt commits in the acceptance unit itself (§3.2, §5).
+    within(
+        Duration::from_secs(10),
+        "the one-off's firing and its TRIGGER_RESULT prompt",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM firings f JOIN prompts p ON p.desk_id = f.desk_id \
+                 WHERE f.trigger_id = ?1 AND p.kind = 'TRIGGER_RESULT' \
+                 AND p.payload LIKE '%' || f.id || '%'",
+                &[&once_id],
+            ) == 1
+        },
+    );
+    let once_firing = firing_ids(&g, &once_id)[0].clone();
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT occurrence_ns FROM firings WHERE id = ?1",
+            &[&once_firing]
+        ),
+        soon * ns
+    );
+    assert_eq!(
+        projected(&g, &once_id),
+        None,
+        "a consumed one-off is never due again"
+    );
+    let (status, consumed) = g.api("G21", &endpoint, "GET", &trigger_route(&once_id), None);
+    assert_eq!(status, 200, "{consumed}");
+    assert!(
+        consumed.get("next_occurrence_ns").is_none(),
+        "a null projection is omitted from the resource (§8): {consumed}"
+    );
+
+    let (exit, prompts) = g.cli_json("G21", &["--json", "prompt", "list", &gamma]);
+    assert_eq!(exit, 0, "{prompts}");
+    let queued = prompts["prompts"]
+        .as_array()
+        .expect("prompts")
+        .iter()
+        .find(|prompt| prompt["id"] == result_prompts(&g, &gamma_id, &once_firing)[0].as_str())
+        .expect("the one-off's prompt is listed")
+        .clone();
+    assert_eq!(queued["kind"], "TRIGGER_RESULT");
+    assert_eq!(queued["state"], "QUEUED");
+    assert!(
+        queued.get("payload").is_none(),
+        "the listing carries no payload (§8)"
+    );
+    let queued_id = queued["id"].as_str().expect("id").to_owned();
+    let (exit, prompt) = g.cli_json("G21", &["--json", "prompt", "show", &gamma, &queued_id]);
+    assert_eq!(exit, 0, "{prompt}");
+    assert_eq!(prompt["payload"]["kind"], "TRIGGER_RESULT");
+    assert_eq!(prompt["payload"]["trigger_id"], once_id.as_str());
+    assert_eq!(prompt["payload"]["trigger_name"], "g21-once");
+    assert_eq!(prompt["payload"]["firing_id"], once_firing.as_str());
+    assert_eq!(prompt["payload"]["brief"], "the code-free one-off");
+    assert_eq!(
+        prompt["payload"]["execution"],
+        Value::Null,
+        "a code-free firing has no execution (§5); the stored payload is verbatim, \
+         so this one is a literal null: {prompt}"
+    );
+
+    // The rule fires once and re-projects from the occurrence, exactly a minute
+    // on (§2, §3.2) — never from `now`.
+    let every_firing = await_firing(&g, &every_id, 0);
+    let occurrence: i64 = g.scalar(
+        "SELECT occurrence_ns FROM firings WHERE id = ?1",
+        &[&every_firing],
+    );
+    assert_eq!(occurrence, soon * ns);
+    assert_eq!(projected(&g, &every_id), Some(occurrence + 60 * ns));
+
+    let (exit, deleted) = g.cli_json("G21", &["--json", "trigger", "delete", &gamma, "g21-every"]);
+    assert_eq!(exit, 0, "{deleted}");
+    assert!(
+        deleted["deleted_at_ns"].as_i64().is_some_and(|at| at > 0),
+        "{deleted}"
+    );
+    assert_eq!(
+        deleted["revision"], every["revision"],
+        "a delete never bumps the revision (§8)"
+    );
+    let (_, listing) = g.cli_json("G21", &["--json", "trigger", "list", &gamma]);
+    assert!(
+        !listing["triggers"]
+            .as_array()
+            .expect("triggers")
+            .iter()
+            .any(|trigger| trigger["id"] == every_id.as_str()),
+        "a deleted trigger leaves the listing: {listing}"
+    );
+    let (exit, gone) = g.cli_json("G21", &["--json", "trigger", "show", &gamma, &every_id]);
+    assert_eq!(exit, 0, "a deleted trigger still answers by id: {gone}");
+    assert!(
+        gone["deleted_at_ns"].as_i64().is_some_and(|at| at > 0),
+        "{gone}"
+    );
+    let (exit, kept) = g.cli_json("G21", &["--json", "trigger", "firings", &gamma, &every_id]);
+    assert_eq!(exit, 0, "{kept}");
+    assert_eq!(kept["firings"].as_array().map(Vec::len), Some(1));
+    assert_eq!(kept["firings"][0]["id"], every_firing.as_str());
+    assert_eq!(kept["firings"][0]["occurrence_ns"], json!(occurrence));
+
+    // Three seconds, not two: creating and then disabling is two CLI
+    // invocations, each a discovery plus a resolve, and the disable must commit
+    // while the candidate is still ahead.
+    let later = now() + 3;
+    let (exit, idle) = g.cli_json(
+        "G21",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g21-idle",
+            "--brief",
+            "disabled before its first candidate",
+            "--rrule",
+            "FREQ=MINUTELY",
+            "--dtstart",
+            &marketrig_acceptance::utc(later),
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_eq!(exit, 0, "{idle}");
+    let idle_id = idle["id"].as_str().expect("id").to_owned();
+    let (exit, disabled) = g.cli_json("G21", &["--json", "trigger", "disable", &gamma, "g21-idle"]);
+    assert_eq!(exit, 0, "{disabled}");
+    assert_eq!(disabled["enabled"], false);
+    assert!(
+        disabled.get("next_occurrence_ns").is_none(),
+        "disabling makes a trigger never due (§3.1): {disabled}"
+    );
+    assert!(
+        now() < later,
+        "the disable landed after the candidate; the gate's margin is too thin"
+    );
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(firings(&g, &idle_id), 0, "a disabled trigger does not fire");
+    assert!(
+        !g.events().iter().any(|event| event.kind == "TRIGGER_MISSED"
+            && event.payload["trigger_id"] == idle_id.as_str()),
+        "an ineligible trigger is neither fired nor missed (§3.1)"
+    );
+
+    let past = format!("{}Z", marketrig_acceptance::utc(now() - 60));
+    let ahead = format!("{}Z", marketrig_acceptance::utc(now() + 3_600));
+    let refusals: Vec<(&str, Vec<&str>)> = vec![
+        (
+            "TRIGGER_INVALID",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g21-secondly",
+                "--brief",
+                "refused",
+                "--rrule",
+                "FREQ=SECONDLY",
+                "--dtstart",
+                &dtstart,
+                "--tz",
+                "UTC",
+            ],
+        ),
+        (
+            "TRIGGER_INVALID",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g21-counted",
+                "--brief",
+                "refused",
+                "--rrule",
+                "FREQ=MINUTELY;COUNT=3",
+                "--dtstart",
+                &dtstart,
+                "--tz",
+                "UTC",
+            ],
+        ),
+        (
+            "TRIGGER_INVALID",
+            vec![
+                "--json", "trigger", "create", &gamma, "--name", "g21-past", "--brief", "refused",
+                "--at", &past,
+            ],
+        ),
+        (
+            "TRIGGER_INVALID",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g21-mars",
+                "--brief",
+                "refused",
+                "--rrule",
+                "FREQ=MINUTELY",
+                "--dtstart",
+                &dtstart,
+                "--tz",
+                "Mars/Olympus",
+            ],
+        ),
+        (
+            "TRIGGER_NAME_TAKEN",
+            vec![
+                "--json", "trigger", "create", &gamma, "--name", "g21-once", "--brief", "refused",
+                "--at", &ahead,
+            ],
+        ),
+        (
+            "TRIGGER_NOT_FOUND",
+            vec!["--json", "trigger", "show", &gamma, "nope"],
+        ),
+    ];
+    for (code, args) in &refusals {
+        let (exit, envelope) = g.cli_json("G21", args);
+        assert_eq!(exit, 1, "{args:?} must be refused: {envelope}");
+        assert_eq!(envelope["code"], *code, "{args:?}: {envelope}");
+        assert!(
+            envelope["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "{envelope}"
+        );
+    }
+    g.note(
+        "G21",
+        "a code-free one-off fired once with its queued prompt, a minutely rule re-projected exactly 60 s on, a delete kept its firing readable, a disable fired nothing, and six refusals answered their codes",
+        json!({
+            "one_off": consumed, "recurring": every, "firing": every_firing,
+            "refusals": refusals.iter().map(|(code, _)| *code).collect::<Vec<_>>(),
+        }),
+    );
+
+    // --- G22 — code fires with no agent alive -------------------------------
+    // `gamma` has never traded, so its node has never started. One quotes read
+    // starts it and the stand-in gives it an observation before the trigger's
+    // market order reaches the sandbox (R1 feature SPEC §4.3).
+    let gamma_quotes = format!("/desks/{gamma_id}/market/quotes");
+    let (status, opened) = g.api("G22", &endpoint, "GET", &gamma_quotes, None);
+    assert_eq!(status, 200, "{opened}");
+    within(
+        Duration::from_secs(60),
+        "gamma's first AAPL observation",
+        || {
+            quote_of(
+                &g.call(&endpoint, "GET", &gamma_quotes, None).1,
+                "AAPL.XNAS",
+            )["health"]
+                == "LIVE"
+        },
+    );
+
+    let order_line = "order AAPL.XNAS BUY 1";
+    let order_script = script(&g, "g22-order", order_line);
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, trading) = g.cli_json(
+        "G22",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g22-order",
+            "--brief",
+            "buy one lot of AAPL through the desk's own adapter",
+            "--at",
+            &at,
+            "--code",
+            &order_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{trading}");
+    let trading_id = trading["id"].as_str().expect("id").to_owned();
+    assert_eq!(trading["code"]["argv"], json!([runner, "{script}"]));
+    assert_eq!(trading["code"]["source"], format!("{order_line}\n"));
+    assert_eq!(trading["code"]["source_bytes"], json!(order_line.len() + 1));
+    assert_eq!(
+        trading["code"]["suffix"], ".txt",
+        "--suffix defaults to the file's extension (§9)"
+    );
+    assert_eq!(
+        trading["code"]["timeout_secs"], 300,
+        "the daemon's default (§4.1)"
+    );
+    assert_eq!(
+        trading["code"]["approved_at_ns"], trading["created_at_ns"],
+        "R2's fixed Always allow (§4.1)"
+    );
+    assert!(
+        trading["code"]["fingerprint"]
+            .as_str()
+            .is_some_and(|f| f.len() == 64
+                && f.chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())),
+        "the fingerprint is lowercase hex SHA-256 (§4.1): {trading}"
+    );
+
+    let trading_firing = await_firing(&g, &trading_id, 0);
+    await_execution(&g, &trading_firing, Duration::from_secs(15));
+    let (exit, ran) = g.cli_json(
+        "G22",
+        &["--json", "trigger", "firing", &gamma, &trading_firing],
+    );
+    assert_eq!(exit, 0, "{ran}");
+    assert_eq!(ran["trigger_id"], trading_id.as_str());
+    assert_eq!(ran["execution"]["state"], "COMPLETE");
+    assert_eq!(ran["execution"]["outcome"], "EXITED");
+    assert_eq!(ran["execution"]["exit_code"], 0);
+    assert_eq!(ran["execution"]["stdout_truncated"], false);
+    assert_eq!(
+        ran["execution"]["daemon_uuid"],
+        endpoint.daemon_uuid.as_str()
+    );
+    let answers: Vec<Value> = ran["execution"]["stdout"]
+        .as_str()
+        .expect("the captured standard output")
+        .lines()
+        .map(parse)
+        .collect();
+    assert_eq!(answers.len(), 2, "one JSON line per call (§10.1): {ran}");
+    for (call, answer) in answers.iter().enumerate() {
+        assert_eq!(answer["action_id"], trading_firing.as_str(), "call {call}");
+        assert_eq!(answer["kind"], "SUBMIT", "call {call}");
+        assert_eq!(answer["source"], "TRIGGER", "call {call}");
+        assert_eq!(answer["trigger_id"], trading_id.as_str(), "call {call}");
+        assert_eq!(answer["firing_id"], trading_firing.as_str(), "call {call}");
+        assert_eq!(answer["outcome"]["status"], "FILLED", "call {call}");
+        assert_eq!(answer["outcome"]["filled_quantity"], "1", "call {call}");
+    }
+    assert_eq!(
+        answers[0]["id"], answers[1]["id"],
+        "the second call replayed the first's stored record (R1 feature SPEC §6)"
+    );
+
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM trading_actions WHERE desk_id = ?1",
+            &[&gamma_id]
+        ),
+        1,
+        "two calls, one action: the firing id is the action id (§10.1)"
+    );
+    let attributed: (String, Option<String>, Option<String>) = g
+        .db()
+        .query_row(
+            "SELECT source, trigger_id, firing_id FROM trading_actions \
+             WHERE desk_id = ?1 AND action_id = ?2",
+            [&gamma_id, &trading_firing],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the attributed row");
+    assert_eq!(
+        (
+            attributed.0.as_str(),
+            attributed.1.as_deref(),
+            attributed.2.as_deref()
+        ),
+        (
+            "TRIGGER",
+            Some(trading_id.as_str()),
+            Some(trading_firing.as_str())
+        ),
+        "the row names the firing that placed it (§6)"
+    );
+
+    let (status, held) = g.api(
+        "G22",
+        &endpoint,
+        "GET",
+        &format!("/desks/{gamma_id}/positions"),
+        None,
+    );
+    assert_eq!(status, 200, "{held}");
+    assert_eq!(held["positions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(held["positions"][0]["instrument_id"], "AAPL.XNAS");
+    assert_eq!(held["positions"][0]["quantity"], "1");
+
+    let result = result_prompts(&g, &gamma_id, &trading_firing);
+    assert_eq!(result.len(), 1, "one firing, one prompt (§5)");
+    let (exit, summary) = g.cli_json("G22", &["--json", "prompt", "show", &gamma, &result[0]]);
+    assert_eq!(exit, 0, "{summary}");
+    assert_eq!(summary["state"], "QUEUED");
+    assert_eq!(summary["payload"]["firing_id"], trading_firing.as_str());
+    assert_eq!(summary["payload"]["trigger_id"], trading_id.as_str());
+    assert_eq!(summary["payload"]["execution"]["outcome"], "EXITED");
+    assert_eq!(summary["payload"]["execution"]["exit_code"], 0);
+    assert_eq!(summary["payload"]["execution"]["stdout_truncated"], false);
+    assert!(
+        summary["payload"]["execution"]["stdout_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{summary}"
+    );
+
+    // No session ever existed for this desk. R2 carries no sessions table and no
+    // `SESSION_*` event kind, so the durable statements are that the desk owns
+    // no session-sourced action and no event naming one.
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM trading_actions WHERE desk_id = ?1 AND source = 'SESSION'",
+            &[&gamma_id]
+        ),
+        0
+    );
+    let gamma_kinds = g.kinds_for(&gamma_id);
+    assert!(
+        !gamma_kinds.iter().any(|kind| kind.starts_with("SESSION")),
+        "no session ever ran on this desk: {gamma_kinds:?}"
+    );
+    g.note(
+        "G22",
+        "a scheduled script with no agent alive placed one attributable, idempotent paper order and left one lot, one action, and one queued result",
+        json!({ "firing": trading_firing, "execution": ran["execution"], "record": answers[0], "positions": held["positions"] }),
+    );
+
+    // --- G23 — the environment and the document -----------------------------
+    let env_script = script(&g, "g23-env", "env");
+    let brief = "report the environment the daemon handed the child";
+    let context = "G23's context, carried into the document verbatim";
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, probe) = g.cli_json(
+        "G23",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g23-env",
+            "--brief",
+            brief,
+            "--context",
+            context,
+            "--at",
+            &at,
+            "--code",
+            &env_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{probe}");
+    let probe_id = probe["id"].as_str().expect("id").to_owned();
+    let probe_firing = await_firing(&g, &probe_id, 0);
+    await_execution(&g, &probe_firing, Duration::from_secs(15));
+    let (_, reported) = g.cli_json(
+        "G23",
+        &["--json", "trigger", "firing", &gamma, &probe_firing],
+    );
+    assert_eq!(reported["execution"]["outcome"], "EXITED");
+    assert_eq!(reported["execution"]["exit_code"], 0);
+    let seen = parse(
+        reported["execution"]["stdout"]
+            .as_str()
+            .expect("the captured standard output")
+            .trim(),
+    );
+
+    let (row_desk_id, row_desk_name, row_workspace): (String, String, String) = g
+        .db()
+        .query_row(
+            "SELECT id, name, workspace_path FROM desks WHERE id = ?1",
+            [&gamma_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("gamma's desk row");
+    assert_eq!(seen["MARKETRIG_DESK_ID"], row_desk_id.as_str());
+    assert_eq!(seen["MARKETRIG_DESK_NAME"], row_desk_name.as_str());
+    assert_eq!(seen["MARKETRIG_TRIGGER_ID"], probe_id.as_str());
+    assert_eq!(seen["MARKETRIG_FIRING_ID"], probe_firing.as_str());
+    // Canonicalized on both sides: the evidence root is under a symlinked
+    // temporary path on macOS, and the child reports where it actually is.
+    let reported_cwd =
+        fs::canonicalize(seen["cwd"].as_str().expect("cwd")).expect("the child's cwd");
+    let workspace = fs::canonicalize(g.workspace(&gamma)).expect("the desk workspace");
+    assert_eq!(
+        reported_cwd, workspace,
+        "the child runs in the desk workspace (§4.3)"
+    );
+    assert_eq!(seen["document"]["version"], 1);
+    assert_eq!(seen["document"]["firing"]["id"], probe_firing.as_str());
+    assert_eq!(seen["document"]["trigger"]["id"], probe_id.as_str());
+    assert_eq!(seen["document"]["trigger"]["name"], "g23-env");
+    assert_eq!(seen["document"]["trigger"]["recurrence"], "ONE_OFF");
+    assert_eq!(seen["document"]["desk"]["id"], row_desk_id.as_str());
+    assert_eq!(seen["document"]["desk"]["name"], row_desk_name.as_str());
+    assert_eq!(
+        seen["document"]["desk"]["workspace_path"],
+        row_workspace.as_str()
+    );
+    assert_eq!(seen["document"]["brief"], brief);
+    assert_eq!(seen["document"]["context"], context);
+
+    // A patched brief reaches the next document; the firing already accepted
+    // keeps the brief it was accepted with (§3.2 snapshots into the firing).
+    let first_brief = "the brief the first firing snapshotted";
+    let second_brief = "the brief the patch installed";
+    let cycle_start = now() + 2;
+    let (exit, cycle) = g.cli_json(
+        "G23",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g23-cycle",
+            "--brief",
+            first_brief,
+            "--rrule",
+            "FREQ=MINUTELY",
+            "--dtstart",
+            &marketrig_acceptance::utc(cycle_start),
+            "--tz",
+            "UTC",
+            "--code",
+            &env_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{cycle}");
+    let cycle_id = cycle["id"].as_str().expect("id").to_owned();
+    let cycle_first = await_firing(&g, &cycle_id, 0);
+    await_execution(&g, &cycle_first, Duration::from_secs(15));
+    let (exit, patched) = g.cli_json(
+        "G23",
+        &[
+            "--json",
+            "trigger",
+            "update",
+            &gamma,
+            "g23-cycle",
+            "--brief",
+            second_brief,
+        ],
+    );
+    assert_eq!(exit, 0, "{patched}");
+    assert_eq!(patched["brief"], second_brief);
+    assert_eq!(
+        patched["revision"], 2,
+        "every patch bumps the revision (§8)"
+    );
+    assert_eq!(
+        patched["next_occurrence_ns"],
+        json!(cycle_start * ns + 60 * ns),
+        "a patch re-projects from the definition's own anchor (§2)"
+    );
+
+    // The next candidate is a minute after the first occurrence; awaiting the
+    // second firing is bounded at 75 s.
+    let cycle_second = await_firing(&g, &cycle_id, 1);
+    await_execution(&g, &cycle_second, Duration::from_secs(15));
+    let (_, second) = g.cli_json(
+        "G23",
+        &["--json", "trigger", "firing", &gamma, &cycle_second],
+    );
+    let second_seen = parse(
+        second["execution"]["stdout"]
+            .as_str()
+            .expect("the captured standard output")
+            .trim(),
+    );
+    assert_eq!(second_seen["document"]["brief"], second_brief);
+    assert_eq!(second_seen["document"]["trigger"]["revision"], 2);
+    assert_eq!(
+        g.scalar::<String>("SELECT brief FROM firings WHERE id = ?1", &[&cycle_first]),
+        first_brief,
+        "the earlier firing keeps the brief it was accepted with"
+    );
+
+    // Disabled here so the rule stops firing: G24 onwards reason about one desk
+    // and this one would otherwise keep claiming the executor every minute.
+    let (exit, stopped) = g.cli_json(
+        "G23",
+        &["--json", "trigger", "disable", &gamma, "g23-cycle"],
+    );
+    assert_eq!(exit, 0, "{stopped}");
+    g.note(
+        "G23",
+        "the child saw the four identifiers, the desk workspace, and a version-1 document; a patched brief reached the next document while the earlier firing kept its own",
+        json!({ "environment": seen, "first": first_brief, "second": second_seen["document"]["brief"] }),
+    );
+
+    // --- G24 — every outcome is one record and one prompt --------------------
+    // One instant for all four: they queue in acceptance order and the executor
+    // runs them one at a time per desk (§4.3), which is what makes the pass
+    // below deterministic.
+    let outcomes = now() + 4;
+    let at = format!("{}Z", marketrig_acceptance::utc(outcomes));
+    let exit_script = script(&g, "g24-exit", "exit 3");
+    let sleep_script = script(&g, "g24-sleep", "sleep 30");
+    let flood_script = script(&g, "g24-flood", "flood 2000000");
+    let spawn_script = script(&g, "g24-spawn", "exit 0");
+    // The argv[0] no platform can launch (§4.4 `SPAWN_FAILED`).
+    const MISSING: &str = "/nonexistent/marketrig-no-such-binary";
+    let plans: Vec<(&str, &str, Vec<&str>)> = vec![
+        (
+            "g24-exit",
+            "EXITED",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g24-exit",
+                "--brief",
+                "a nonzero exit",
+                "--at",
+                &at,
+                "--code",
+                &exit_script,
+                "--arg",
+                &runner,
+                "--arg",
+                "{script}",
+            ],
+        ),
+        (
+            "g24-timeout",
+            "TIMED_OUT",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g24-timeout",
+                "--brief",
+                "a run past its timeout",
+                "--at",
+                &at,
+                "--code",
+                &sleep_script,
+                "--arg",
+                &runner,
+                "--arg",
+                "{script}",
+                "--timeout",
+                "1",
+            ],
+        ),
+        (
+            "g24-flood",
+            "OUTPUT_LIMIT",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g24-flood",
+                "--brief",
+                "a run past the stdout cap",
+                "--at",
+                &at,
+                "--code",
+                &flood_script,
+                "--arg",
+                &runner,
+                "--arg",
+                "{script}",
+            ],
+        ),
+        (
+            "g24-spawn",
+            "SPAWN_FAILED",
+            vec![
+                "--json",
+                "trigger",
+                "create",
+                &gamma,
+                "--name",
+                "g24-spawn",
+                "--brief",
+                "a launch that cannot happen",
+                "--at",
+                &at,
+                "--code",
+                &spawn_script,
+                "--arg",
+                MISSING,
+                "--arg",
+                "{script}",
+            ],
+        ),
+    ];
+    let mut runs: Vec<(&str, &str, String, String)> = Vec::new();
+    for (name, outcome, args) in &plans {
+        let (exit, created) = g.cli_json("G24", args);
+        assert_eq!(exit, 0, "{created}");
+        runs.push((
+            name,
+            outcome,
+            created["id"].as_str().expect("id").to_owned(),
+            String::new(),
+        ));
+    }
+    assert!(
+        now() < outcomes,
+        "the four creations must land before their shared instant"
+    );
+    for run in runs.iter_mut() {
+        run.3 = await_firing(&g, &run.2, 0);
+        // 25 s covers the whole serial pass: one 1-second timeout, one 1 MiB
+        // flood, and two immediate ends, each spawned after the one before.
+        await_execution(&g, &run.3, Duration::from_secs(25));
+    }
+
+    let mut settled = Vec::new();
+    for (name, outcome, trigger_id, firing_id) in &runs {
+        // Read straight off the route rather than through `marketrig trigger
+        // firing`: the flood's capture is a megabyte, and `cli_json` would put
+        // every byte of it into the observations file.
+        let (status, shown) = g.call(
+            &endpoint,
+            "GET",
+            &format!("/desks/{gamma_id}/firings/{firing_id}"),
+            None,
+        );
+        assert_eq!(status, 200, "{name}: {shown}");
+        let execution = shown["execution"].clone();
+        assert_eq!(execution["outcome"], *outcome, "{name}: {shown}");
+        match *outcome {
+            "EXITED" => {
+                assert_eq!(execution["exit_code"], 3, "{name}");
+                assert!(
+                    execution["stderr"]
+                        .as_str()
+                        .is_some_and(|e| e.contains("trigger-code exiting 3")),
+                    "{name}: {execution}"
+                );
+            }
+            "TIMED_OUT" => {
+                assert!(execution.get("exit_code").is_none(), "{name}: {execution}");
+                let ran_for = execution["finished_at_ns"].as_i64().unwrap_or_default()
+                    - execution["started_at_ns"].as_i64().unwrap_or_default();
+                assert!(
+                    ran_for < 10 * ns,
+                    "a one-second timeout ends the run promptly, not after the script's 30 s: {ran_for} ns"
+                );
+            }
+            "OUTPUT_LIMIT" => {
+                assert_eq!(execution["stdout_truncated"], true, "{name}: {execution}");
+                assert_eq!(
+                    execution["stdout_bytes"],
+                    json!(1024 * 1024),
+                    "the §4.3 cap"
+                );
+                assert!(
+                    execution["error"]
+                        .as_str()
+                        .is_some_and(|e| e.contains("stdout")),
+                    "{execution}"
+                );
+            }
+            _ => {
+                assert!(execution.get("exit_code").is_none(), "{name}: {execution}");
+                assert_eq!(execution["executable"], MISSING, "{name}: {execution}");
+                assert!(
+                    execution["error"].as_str().is_some_and(|e| !e.is_empty()),
+                    "{execution}"
+                );
+            }
+        }
+        assert_eq!(
+            g.scalar::<i64>(
+                "SELECT count(*) FROM executions WHERE firing_id = ?1",
+                &[firing_id]
+            ),
+            1,
+            "{name}: one record"
+        );
+        assert_eq!(
+            result_prompts(&g, &gamma_id, firing_id).len(),
+            1,
+            "{name}: one prompt"
+        );
+        assert_eq!(
+            projected(&g, trigger_id),
+            None,
+            "{name}: a consumed one-off"
+        );
+        settled.push(json!({
+            "trigger": name,
+            "outcome": execution["outcome"],
+            "exit_code": execution["exit_code"],
+            "error": execution["error"],
+            "executable": execution["executable"],
+            "stdout_bytes": execution["stdout_bytes"],
+            "stdout_truncated": execution["stdout_truncated"],
+            "stderr_bytes": execution["stderr_bytes"],
+        }));
+    }
+
+    // Nothing reruns: the `executions` row is the at-most-once fact (§4.3).
+    std::thread::sleep(Duration::from_secs(5));
+    for (name, _, _, firing_id) in &runs {
+        assert_eq!(
+            g.scalar::<i64>(
+                "SELECT count(*) FROM executions WHERE firing_id = ?1",
+                &[firing_id]
+            ),
+            1,
+            "{name}: still one record five seconds on"
+        );
+        assert_eq!(
+            result_prompts(&g, &gamma_id, firing_id).len(),
+            1,
+            "{name}: still one prompt"
+        );
+    }
+    g.note(
+        "G24",
+        "four outcomes, each exactly one execution record and one queued prompt, and nothing rerun",
+        json!({ "executions": settled }),
+    );
+
+    // --- G25 — misses across downtime ---------------------------------------
+    // Twelve seconds ahead: `POST /quit` is bounded at 5 s (root §4.6) and the
+    // harness allows 8 for the process to go, so both candidates are still
+    // ahead when the daemon is gone. Passing them while nothing runs is what
+    // makes them misses rather than late acceptances (§3.2).
+    let lapse = now() + 12;
+    let lapse_at = format!("{}Z", marketrig_acceptance::utc(lapse));
+    let lapse_dtstart = marketrig_acceptance::utc(lapse);
+    let (exit, missed_once) = g.cli_json(
+        "G25",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g25-once",
+            "--brief",
+            "due while the daemon is down",
+            "--at",
+            &lapse_at,
+        ],
+    );
+    assert_eq!(exit, 0, "{missed_once}");
+    let missed_once_id = missed_once["id"].as_str().expect("id").to_owned();
+    let (exit, missed_every) = g.cli_json(
+        "G25",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g25-every",
+            "--brief",
+            "a rule due while the daemon is down",
+            "--rrule",
+            "FREQ=MINUTELY",
+            "--dtstart",
+            &lapse_dtstart,
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_eq!(exit, 0, "{missed_every}");
+    let missed_every_id = missed_every["id"].as_str().expect("id").to_owned();
+    assert_eq!(projected(&g, &missed_once_id), Some(lapse * ns));
+    assert_eq!(projected(&g, &missed_every_id), Some(lapse * ns));
+
+    g.stop("G25", daemon8);
+    assert!(
+        now() < lapse,
+        "the daemon outlived the candidates it was meant to miss"
+    );
+    within(
+        Duration::from_secs(30),
+        "the missed instant to pass",
+        || now() > lapse,
+    );
+    let daemon9 = g.spawn("G25");
+    endpoint = daemon9.endpoint.clone();
+
+    let missed = |g: &Harness, trigger_id: &str| -> Vec<Value> {
+        g.events()
+            .into_iter()
+            .filter(|event| {
+                event.kind == "TRIGGER_MISSED" && event.payload["trigger_id"] == trigger_id
+            })
+            .map(|event| event.payload)
+            .collect()
+    };
+    within(Duration::from_secs(10), "both misses recorded", || {
+        missed(&g, &missed_once_id).len() == 1 && missed(&g, &missed_every_id).len() == 1
+    });
+    for (trigger_id, name, recurrence) in [
+        (&missed_once_id, "g25-once", "ONE_OFF"),
+        (&missed_every_id, "g25-every", "RECURRING"),
+    ] {
+        let payload = missed(&g, trigger_id).remove(0);
+        assert_eq!(payload["name"], name);
+        assert_eq!(payload["recurrence"], recurrence);
+        assert_eq!(
+            payload["missed_from_ns"],
+            json!(lapse * ns),
+            "the old projection (§3.2)"
+        );
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["count_capped"], false);
+        assert!(
+            payload["missed_through_ns"].as_i64().unwrap_or_default() > lapse * ns,
+            "{payload}"
+        );
+        assert_eq!(
+            firings(&g, trigger_id),
+            0,
+            "{name}: a miss is never a catch-up firing"
+        );
+    }
+    assert_eq!(projected(&g, &missed_once_id), None);
+    let (exit, enabled) = g.cli_json("G25", &["--json", "trigger", "enable", &gamma, "g25-once"]);
+    assert_eq!(exit, 0, "{enabled}");
+    assert_eq!(enabled["enabled"], true);
+    assert!(
+        enabled.get("next_occurrence_ns").is_none(),
+        "an elapsed one-off stays never due after enable (§3.1): {enabled}"
+    );
+    assert_eq!(projected(&g, &missed_once_id), None);
+    let advanced = projected(&g, &missed_every_id).expect("the rule is due again");
+    assert!(
+        advanced > now() * ns,
+        "the rule's projection is ahead: {advanced}"
+    );
+    let (status, unchanged) = g.api(
+        "G25",
+        &endpoint,
+        "GET",
+        &trigger_route(&missed_every_id),
+        None,
+    );
+    assert_eq!(status, 200, "{unchanged}");
+    assert_eq!(
+        unchanged["schedule"],
+        json!({ "rrule": "FREQ=MINUTELY", "dtstart": lapse_dtstart, "tz": "UTC" }),
+        "the anchor a miss leaves alone (§3.3)"
+    );
+    let (exit, quiet) = g.cli_json(
+        "G25",
+        &["--json", "trigger", "disable", &gamma, "g25-every"],
+    );
+    assert_eq!(exit, 0, "{quiet}");
+    g.note(
+        "G25",
+        "a one-off and a rule both due during downtime became one miss each with no firing, the one-off stayed consumed through enable, and the rule kept its anchor",
+        json!({ "one_off": missed(&g, &missed_once_id), "recurring": missed(&g, &missed_every_id) }),
+    );
+
+    // --- G26 — a restart mid-flight -----------------------------------------
+    let inflight_script = script(&g, "g26-inflight", "sleep 30");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, inflight) = g.cli_json(
+        "G26",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g26-inflight",
+            "--brief",
+            "still running when the daemon dies",
+            "--at",
+            &at,
+            "--code",
+            &inflight_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(exit, 0, "{inflight}");
+    let inflight_id = inflight["id"].as_str().expect("id").to_owned();
+    let inflight_firing = await_firing(&g, &inflight_id, 0);
+    within(
+        Duration::from_secs(15),
+        "the execution to be RUNNING",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM executions WHERE firing_id = ?1 AND state = 'RUNNING'",
+                &[&inflight_firing],
+            ) == 1
+        },
+    );
+    let before = g.scalar::<String>(
+        "SELECT id || ' ' || trigger_id || ' ' || occurrence_ns || ' ' || accepted_at_ns \
+         || ' ' || trigger_revision || ' ' || brief FROM firings WHERE id = ?1",
+        &[&inflight_firing],
+    );
+    let dead = daemon9.endpoint.daemon_uuid.clone();
+    let stale = daemon9.endpoint.clone();
+    g.kill("G26", daemon9);
+    g.await_unverifiable(&stale);
+    let daemon10 = g.spawn("G26");
+    endpoint = daemon10.endpoint.clone();
+
+    let recoveries = g.recoveries();
+    let recovery = recoveries.last().expect("a RECOVERY").clone();
+    assert_eq!(recovery["daemon_uuid"], endpoint.daemon_uuid.as_str());
+    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
+    assert_eq!(
+        recovery["executions_lost"],
+        json!([{ "firing_id": inflight_firing, "desk_id": gamma_id, "daemon_uuid": dead }]),
+        "recovery names what the dead daemon was running (§4.4)"
+    );
+    let (exit, lost) = g.cli_json(
+        "G26",
+        &["--json", "trigger", "firing", &gamma, &inflight_firing],
+    );
+    assert_eq!(exit, 0, "{lost}");
+    assert_eq!(lost["execution"]["state"], "COMPLETE");
+    assert_eq!(lost["execution"]["outcome"], "DAEMON_LOST");
+    assert_eq!(lost["execution"]["daemon_uuid"], dead.as_str());
+    assert_eq!(lost["execution"]["error"], dead.as_str());
+    assert!(lost["execution"].get("exit_code").is_none(), "{lost}");
+    let queued = result_prompts(&g, &gamma_id, &inflight_firing);
+    assert_eq!(
+        queued.len(),
+        1,
+        "recovery queues the lost run's result (§4.4)"
+    );
+    let (_, settled_prompt) = g.cli_json("G26", &["--json", "prompt", "show", &gamma, &queued[0]]);
+    assert_eq!(settled_prompt["state"], "QUEUED");
+    assert_eq!(
+        settled_prompt["payload"]["execution"]["outcome"],
+        "DAEMON_LOST"
+    );
+    assert_eq!(
+        g.scalar::<String>(
+            "SELECT id || ' ' || trigger_id || ' ' || occurrence_ns || ' ' || accepted_at_ns \
+             || ' ' || trigger_revision || ' ' || brief FROM firings WHERE id = ?1",
+            &[&inflight_firing],
+        ),
+        before,
+        "the firing row survived the kill untouched"
+    );
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM executions WHERE firing_id = ?1",
+            &[&inflight_firing]
+        ),
+        1,
+        "a lost run is settled, never re-attempted (§4.4)"
+    );
+    g.stop("G26", daemon10);
+    g.note(
+        "G26",
+        "a hard kill mid-run left the firing intact, and recovery settled the execution DAEMON_LOST with its queued result and no second attempt",
+        json!({ "recovery": recovery, "execution": lost["execution"] }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-G20 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-G26 complete", json!({ "evidence": evidence }));
 }
