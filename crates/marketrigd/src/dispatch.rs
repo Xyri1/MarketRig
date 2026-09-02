@@ -490,9 +490,17 @@ pub async fn run(
             },
             exit = exits.recv() => match exit {
                 Some(exit) => {
-                    dispatcher
-                        .ended(&exit.desk_id, exit.reason, exit.code, None)
-                        .await;
+                    // A terminal that is no longer the desk's live process (a
+                    // later session after a switch) is stale evidence.
+                    let current = session::live_process(&dispatcher.store, &exit.desk_id)
+                        .ok()
+                        .flatten()
+                        .map(|p| p.pid);
+                    if current == Some(i64::from(exit.pid)) {
+                        dispatcher
+                            .ended(&exit.desk_id, exit.reason, exit.code, None)
+                            .await;
+                    }
                 }
                 None => break,
             },

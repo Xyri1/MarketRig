@@ -85,6 +85,9 @@ struct Threads {
     /// The desk's thread: the pointer, known at spawn for a resume and
     /// discovered from `thread/started` for a new session.
     by_desk: HashMap<String, String>,
+    /// Desks with a Codex terminal this adapter started, by child pid; the
+    /// pointer map above outlives a session, this does not.
+    live: HashMap<String, u32>,
     /// Workspaces whose `thread/started` has not arrived yet, by canonical path.
     awaiting: HashMap<PathBuf, String>,
     /// The thread's last broadcast status; the delivery gate reads it.
@@ -448,18 +451,18 @@ impl Inner {
     /// `CONTROL_PLANE_LOST` with its pointer kept, and the start is retried
     /// once before the runtime is marked unavailable.
     async fn lost(self: Arc<Self>) {
-        let desks: Vec<String> = {
+        let desks: Vec<(String, u32)> = {
             let mut threads = self.threads.lock().expect("threads");
             threads.ready.clear();
             threads.awaiting.clear();
-            threads.by_desk.keys().cloned().collect()
+            threads.live.drain().collect()
         };
         self.event_row(
             "CONTROL_PLANE_LOST",
             json!({"runtime": "codex", "desks": desks.len()}),
         );
-        for desk_id in desks {
-            self.terminals.shutdown(&desk_id);
+        for (desk_id, pid) in desks {
+            self.terminals.shutdown_pid(&desk_id, pid);
             self.emit(AdapterEvent::Exited {
                 desk_id,
                 reason: "CONTROL_PLANE_LOST",
@@ -625,6 +628,12 @@ impl Adapter for Codex {
                 },
             )
             .map_err(|e| e.to_string())?;
+        inner
+            .threads
+            .lock()
+            .expect("threads")
+            .live
+            .insert(desk_id.to_string(), pid);
         Ok(Activation {
             pid,
             native_session_id: resume.map(str::to_string),
@@ -715,6 +724,7 @@ impl Adapter for Codex {
         {
             let mut threads = inner.threads.lock().expect("threads");
             threads.ready.remove(desk_id);
+            threads.live.remove(desk_id);
             threads.awaiting.retain(|_, desk| desk != desk_id);
         }
         inner.terminals.shutdown(desk_id);

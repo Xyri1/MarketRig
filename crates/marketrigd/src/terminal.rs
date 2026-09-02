@@ -56,6 +56,8 @@ pub enum Frame {
 #[derive(Debug, Clone)]
 pub struct TerminalExit {
     pub desk_id: String,
+    /// The child that ended; a later terminal on the same desk is not this one.
+    pub pid: u32,
     /// `EXITED` for the child's own exit, `INTERRUPTED` when MarketRig ended it.
     pub reason: &'static str,
     pub code: Option<i64>,
@@ -229,6 +231,7 @@ impl Manager {
                     .send(Frame::Exited { reason, code }, 0);
                 let _ = exits.send(TerminalExit {
                     desk_id,
+                    pid,
                     reason,
                     code,
                 });
@@ -341,6 +344,21 @@ impl Manager {
     }
 
     /// Every live terminal, for the Quit path (root §4.2).
+    /// `shutdown` only when the desk's current terminal is still the child
+    /// `pid` names; a terminal started since (another runtime after a switch)
+    /// is left alone.
+    pub fn shutdown_pid(&self, desk_id: &str, pid: u32) {
+        let current = self
+            .terminals
+            .lock()
+            .expect("terminals")
+            .get(desk_id)
+            .map(|t| t.pid);
+        if current == Some(pid) {
+            self.shutdown(desk_id);
+        }
+    }
+
     pub fn shutdown_all(&self) {
         let desks: Vec<String> = self
             .terminals
