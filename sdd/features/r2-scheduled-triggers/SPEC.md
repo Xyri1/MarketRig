@@ -286,7 +286,7 @@ marketrig [--json] prompt list <desk>
 marketrig [--json] prompt show <desk> <prompt-id>
 ```
 
-`--code` reads the file; a file that is unreadable or not UTF-8 is a usage error (exit 2) because the CLI cannot carry it. `--suffix` defaults to the file's own extension (`.py` for `job.py`, empty when there is none); `--arg` repeats to form `argv` and defaults to `{script}` alone; `--timeout` defaults to the daemon's default by omission. Every other value passes through untouched; the daemon validates. Human output: listings as tab-separated rows (`triggers`: name, recurrence, enabled, next occurrence, id; `firings`: id, occurrence, accepted, outcome; `prompts`: id, kind, state, created), single resources as `field: value` lines with nested objects as JSON; `--json` the route's body verbatim.
+`--code` reads the file before the daemon is contacted; a file that is unreadable or not UTF-8 is a usage error (exit 2) because the CLI cannot carry it, and it outranks `DAEMON_UNREACHABLE`. `--suffix` defaults to the file's own extension (`.py` for `job.py`, empty when there is none); `--arg` repeats to form `argv` and defaults to `{script}` alone; `--timeout` defaults to the daemon's default by omission. Every other value passes through untouched; the daemon validates. Human output: listings as tab-separated rows (`triggers`: name, recurrence, enabled, next occurrence, id; `firings`: id, occurrence, accepted, outcome; `prompts`: id, kind, state, created), single resources as `field: value` lines in the resource's §8 key order (nulls omitted, nested objects and arrays as compact JSON, keys §8 does not name printed last); `--json` the route's body verbatim.
 
 ## 10. Acceptance
 
