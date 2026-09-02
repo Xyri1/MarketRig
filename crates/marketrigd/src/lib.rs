@@ -74,6 +74,10 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             }
             let _ = shut_tx.send(true);
         });
+        // R2 feature SPEC §3.1 and §4.3: the scheduler and the executor wake
+        // on mutations and acceptances, and both stop on the shutdown watch.
+        let scheduler_wake = Arc::new(tokio::sync::Notify::new());
+        let exec_wake = Arc::new(tokio::sync::Notify::new());
         let router = api::router(api::ApiState {
             store: startup.store.clone(),
             desks_home: startup.roots.desks.clone(),
@@ -82,6 +86,7 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             started_at_ns: startup.started_at_ns,
             quit: quit_tx,
             registry: registry.clone(),
+            scheduler_wake: scheduler_wake.clone(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -91,12 +96,20 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
                 })
                 .into_future(),
         );
+        let scheduler = tokio::spawn(schedule::run(
+            startup.store.clone(),
+            startup.started_at_ns,
+            scheduler_wake,
+            exec_wake.clone(),
+            shut_rx.clone(),
+        ));
         let mut began = shut_rx.clone();
         let _ = began.changed().await;
         // §4.2: bounded end to end at 5 seconds, after which the daemon exits
         // anyway. The desks' trading nodes stop inside that same budget.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let _ = tokio::time::timeout_at(deadline, serving).await;
+        let _ = tokio::time::timeout_at(deadline, scheduler).await;
         let _ = tokio::time::timeout_at(
             deadline,
             tokio::task::spawn_blocking(move || registry.stop_all()),

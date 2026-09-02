@@ -34,6 +34,8 @@ pub struct ApiState {
     /// Every desk's trading node, started lazily on first market-plane use
     /// (R1 feature SPEC §4.3).
     pub registry: Arc<crate::node::Registry>,
+    /// Wakes the scheduler after a trigger mutation (R2 feature SPEC §3.1).
+    pub scheduler_wake: Arc<tokio::sync::Notify>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -420,6 +422,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         started_at_ns: 1_700_000_000_000_000_000,
         quit,
         registry: registry.clone(),
+        scheduler_wake: Arc::new(tokio::sync::Notify::new()),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
