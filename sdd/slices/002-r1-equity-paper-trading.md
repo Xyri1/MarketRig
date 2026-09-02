@@ -1,6 +1,6 @@
 # Slice 002 — R1 equity paper trading
 
-**Status:** Active 2026-09-01
+**Status:** Frozen 2026-09-02 — exit checks green on macOS and Windows CI (run 33581205659, commit 079d83f); E1 and E2 attended the same day on all four platform-and-runtime cells — macOS bundles `experiment-codex-1788316954` and `experiment-claude-1788317581`, the Windows cells operator-run on that machine
 **Implements:** all of [`features/r1-equity-paper-trading/`](../features/r1-equity-paper-trading/SPEC.md)
 **Exit:** feature SPEC §11 in full — the 16 module checks, gate G12–G20 after G11, and the static checks green on macOS and Windows CI, plus E1 and E2 attended once per platform-and-runtime cell (agent-behavior aspects end inconclusive rather than failed, root §17).
 

@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestone R0 is delivered; Milestone R1's design is complete and its implementation is active in [`slices/002-r1-equity-paper-trading.md`](slices/002-r1-equity-paper-trading.md).
+Milestones R0 and R1 are delivered; Milestone R2's design is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -42,9 +42,9 @@ Dependencies: none.
 
 ## Milestone R1 — Equity paper trading and the agent's market surface
 
-This milestone realizes the choices recorded per D4, D5, D9, D38, D39, D63, D64, and D76.
+This milestone realizes the choices recorded per D4, D5, D9, D38, D39, D63, D64, and D76, and settles the equity market plane as D78.
 
-**Design complete** — [`features/r1-equity-paper-trading/`](features/r1-equity-paper-trading/PRD.md) (PRD, DECISIONS, SPEC drafted 2026-09-01).
+**Delivered 2026-09-02** — designed in [`features/r1-equity-paper-trading/`](features/r1-equity-paper-trading/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/002-r1-equity-paper-trading.md`](slices/002-r1-equity-paper-trading.md). Its sixteen module checks, the gate's G12–G20, and the static checks are green on macOS and Windows CI, and E1 and E2 ran attended on all four platform-and-runtime cells.
 
 **Goal:** Produce the first authoritative trading fact, and give a real agent both halves of the market surface.
 
@@ -70,6 +70,8 @@ a desk buys and sells one equity on a real market quote
    resource twice, see a fresh value, and submit and cancel a paper order through
    the typed tools
 ```
+
+**Produced** by the gate's G13, G15, and G17 on both platforms — a USD round trip whose closing fill commits the cycle and its queued evaluation in one transaction, a Hong Kong round trip closing in HKD with commissions at the HK rate, and a restart after which a resting order stands under its original client order identifier — and by the attended E1 and E2 on 2026-09-02 across the four cells: a real Codex CLI session and a real Claude Code session each read the desk's quote resource twice, then submitted and cancelled a resting paper order through the typed tools, the harness verifying by the daemon's own rows (macOS bundles `experiment-codex-1788316954` and `experiment-claude-1788317581`).
 
 **Why here:** stocks lead the trading ladder (per D76), the trading plane is the product's reason to exist and the one thing the spikes proved outright, and running both real runtimes against the MCP surface this early settles the surface-split risk (per D4) before four other milestones depend on it.
 
@@ -265,10 +267,8 @@ Dependencies: Milestones R0–R6.
 
 These are known and unpaid. Each names the milestone that clears it, or the ceiling that stands.
 
-- **Real market-hours behavior of the equity feed is unproven** — the feasibility evidence was gathered on a US market holiday against a static last price, so tick ordering, staleness, and duplicate suppression under a moving book are untested, and the non-US markets' delay characteristics are unverified. R1 owns it.
-- **Paper-book state reload across a restart is unproven** on the NautilusTrader crates; the feasibility runs never enabled it. R1's restoration evidence owns it.
-- **Scale is unmeasured beyond two concurrent books.** R1 proves two isolated desks; larger fan-out and its per-desk footprint stay open and are deferred rather than designed for.
-- **The deterministic gate is not hermetic** — it reaches a live public market source. A stand-in venue speaking the adapter's protocol is the recorded upgrade path.
+- **Scale is unmeasured beyond one trading desk per daemon.** R1's gate trades on one desk; isolation across concurrent books, larger fan-out, and per-desk footprint stay open and are deferred rather than designed for.
+- **The deterministic gate is hermetic for equities only** — R1's stand-in feed keeps it off the public market; the crypto milestone owes a stand-in venue speaking the Kraken adapter's protocol before its scenarios join the gate.
 - **There is no Claude Code stand-in that holds a session**, so one delivery scenario takes a skip-with-evidence path in the gate and is proven only in R7's attended cells.
 - **Claude Code exposes no structured interrupt**, so interruption on that runtime is the user's keyboard and the harness records only end-of-turn evidence.
 - **The memory child's credentials reach it through its environment** — a stated, deliberate exception to the credential boundary (per D49) that must be restated wherever that child is specified, not quietly dropped.
@@ -298,6 +298,7 @@ Portability is excluded per D13. Mechanics intentionally left unresolved are lis
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
 - venues beyond the supported equity markets and Kraken, and asset classes beyond equities and crypto (FX, options, …);
 - a keyed real-book equity feed (broker OpenAPI or Alpaca-class source) behind the same data-client seam, if learning evidence needs honest spreads (per D76's ponytail note);
+- per-market exchange holiday calendars, a maintained instrument-catalog source or per-band tick logic, an installation-wide fetch layer behind the per-node feed clients, and a side-aware equity fee model (per D78's ponytail notes);
 - order lists (brackets, OCO) and execution algorithms;
 - paper simulation of funding payments, margin interest, or liquidation (per D74);
 - normalized universal agent transcripts;

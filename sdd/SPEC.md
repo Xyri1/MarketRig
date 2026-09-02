@@ -582,7 +582,7 @@ Claude delivery is considered handed off when written to the Channel transport, 
 
 ## 12. Trading and public-data boundary
 
-*Decision basis: per D5, D9, D10, D38, D39, D63, D64, D70, D74, and D76.*
+*Decision basis: per D5, D9, D10, D38, D39, D63, D64, D70, D74, D76, and D78.*
 
 ### 12.1 Trading authority and node topology
 
@@ -620,6 +620,9 @@ OpenBB research is deferred past MVP on scope (per D9): MarketRig bundles no res
 - Canonical instrument identity is the NautilusTrader instrument identifier.
 - Each desk's paper book is isolated: orders, positions, balances, and mutable execution state never cross desks.
 - One keyless equity feed serves the US, Hong Kong, and China A-share markets. It carries no bid or ask, so the desk's equity book is synthesized in every market and everything downstream that would reason about spread or depth is told so; non-US observations may be delayed, which the read's provenance, timing, and age expose rather than hide (per D76).
+- The equity feed is one polled Yahoo chart client per node on MarketRig's own thin endpoint layer. It polls each catalog instrument once at subscription whatever the phase, then only while the instrument's market is `OPEN` — every 30 seconds, tightened to every 10 seconds while the desk holds an open order or a nonflat position in it. HTTP 429 is retried up to 8 attempts 400 ms apart; exhaustion or any other failure leaves the last accepted observation standing and marks health `DEGRADED`. The feed declares no delay figure — `exchangeDataDelayedBy` is null on all three exchanges — so source time against receipt time is the only delay evidence, and the contract promises no delay constant (per D78).
+- Health is `LIVE`, `DEGRADED`, or `UNAVAILABLE`; an unavailable read omits exactly the price fields and keeps identity, phase, health, and the synthesized-book flag. Every observation is labeled with its market phase — `OPEN` inside a weekly session, `CLOSED` otherwise: US 09:30–16:00 America/New_York; Hong Kong 09:30–12:00 and 13:00–16:00 Asia/Hong_Kong; China A-share 09:30–11:30 and 13:00–15:00 Asia/Shanghai; Monday through Friday. Phase gates polling and labels observations; it never gates an order. There is no holiday calendar (per D78).
+- Tradable instruments are a curated catalog compiled into the daemon — per entry the NautilusTrader identifier, the feed symbol, the market key, the currency, a fixed price increment, and the lot size; fifteen entries at R1. The catalog is the polling universe and the `instruments` resource; anything outside it answers `INSTRUMENT_UNKNOWN`, and extending it is a data change rather than a decision (per D78).
 
 ### 12.3 Trading actions and approvals
 
@@ -631,8 +634,16 @@ The installation-wide paper-order setting is **Always allow** or **Require appro
 
 Paper scope arrives in two stages, and MarketRig inherits the sandbox's physics exactly rather than approximating them:
 
-- **Equities first** (per D76): one keyless feed covering the US, Hong Kong, and China A-share markets against the sandbox, on one multi-currency paper account per desk with realized P&L in each instrument's own currency. T+1 settlement, daily price limits, trading halts, and opening and closing auctions are not simulated, and the seeded desk constitution names those limits. Per-exchange market-hours and staleness behavior, the synthesized book's contract, instrument metadata (tick ladders, board and round lots, currencies), the fee model per market, and the rate-limit retry policy are settled by the equity paper-trading feature specification, written before implementation, and are not invented here.
+- **Equities first** (per D76): one keyless feed covering the US, Hong Kong, and China A-share markets against the sandbox, on one multi-currency paper account per desk with realized P&L in each instrument's own currency. T+1 settlement, daily price limits, trading halts, and opening and closing auctions are not simulated, and the seeded desk constitution names those limits. Per-exchange market hours and staleness, the synthesized book, instrument metadata, the fee model, and the retry policy were settled before implementation by the equity paper-trading feature specification and are summarized in §12.2 and below (per D78).
 - **Full Kraken crypto after** (per D74): one margin netting account per desk spanning spot and futures on the single Kraken venue, long and short, with leverage bounded by the venue's advertised tier per instrument and every single-order type the sandbox matches, under the time-in-force, post-only, and reduce-only options it supports. Funding payments, margin interest, rollover fees, liquidation, and auto-deleveraging are not simulated; funding rates and mark and index prices are observations only; inverse contracts settle in their base crypto. The seeded desk constitution names those limits so the agent trades knowing them.
+
+Equity paper mechanics (per D78):
+
+- each desk's book is one NautilusTrader **cash** account with netting positions, seeded once with 100,000 USD, 1,000,000 HKD, and 1,000,000 CNY and never converting between them — an instrument trades against its own currency. Under the hood it is one venue account per venue, a market's seed split evenly across its venues, so a sufficiency refusal is per-venue with the sandbox's own reason saying so;
+- the synthesized book puts both sides at the last observation at the instrument's precision, one lot each: a market order fills at last for up to one lot and steps past it for more, a limit order rests until last crosses it, and round trips cost only fees;
+- R1 accepts `MARKET` and `LIMIT` orders, time in force GTC, plus cancel. The daemon validates **form** only — catalog membership, side, type, a quantity that is a positive multiple of the lot, a limit price that is a positive multiple of the tick and present exactly on `LIMIT` — answering `ORDER_INVALID`; sufficiency is the node's judgment, and any node refusal answers `ORDER_REJECTED` carrying the node's own reason, because a daemon predicting balance or position sufficiency would be computing a trading fact (per D38). Submission is synchronous through the sandbox; a desk that is not `READY` answers `DESK_NOT_READY`;
+- fees are charged by the sandbox at each market's declared per-side rate — US 0 bp, Hong Kong 11 bp, China A-share 3 bp — through an explicitly configured maker-taker fee model reading the rates each catalog instrument carries;
+- the desk-scoped idempotency identity above is a caller-supplied `action_id`, 1–64 characters of `[a-z0-9-]`, unique per desk, recorded in `trading_actions` before the sandbox sees the order. A repeat returns the stored record with `200` and acts on nothing, and that holds for refused actions too — the record, not the original status, is the contract. A submit's `action_id` is reused as the order's `client_order_id`; a cancel names that id plus its own `action_id`, and an unknown or terminal order answers `ORDER_NOT_FOUND`.
 
 ### 12.4 Ledger and provenance
 
@@ -648,15 +659,17 @@ Capture rules:
 
 `marketrigd` also retains authoritative records for trigger executions and delivery, code and order approvals, action source and idempotency identity, firing-time brief and context with code-snapshot identity and trigger attribution, runtime and session lifecycle and failures, and the sandbox-produced trading facts with their provenance. Agents may query but never edit these records or sandbox trading reality.
 
-Whether MarketRig additionally holds position objects outside the node is settled by the trading feature specification: the sandbox client is constructed with a mutable cache handle, and the execution spike read a closed position with its realized P&L back out of the node's own cache, so an external ledger is not forced by the platform. Event mappings, restoration mechanics, SQLite representation, and query projections are **deferred** to that specification.
+MarketRig holds no position objects outside the node: the node's own cache is the live authority and SQLite the durable one (per D78). The durable representation is migration 2's tables — `trading_actions`, `order_events`, `fills`, `position_events`, `position_cycles`, `prompts`, and `book_snapshots` — every row desk-scoped, every sandbox event stored verbatim as versioned JSON beside the normalized columns MarketRig queries. Order and position listings are query projections over those tables, never stored ones. `book_snapshots` holds exactly one serialization snapshot per desk — account state, open positions, open orders — rewritten in the same unit as every event that changes the book. A closing fill's unit inserts the `position_cycles` row and its `EVALUATION` prompt, born `QUEUED`, whose payload is a stable history reference: the cycle id, the instrument, net realized P&L with its currency, the close instant, and the client order and fill ids behind it (§11.1).
+
+A desk's node starts lazily on its first market-plane operation after daemon start, never eagerly: assert precision, build the node with the data client on the builder, load the catalog into the cache, run the node, restore from `book_snapshots` before the node is published to any caller — resting limit orders re-placed under their original client order identifiers — and append `TRADING_NODE_STARTED`. A start failure appends `TRADING_NODE_FAILED`, answers `MARKET_UNAVAILABLE` to that desk's market-plane operations, blocks nothing else, and the next operation may retry. Daemon shutdown stops every node inside §4.6's bound (per D78).
 
 ### 12.5 Open verification
 
-Three things the 2026-09-01 spikes leave unproven become required checks in the trading feature specification before its milestone closes (per D64, D76): paper-book state reload across a restart, which book restoration depends on and which the spikes disabled throughout; real market-hours behavior of the equity feed, since the data evidence was gathered on a market holiday against a static last price, leaving tick ordering, staleness, and duplicate suppression under a moving book untested; and isolation beyond two concurrent books, with per-node footprint measured only as a flat single-node soak. Larger fan-out is deferred rather than designed for.
+Of the three things the 2026-09-01 spikes left unproven (per D64, D76), R1 closed two (per D78): paper-book reload across a restart is proven by `trade::snapshot_restores_book` and the gate's G17, and the equity feed's behavior under a moving book — tick ordering, staleness, duplicate suppression, and the 429 bound — by the feed module checks and the gate's G18 on the stand-in, exercised against live sessions by the attended cells. Isolation beyond one trading desk per daemon stays unmeasured: the R1 gate trades on one desk, and larger fan-out is deferred rather than designed for.
 
 ## 13. Agent surface
 
-*Decision basis: per D4, D50, D63, D68, D69, D71, and D77.*
+*Decision basis: per D4, D50, D63, D68, D69, D71, D77, and D78.*
 
 The agent surface is split by what the agent is doing, and no capability appears on both halves (per D4). **MCP is the market plane** — what the agent does *in the market*: observe and act. **The `marketrig` CLI is the continuity plane** — what the agent does *in the harness*: durable records, structure, and cognition. The daemon's SQLite is the evidence authority for every action either plane performs; the transcript never is.
 
@@ -682,7 +695,7 @@ Rules that bind the whole plane:
 - A dead adapter or an unreachable daemon is an **explicit tool failure**, never a silent one and never an automatic retry of an uncertain action.
 - The acceptance harness carries its own MCP client, because submit and cancel exist nowhere else (per D75).
 
-Exact resource URI grammar, resource and tool schemas, instrument normalization, adapter credential handoff, feed-health representation, and per-runtime registration packaging are **deferred** to the market-awareness feature specification (§18).
+The plane's concrete shape (per D78): `marketrig-mcp --desk <name-or-id>` binds to exactly one desk, discovers and verifies the daemon exactly as the CLI does (§4.3), resolving a name through the daemon's listing, and holds no credential beyond that handoff. It enumerates five aggregate resources — `marketrig://desk/<name>/quotes`, `…/book`, `…/positions`, `…/orders`, `…/instruments` — whose bodies are the REST routes they proxy, so the enumeration stays at five however the catalog grows, and it declares a zero cache lifetime on every read so no client default can stand in for freshness. Its two tools are `submit_order` and `cancel_order`; the daemon validates everything, and the one adapter-side check is a path-segment guard on the cancel's `client_order_id`, answered as `ORDER_INVALID`. A daemon refusal, an unreachable daemon, or a failed verification is a structured tool error carrying §4.3's envelope. Registration was operator-performed through R1; the runtime adapters take it over with the delivery milestone (§6.4), and that packaging stays **deferred** (§18).
 
 ### 13.2 CLI continuity plane
 
@@ -698,7 +711,7 @@ Two rules constrain what the CLI may become. It never exposes a session lifecycl
 
 One command is deliberately none of the above, because it is not the agent speaking: `marketrig session hook` exists only because Claude Code reports a session event by running a command. It forwards the hook object from standard input to the daemon unchanged, carries no attribution, prints nothing, and exits `0` on every outcome — including no daemon and any rejection — so MarketRig's evidence can never become the agent's problem (per D69).
 
-Global flags precede the group. Desk scope is explicit or resolved by the daemon from the caller's working directory; the CLI never derives a desk itself, and it resolves a desk name to its UUID through the daemon's own listing. Mutating requests carry the trigger environment as attribution, and nothing else is inferred. The per-group invocation grammar beyond `desk`, the desk-resolution route, attribution headers, pagination, idempotency-key mechanics, and per-command output shapes are **deferred** to the feature specifications that own each group.
+Global flags precede the group. Desk scope is explicit or resolved by the daemon from the caller's working directory; the CLI never derives a desk itself, and it resolves a desk name to its UUID through the daemon's own listing. Mutating requests carry the trigger environment as attribution, and nothing else is inferred. The `history` group is `marketrig [--json] history <orders|fills|cycles> <desk-name-or-id>`: name-or-id resolved through the daemon's listing, plain rows newest first, `--json` the route's body verbatim, exit codes unchanged (per D78). The per-group invocation grammar beyond `desk` and `history`, attribution headers, pagination, and per-command output shapes are **deferred** to the feature specifications that own each group.
 
 ## 14. Desktop and application lifecycle
 
@@ -749,7 +762,7 @@ The REST surface, the per-desk terminal socket, the live-event socket, the right
 
 ## 15. Persistence, crash recovery, and history
 
-*Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, D73, and D77.*
+*Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, D73, D77, and D78.*
 
 Durable state covers desk identity and configuration, runtime selection and last native pointers, triggers and code snapshots, daemon prompts and delivery, approvals and provenance, paper-book restoration state, and complete trading history. The current market-observation cache and the MCP adapter's state are deliberately non-durable: after a restart each quote stays unavailable until a new observation arrives.
 
@@ -767,6 +780,8 @@ Storage conventions (per D45), stated explicitly because the ecosystem's gravity
 - no ORM, no query builder, no compile-time query-checking layer, and no alternate-storage interface for one implementation.
 
 Schema evolution uses numbered forward-only migrations. The daemon embeds its ordered migration list, applies whatever is pending at startup before recovery and before serving, and records the applied number in SQLite's own `PRAGMA user_version`: no bookkeeping table, no external migration file, and no down migration. A database whose `user_version` exceeds the binary's newest migration is rejected with `DATABASE_NEWER` and the daemon refuses to start; there is no downgrade path and no alternate database location. One connection is owned by one database thread that accepts submitted units and read functions; no connection, cursor, or transaction handle escapes it, and callers that must be atomic across modules submit one unit rather than composing several. The daemon relocates its whole root through one test seam (§17), which is load-bearing for both developer safety and acceptance evidence.
+
+Migration 2 (per D78) adds the trading tables named in §12.4 and widens `operational_events.kind` with `TRADING_NODE_STARTED` and `TRADING_NODE_FAILED`. SQLite cannot alter a `CHECK`, so a kind widening is a table rebuild — create the widened `STRICT` table, copy, drop, rename, recreate the index — and every later widening repeats that pattern.
 
 Operational evidence has one home: the installation-wide append-only `operational_events` table. Every row commits inside the transaction of the change it evidences, its `kind` is a closed vocabulary that each milestone extends by migration, and its `(occurred_at_ns, id)` order is the cursor the live-event socket tails (per D71). There are no per-domain event tables.
 
@@ -817,7 +832,7 @@ The exact dependency pin, child and database lifecycle, bank derivation, setting
 
 ## 17. Verification
 
-*Decision basis: per D60, D61, D67, D75, D76, and D77.*
+*Decision basis: per D60, D61, D67, D75, D76, D77, and D78.*
 
 Verification has three layers, and no layer restates another:
 
@@ -840,7 +855,7 @@ Rules both modes share (per D67, D75):
 - the chain drives **public surfaces only** — the CLI's machine output, the loopback API, the desk's MCP surface through the harness's own MCP client, the per-desk terminal socket, workspace files, and read-only SQLite. There is no test-only product surface;
 - the harness is one internal workspace crate of its own, carrying the gate and the experiment as two test targets and spawning the shipped binaries rather than linking the daemon, so the public-surfaces-only rule is structural rather than a discipline (per D77);
 - both modes relocate the whole data root through the daemon's test seam into the run's evidence directory, so the daemon's log, the desk workspaces, and every socket close code land in the bundle by construction and no run touches the per-user root. The packaged desktop smoke is the one leg that does;
-- the environment seam is two variables: `MARKETRIG_TEST_DATA_ROOT` relocates the root, and `MARKETRIG_TEST_NO_TRADING` additionally keeps a daemon off the public market feed. `marketrigd` and `marketrig` are never run by hand without the first;
+- the environment seam is three variables: `MARKETRIG_TEST_DATA_ROOT` relocates the root; `MARKETRIG_TEST_NO_TRADING` additionally keeps a daemon off the public market feed; and `MARKETRIG_TEST_QUOTE_URL`, honored only alongside the first and outranking the second, points the equity feed at a harness-owned stand-in speaking the chart endpoint's shape with scripted prices, under which the poller treats every phase as `OPEN` while observations keep labeling the real one (per D78). The daemon never reads the third otherwise, and no configuration surface can change the feed URL. `marketrigd` and `marketrig` are never run by hand without the first;
 - agent-owned steps are instructed by a user-owned `AGENTS.md` addendum and verified by side effects, with bounded attempts on fresh trade cycles; mechanical assertions get none, because MarketRig must not decide what the agent should learn while still making the learning steps executable;
 - mechanical scenarios fail the cell, while the assertions that wait on the agent to act end as **inconclusive** with their evidence, never as a product defect, and the operator decides whether to rerun;
 - desk names are run-stamped, the harness deletes nothing, and each cell produces an evidence bundle.
@@ -860,10 +875,8 @@ The following stay intentionally unresolved until their dedicated feature sessio
 - exact runtime structured-event schemas, control-plane connection mechanics, Channel packaging and allowlist mechanics, hook event handling, and runtime error schemas;
 - the trigger firing document's fields, source and output size bounds, timeout range and default, artifact storage and preview mechanics, and trigger environment variable names;
 - scheduler storage layout and transaction scenarios;
-- CLI invocation grammar beyond the `desk` group, desk-resolution route, attribution headers, pagination, idempotency-key mechanics, and per-command output shapes;
-- exact market-resource URI grammar, resource and tool schemas, instrument normalization, adapter credential handoff, runtime registration packaging, and feed-health representation;
-- per-exchange equity market-hours and staleness semantics (including non-US delay characteristics), the synthesized book's contract, instrument metadata (tick ladders and lot rules), the multi-currency account details, the per-market equity fee model, and the rate-limit retry policy, all settled before implementation (per D76);
-- sandbox event mappings, book-restoration mechanics, the SQLite representation of trading facts, query projections, and whether MarketRig holds position objects outside the node;
+- CLI invocation grammar beyond the `desk` and `history` groups, attribution headers, pagination, and per-command output shapes;
+- per-runtime MCP registration packaging, taken over by the runtime adapters with the delivery milestone (§6.4);
 - EVENT connector framing, occurrence-identity construction, payload limits, deduplication storage and index mechanics, filtering, and execution backpressure;
 - OpenBB research as a whole — its supervised child, connectors, secret references, and credential flows — deferred past MVP on scope (per D9);
 - exact localized copy for surfaces later milestones add, renderer-loss recovery details, detailed interaction design, and the design tokens' concrete values;

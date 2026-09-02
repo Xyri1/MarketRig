@@ -6,7 +6,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 
 ## Repository state
 
-- The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D77, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Milestone R0 is delivered (slice `sdd/slices/001-r0-foundation.md`, frozen; per D77): the Cargo workspace, `marketrigd`, `marketrig`, and the acceptance gate exist. Milestone R1's design is complete (`sdd/features/r1-equity-paper-trading/`) and its implementation slice `sdd/slices/002-r1-equity-paper-trading.md` is active.
+- The root SDD set (`sdd/PRD.md`, `sdd/DECISIONS.md` through D78, `sdd/SPEC.md`, `sdd/ROADMAP.md`) was founded fresh on 2026-09-01 and is the only product truth. Milestones R0 and R1 are delivered (slices `sdd/slices/001-r0-foundation.md` and `sdd/slices/002-r1-equity-paper-trading.md`, both frozen; per D77 and D78): the Cargo workspace, `marketrigd`, `marketrig`, `marketrig-mcp`, the equity paper-trading plane, and the acceptance gate and experiment exist. Milestone R2 (scheduled triggers) is next; its feature folder does not exist yet.
 - The daemon `marketrigd`, the CLI `marketrig`, and the stdio adapter `marketrig-mcp` are Rust binaries from one Cargo workspace (`crates/`, with `src-tauri/` a member); the Vue 3 frontend lives at the repository root; the one interpreter MarketRig ships runs only the supervised Hindsight memory child. See `sdd/SPEC.md` §3.
 - When code lands, keep **Commands** below current in the same change. Feature folders under `sdd/features/` are created fresh as milestones activate.
 
@@ -15,7 +15,7 @@ MarketRig is a *vibe trading terminal for agents*: a local, persistent paper-tra
 | Need | File |
 | --- | --- |
 | Why the product exists, MVP scope, success criteria | `sdd/PRD.md` |
-| Settled decisions with rationale (`D1`…`D77`) | `sdd/DECISIONS.md` |
+| Settled decisions with rationale (`D1`…`D78`) | `sdd/DECISIONS.md` |
 | Current mechanical contract and invariants — the source of truth | `sdd/SPEC.md` |
 | Milestones R0–R7, order, non-goals, deferred work | `sdd/ROADMAP.md` |
 | One feature's motivation / decisions / spec delta | `sdd/features/<slug>/{PRD,DECISIONS,SPEC}.md` (created per milestone) |
