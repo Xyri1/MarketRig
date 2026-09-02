@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -97,7 +97,7 @@ impl IntoResponse for TradeError {
             return e.into_response();
         }
         let status = match &self {
-            TradeError::Invalid(_) => StatusCode::BAD_REQUEST,
+            TradeError::Invalid(_) | TradeError::Attribution(_) => StatusCode::BAD_REQUEST,
             TradeError::InstrumentUnknown(_) | TradeError::OrderNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -281,12 +281,63 @@ async fn history_cycles(
 // text so the `trading_actions` row keeps the caller's own request verbatim
 // (§5); `trade` owns every rule about its content.
 
+/// The two attribution headers (R2 feature SPEC §6). `HeaderMap` lookup is
+/// case-insensitive, as HTTP is.
+const TRIGGER_HEADER: &str = "x-marketrig-trigger-id";
+const FIRING_HEADER: &str = "x-marketrig-firing-id";
+
+/// Derives an action's source from those headers, *before* the desk's node does
+/// any work, so a bad attribution never reaches the sandbox (§6). Neither header
+/// is a session; both, naming a firing of this desk under that trigger, is a
+/// trigger; anything else is `ATTRIBUTION_INVALID` and records nothing.
+fn attribution(
+    state: &ApiState,
+    headers: &HeaderMap,
+    desk_id: &str,
+) -> Result<trade::Source, TradeError> {
+    let read = |name: &'static str| match headers.get(name) {
+        None => Ok(None),
+        Some(value) => value
+            .to_str()
+            .map(|v| Some(v.to_owned()))
+            .map_err(|_| TradeError::Attribution(format!("{name} is not text"))),
+    };
+    let (trigger_id, firing_id) = match (read(TRIGGER_HEADER)?, read(FIRING_HEADER)?) {
+        (None, None) => return Ok(trade::Source::Session),
+        (Some(trigger_id), Some(firing_id)) => (trigger_id, firing_id),
+        _ => {
+            return Err(TradeError::Attribution(format!(
+                "{TRIGGER_HEADER} and {FIRING_HEADER} go together, and only one was sent"
+            )));
+        }
+    };
+    let (desk, firing) = (desk_id.to_owned(), firing_id.clone());
+    match state
+        .store
+        .call(move |conn| crate::trigger::load_firing(conn, &desk, &firing))?
+    {
+        Some(row) if row.trigger_id == trigger_id => Ok(trade::Source::Trigger {
+            trigger_id,
+            firing_id,
+        }),
+        Some(_) => Err(TradeError::Attribution(format!(
+            "firing {firing_id:?} is not a firing of trigger {trigger_id:?}"
+        ))),
+        None => Err(TradeError::Attribution(format!(
+            "this desk has no firing {firing_id:?}"
+        ))),
+    }
+}
+
 async fn submit_order(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Response, TradeError> {
-    let (record, replayed) = trade::submit(&state.store, &state.registry, &desk_id, &body)?;
+    let source = attribution(&state, &headers, &desk_id)?;
+    let (record, replayed) =
+        trade::submit(&state.store, &state.registry, &desk_id, &body, &source)?;
     let status = if replayed {
         StatusCode::OK
     } else {
@@ -298,14 +349,17 @@ async fn submit_order(
 async fn cancel_order(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, client_order_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: String,
 ) -> Result<Json<trade::ActionRecord>, TradeError> {
+    let source = attribution(&state, &headers, &desk_id)?;
     Ok(Json(trade::cancel(
         &state.store,
         &state.registry,
         &desk_id,
         &client_order_id,
         &body,
+        &source,
     )?))
 }
 
@@ -643,7 +697,14 @@ async fn action_replay() {
     // keys come back sorted because `serde_json::Value` is a map.
     assert_eq!(
         record.as_object().unwrap().keys().collect::<Vec<_>>(),
-        ["action_id", "created_at_ns", "id", "kind", "outcome"],
+        [
+            "action_id",
+            "created_at_ns",
+            "id",
+            "kind",
+            "outcome",
+            "source"
+        ],
         "the ActionRecord is the trading_actions row: {record}"
     );
     assert_eq!(record["action_id"], "buy-aapl-1");
@@ -1056,6 +1117,208 @@ async fn market_codes() {
         404,
         "ORDER_NOT_FOUND",
     );
+
+    served.registry.stop_all();
+}
+
+// ---------------------------------------------------------------------------
+// api::action_attribution (R2 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+/// A POST with headers and a body, so the attribution pair can ride along.
+#[cfg(test)]
+fn call_post_attributed(url: String, headers: &[(&str, &str)], body: &str) -> (u16, String) {
+    let mut request = agent()
+        .post(url)
+        .header("Authorization", format!("Bearer {CREDENTIAL}"))
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    read(request.send(body))
+}
+
+/// The two attribution headers decide `trading_actions.source` and nothing else
+/// does (R2 feature SPEC §6): a firing of this desk under that trigger attributes
+/// the action, a replay answers the stored record whatever the caller now sends,
+/// and every other shape answers `ATTRIBUTION_INVALID` having recorded nothing.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn action_attribution() {
+    let aapl = crate::catalog::find("AAPL.XNAS").unwrap();
+    let (feed, _hits) = crate::feed::scripted_server(vec![(
+        200,
+        crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let served = serve_with(Some(crate::feed::FeedBase::standin(feed))).await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+
+    let create = |name: &str| {
+        let (status, body) = call_post(
+            url("/desks"),
+            ok,
+            Some(("application/json", &format!(r#"{{"name":"{name}"}}"#))),
+        );
+        assert_eq!(status, 201, "{body}");
+        json(&body)["id"].as_str().unwrap().to_string()
+    };
+    let alpha = create("alpha");
+    let beta = create("beta");
+
+    // One trigger and one firing per desk, planted directly: this check is about
+    // the routes, not about how a firing comes to exist (§3 owns that).
+    let (a, b) = (alpha.clone(), beta.clone());
+    served
+        .store
+        .unit(move |tx| {
+            for (desk, trigger, firing) in [(&a, "t-alpha", "f-alpha"), (&b, "t-beta", "f-beta")] {
+                tx.execute(
+                    "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                     enabled, revision, created_at_ns, updated_at_ns) \
+                     VALUES (?1, ?2, 'nightly', 'SCHEDULED', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
+                    rusqlite::params![trigger, desk],
+                )?;
+                tx.execute(
+                    "INSERT INTO firings VALUES (?1, ?2, ?3, 50, 60, 1, 'trade', NULL, NULL)",
+                    rusqlite::params![firing, desk, trigger],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    // The node before the first order, so a 201 means the sandbox answered.
+    served.registry.ensure(&alpha).expect("the node starts");
+    let market = std::sync::Arc::clone(served.registry.market());
+    crate::node::within(10, "the first observation", || {
+        market.read(aapl, crate::store::now_ns()).sequence == 1
+    });
+
+    let orders = url(&format!("/desks/{alpha}/orders"));
+    let body = |action_id: &str| {
+        format!(
+            r#"{{"action_id":"{action_id}","instrument_id":"AAPL.XNAS",
+                 "side":"BUY","type":"LIMIT","quantity":"1","price":"200.00"}}"#
+        )
+    };
+    let attributed = [
+        ("X-MarketRig-Trigger-Id", "t-alpha"),
+        ("X-MarketRig-Firing-Id", "f-alpha"),
+    ];
+    let row = |action_id: &'static str| {
+        served
+            .store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT source, trigger_id, firing_id FROM trading_actions \
+                     WHERE action_id = ?1",
+                    [action_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, Option<String>>(1)?,
+                            r.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap()
+    };
+    let actions = || {
+        served
+            .store
+            .call(|c| {
+                c.query_row("SELECT count(*) FROM trading_actions", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .unwrap()
+    };
+
+    // --- Both headers, naming this desk's firing: TRIGGER, on row and record --
+    let (status, answer) = call_post_attributed(orders.clone(), &attributed, &body("buy-1"));
+    assert_eq!(status, 201, "{answer}");
+    let record = json(&answer);
+    assert_eq!(record["source"], "TRIGGER");
+    assert_eq!(record["trigger_id"], "t-alpha");
+    assert_eq!(record["firing_id"], "f-alpha");
+    assert_eq!(
+        row("buy-1"),
+        (
+            "TRIGGER".to_string(),
+            Some("t-alpha".to_string()),
+            Some("f-alpha".to_string())
+        )
+    );
+
+    // --- A replay answers the stored record, headers or none ----------------
+    let (status, replay) = call_post_attributed(orders.clone(), &[], &body("buy-1"));
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(
+        json(&replay),
+        record,
+        "the stored TRIGGER record, byte for byte"
+    );
+
+    // --- Every other shape: 400, and nothing recorded -----------------------
+    let placed = actions();
+    let refusals = [
+        ("one header alone", &attributed[..1]),
+        ("the other header alone", &attributed[1..]),
+        (
+            "a firing of another desk",
+            &[
+                ("X-MarketRig-Trigger-Id", "t-beta"),
+                ("X-MarketRig-Firing-Id", "f-beta"),
+            ][..],
+        ),
+        (
+            "an unknown firing",
+            &[
+                ("X-MarketRig-Trigger-Id", "t-alpha"),
+                ("X-MarketRig-Firing-Id", "f-nowhere"),
+            ][..],
+        ),
+        (
+            "a firing of another trigger",
+            &[
+                ("X-MarketRig-Trigger-Id", "t-beta"),
+                ("X-MarketRig-Firing-Id", "f-alpha"),
+            ][..],
+        ),
+    ];
+    for (label, headers) in refusals {
+        expect_envelope(
+            call_post_attributed(orders.clone(), headers, &body("refused")),
+            400,
+            "ATTRIBUTION_INVALID",
+        );
+        assert_eq!(actions(), placed, "{label} recorded nothing");
+    }
+    // The same refusal on the cancel route, and before any order lookup.
+    expect_envelope(
+        call_post_attributed(
+            url(&format!("/desks/{alpha}/orders/buy-1/cancel")),
+            &[("X-MarketRig-Firing-Id", "f-alpha")],
+            r#"{"action_id":"cancel-1"}"#,
+        ),
+        400,
+        "ATTRIBUTION_INVALID",
+    );
+    assert_eq!(actions(), placed);
+
+    // --- No headers at all: SESSION ----------------------------------------
+    let (status, answer) = call_post_attributed(orders, &[], &body("buy-2"));
+    assert_eq!(status, 201, "{answer}");
+    let record = json(&answer);
+    assert_eq!(record["source"], "SESSION");
+    assert!(
+        record["trigger_id"].is_null() && record["firing_id"].is_null(),
+        "nulls are omitted: {record}"
+    );
+    assert_eq!(row("buy-2"), ("SESSION".to_string(), None, None));
 
     served.registry.stop_all();
 }

@@ -35,18 +35,39 @@ nautilus-execution = { version = "=0.62.0", default-features = false }
 nautilus-live = { version = "=0.62.0", default-features = false, features = ["node"] }
 nautilus-model = { version = "=0.62.0", default-features = false }
 nautilus-sandbox = { version = "=0.62.0", default-features = false }
+# The one spawn-and-terminate primitive for every managed child (per D73, R2-3):
+# a `setsid` session on macOS, a Job Object on Windows. Already in the graph
+# under `rmcp =3.2.0`; MarketRig names only the wrappers it uses.
+process-wrap = { version = "=9.1.0", default-features = false, features = [
+    "tokio1",
+    "process-session",
+    "job-object",
+] }
 # Beside `ureq` because the chart client polls from inside the node thread's
 # `LocalSet`, where a blocking agent would stall the runner; pinned at 0.13.4,
 # the line `nautilus-network` itself pins.
 reqwest = { version = "=0.13.4", features = ["json"] }
+# The code snapshot's SHA-256 fingerprint (R2-3); already in the graph under rustls.
+ring = "=0.17.14"
 rmcp = { version = "=3.2.0", default-features = false }
+# RFC 5545 recurrence, iterated in a fixed UTC frame; zones are resolved by
+# `chrono-tz`, never by this crate (R2-1). Its defaults are empty already.
+rrule = { version = "=0.14.0", default-features = false }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 rust_decimal = "=1.42.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sysinfo = "=0.39.6"
 tempfile = "=3.27.0"
-tokio = { version = "=1.53.1", features = ["rt-multi-thread", "net", "signal", "macros", "sync", "time"] }
+tokio = { version = "=1.53.1", features = [
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "macros",
+    "sync",
+    "time",
+    "process",
+] }
 tracing = "=0.1.44"
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["json"] }

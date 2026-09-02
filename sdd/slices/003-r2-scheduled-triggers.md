@@ -17,7 +17,7 @@ Verified against crates.io, the lockfile, and the crate sources on 2026-09-02. C
 | `ring` | `=0.17.14` | marketrigd | the fingerprint's SHA-256 (`ring::digest::digest(&SHA256, …)`); already in the graph under rustls. |
 | `tokio` | `=1.53.1` | marketrigd | gains the `process` feature on the existing pin. |
 
-Nothing new enters `Cargo.lock`. `sysinfo =0.39.6` is reused by the `exec::group_terminated_on_timeout` check (already a daemon dependency).
+The lockfile gains exactly one `[[package]]` entry, `rrule 0.14.0` itself; its dependencies and the other two pins resolve to entries already present (verified at C17). `sysinfo =0.39.6` is reused by the `exec::group_terminated_on_timeout` check (already a daemon dependency).
 
 ## 2. Plan-time settlements
 

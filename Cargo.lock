@@ -1602,7 +1602,10 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-sandbox",
+ "process-wrap",
  "reqwest",
+ "ring",
+ "rrule",
  "rusqlite",
  "rust_decimal",
  "serde",
@@ -2582,6 +2585,19 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rrule"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "720acfb4980b9d8a6a430f6d7a11933e701ebbeba5eee39cc9d8c5f932aaff74"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "log",
+ "regex",
+ "thiserror",
 ]
 
 [[package]]

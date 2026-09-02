@@ -4,7 +4,7 @@ Refines root [`SPEC.md`](../../SPEC.md) §8, §9, §10, §11.1, §12.3, §13.2, 
 
 ## 1. Workspace additions
 
-New exact pins in the workspace manifest (verified 2026-09-02): `rrule =0.14.0` (default features off; requires `chrono ^0.4.39` and `chrono-tz ^0.10.1`, both already pinned), `process-wrap =9.1.0` (already in the graph under `rmcp =3.2.0`; features `tokio1`, `process-session`, `job-object`), and `ring =0.17.14` (already in the graph under rustls; the fingerprint's SHA-256). The `tokio` pin gains the `process` feature. No new crate enters the graph.
+New exact pins in the workspace manifest (verified 2026-09-02): `rrule =0.14.0` (default features off; requires `chrono ^0.4.39` and `chrono-tz ^0.10.1`, both already pinned), `process-wrap =9.1.0` (already in the graph under `rmcp =3.2.0`; features `tokio1`, `process-session`, `job-object`), and `ring =0.17.14` (already in the graph under rustls; the fingerprint's SHA-256). The `tokio` pin gains the `process` feature. `rrule` is the only crate new to the graph; the other two are already compiled into it.
 
 New daemon modules: `schedule` (§2, §3), `trigger` (§7, §8's handlers' logic), `exec` (§4, §5). The `marketrig` library gains the attribution headers (§6) and the CLI two groups (§9); `marketrig-mcp` changes nothing and inherits §6 through the shared client. `marketrig-acceptance` gains the `trigger-code` binary (§10.1).
 

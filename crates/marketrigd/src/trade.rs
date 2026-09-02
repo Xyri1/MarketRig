@@ -81,6 +81,9 @@ pub enum TradeError {
     NotReady(String),
     /// The desk's node is not usable (§4.3, R1-6).
     Unavailable(String),
+    /// The attribution headers do not name a firing of this desk under that
+    /// trigger (R2 feature SPEC §6).
+    Attribution(String),
     Desk(DeskError),
 }
 
@@ -93,6 +96,7 @@ impl TradeError {
             TradeError::Rejected(_) => "ORDER_REJECTED",
             TradeError::NotReady(_) => "DESK_NOT_READY",
             TradeError::Unavailable(_) => "MARKET_UNAVAILABLE",
+            TradeError::Attribution(_) => "ATTRIBUTION_INVALID",
             TradeError::Desk(e) => e.code(),
         }
     }
@@ -120,6 +124,9 @@ impl fmt::Display for TradeError {
             }
             TradeError::Unavailable(why) => {
                 write!(f, "The desk's market plane is unavailable: {why}.")
+            }
+            TradeError::Attribution(why) => {
+                write!(f, "The action's trigger attribution is unusable: {why}.")
             }
             TradeError::Desk(e) => write!(f, "{e}"),
         }
@@ -150,12 +157,41 @@ impl From<NodeError> for TradeError {
 // The action record (§6, §7, R1-8)
 // ---------------------------------------------------------------------------
 
+/// Who placed the action (R2 feature SPEC §6). The route derives it from the
+/// attribution headers; nothing below the route reads an environment or a header.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Session,
+    Trigger {
+        trigger_id: String,
+        firing_id: String,
+    },
+}
+
+impl Source {
+    fn parts(&self) -> (&'static str, Option<&str>, Option<&str>) {
+        match self {
+            Source::Session => ("SESSION", None, None),
+            Source::Trigger {
+                trigger_id,
+                firing_id,
+            } => ("TRIGGER", Some(trigger_id), Some(firing_id)),
+        }
+    }
+}
+
 /// The `trading_actions` row as the routes return it (§7).
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionRecord {
     pub action_id: String,
     pub id: String,
     pub kind: String,
+    /// `SESSION` or `TRIGGER` (R2 feature SPEC §6).
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firing_id: Option<String>,
     pub created_at_ns: i64,
     /// The response record, set when the command answers. `null` only while a
     /// concurrent duplicate of the same `action_id` is still in flight.
@@ -211,6 +247,7 @@ pub fn submit(
     registry: &Registry,
     desk_id: &str,
     body: &str,
+    source: &Source,
 ) -> Result<(ActionRecord, bool), TradeError> {
     require_ready(store, desk_id)?;
     let (action_id, form) = validate(body)?;
@@ -222,7 +259,7 @@ pub fn submit(
     // behind, so the same `action_id` stays retryable (§4.3).
     let node = registry.ensure(desk_id)?;
 
-    let mut record = match begin(store, desk_id, "SUBMIT", &action_id, body)? {
+    let mut record = match begin(store, desk_id, "SUBMIT", &action_id, body, source)? {
         Begun::Replay(record) => return Ok((record, true)),
         Begun::New(record) => record,
     };
@@ -246,6 +283,7 @@ pub fn cancel(
     desk_id: &str,
     client_order_id: &str,
     body: &str,
+    source: &Source,
 ) -> Result<ActionRecord, TradeError> {
     require_ready(store, desk_id)?;
     let body: CancelBody = serde_json::from_str(body)
@@ -277,6 +315,7 @@ pub fn cancel(
         "CANCEL",
         &action_id,
         &json!({ "action_id": action_id, "client_order_id": client_order_id }).to_string(),
+        source,
     )? {
         Begun::Replay(record) => return Ok(record),
         Begun::New(record) => record,
@@ -813,17 +852,20 @@ fn stored(
     let action = action_id.to_owned();
     store.call(move |conn| {
         conn.query_row(
-            "SELECT action_id, id, kind, created_at_ns, outcome FROM trading_actions \
-             WHERE desk_id = ?1 AND action_id = ?2",
+            "SELECT action_id, id, kind, source, trigger_id, firing_id, created_at_ns, outcome \
+             FROM trading_actions WHERE desk_id = ?1 AND action_id = ?2",
             params![desk, action],
             |r| {
                 Ok(ActionRecord {
                     action_id: r.get(0)?,
                     id: r.get(1)?,
                     kind: r.get(2)?,
-                    created_at_ns: r.get(3)?,
+                    source: r.get(3)?,
+                    trigger_id: r.get(4)?,
+                    firing_id: r.get(5)?,
+                    created_at_ns: r.get(6)?,
                     outcome: r
-                        .get::<_, Option<String>>(4)?
+                        .get::<_, Option<String>>(7)?
                         .and_then(|outcome| serde_json::from_str(&outcome).ok()),
                 })
             },
@@ -840,11 +882,16 @@ fn begin(
     kind: &'static str,
     action_id: &str,
     request: &str,
+    source: &Source,
 ) -> Result<Begun, TradeError> {
+    let (source, trigger_id, firing_id) = source.parts();
     let record = ActionRecord {
         action_id: action_id.to_owned(),
         id: Uuid::now_v7().to_string(),
         kind: kind.to_owned(),
+        source: source.to_owned(),
+        trigger_id: trigger_id.map(str::to_owned),
+        firing_id: firing_id.map(str::to_owned),
         created_at_ns: now_ns(),
         outcome: None,
     };
@@ -854,13 +901,16 @@ fn begin(
     let inserted = store.unit(move |tx| {
         tx.execute(
             "INSERT INTO trading_actions \
-             (desk_id, action_id, id, kind, source, request, created_at_ns) \
-             VALUES (?1, ?2, ?3, ?4, 'SESSION', ?5, ?6)",
+             (desk_id, action_id, id, kind, source, trigger_id, firing_id, request, created_at_ns) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 desk,
                 row.action_id,
                 row.id,
                 row.kind,
+                row.source,
+                row.trigger_id,
+                row.firing_id,
                 request,
                 row.created_at_ns
             ],
@@ -1449,6 +1499,7 @@ fn cycle_and_prompt_atomic() {
                     r#"{{"action_id":"{action}-aapl-{round}","instrument_id":"AAPL.XNAS",
                         "side":"{side}","type":"MARKET","quantity":"10","price":null}}"#
                 ),
+                &Source::Session,
             )
             .unwrap_or_else(|e| panic!("round {round}'s {action} is accepted: {e}"));
         }
@@ -1525,6 +1576,7 @@ fn snapshot_restores_book() {
         &desk,
         r#"{"action_id":"buy-aapl-1","instrument_id":"AAPL.XNAS",
             "side":"BUY","type":"MARKET","quantity":"10","price":null}"#,
+        &Source::Session,
     )
     .expect("the market buy is accepted");
     assert!(!replayed);
@@ -1539,6 +1591,7 @@ fn snapshot_restores_book() {
         &desk,
         r#"{"action_id":"rest-aapl-1","instrument_id":"AAPL.XNAS",
             "side":"BUY","type":"LIMIT","quantity":"5","price":"200.00"}"#,
+        &Source::Session,
     )
     .expect("the limit buy is accepted");
     assert_eq!(rested.outcome.clone().unwrap()["status"], "ACCEPTED");
@@ -1625,6 +1678,7 @@ fn snapshot_restores_book() {
         &desk,
         "rest-aapl-1",
         r#"{"action_id":"cancel-aapl-1"}"#,
+        &Source::Session,
     )
     .expect("the restored order cancels");
     assert!(

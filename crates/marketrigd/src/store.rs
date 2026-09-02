@@ -119,6 +119,7 @@ fn home() -> io::Result<PathBuf> {
 const MIGRATIONS: &[&str] = &[
     include_str!("store/001_r0.sql"),
     include_str!("store/002_r1.sql"),
+    include_str!("store/003_r2.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -309,7 +310,7 @@ fn migrations_apply_and_stamp() {
             })
             .unwrap()
     };
-    assert_eq!(pragmas(&store), (2, "wal".to_string(), 1));
+    assert_eq!(pragmas(&store), (3, "wal".to_string(), 1));
 
     let tables = store
         .call(|c| {
@@ -325,14 +326,18 @@ fn migrations_apply_and_stamp() {
         tables,
         [
             "book_snapshots",
+            "code_snapshots",
             "desks",
+            "executions",
             "fills",
+            "firings",
             "operational_events",
             "order_events",
             "position_cycles",
             "position_events",
             "prompts",
             "trading_actions",
+            "triggers",
         ]
         .map(|name| (name.to_string(), 1))
     );
@@ -352,7 +357,7 @@ fn migrations_apply_and_stamp() {
     // Reopening an up-to-date database applies nothing and keeps the stamp.
     drop(store);
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
-    assert_eq!(pragmas(&store), (2, "wal".to_string(), 1));
+    assert_eq!(pragmas(&store), (3, "wal".to_string(), 1));
 }
 
 #[cfg(test)]
@@ -362,9 +367,9 @@ fn trading_migration_applies() {
         store.call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
     };
 
-    // A fresh database lands on migration 2 with every R1 table present and STRICT.
+    // A fresh database carries every R1 table, present and STRICT.
     let (_dir, store) = open_temp();
-    assert_eq!(user_version(&store).unwrap(), 2);
+    assert_eq!(user_version(&store).unwrap(), MIGRATIONS.len() as i64);
     for name in [
         "book_snapshots",
         "fills",
@@ -403,7 +408,7 @@ fn trading_migration_applies() {
     }
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(user_version(&store).unwrap(), 2);
+    assert_eq!(user_version(&store).unwrap(), MIGRATIONS.len() as i64);
     let carried: (i64, String, String) = store
         .call(|c| {
             c.query_row(
@@ -461,6 +466,173 @@ fn trading_migration_applies() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// store::trigger_migration_applies (R2 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+/// Migration 3 (R2 feature SPEC §7): a fresh database carries the whole trigger
+/// schema, and a migration-2 database upgrades in place with its rows intact.
+#[cfg(test)]
+#[test]
+fn trigger_migration_applies() {
+    // A fresh database lands on migration 3 with every §7 table STRICT and every
+    // §7 index present.
+    let (_dir, store) = open_temp();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        3
+    );
+    for name in ["code_snapshots", "triggers", "firings", "executions"] {
+        let strict = store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap_or_else(|e| panic!("{name} must exist: {e}"));
+        assert_eq!(strict, 1, "{name} must be STRICT");
+    }
+    let indexes: Vec<String> = store
+        .call(|c| {
+            c.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL \
+                 ORDER BY name",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect()
+        })
+        .unwrap();
+    for index in [
+        "executions_running",
+        "firings_by_trigger",
+        "triggers_due",
+        "triggers_live_name",
+    ] {
+        assert!(indexes.contains(&index.to_string()), "{index}: {indexes:?}");
+    }
+    // The partial unique index frees a deleted trigger's name (R2-7), and the
+    // rebuilt vocabularies accept the new words.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1,2,NULL,NULL)",
+                [],
+            )?;
+            for (id, deleted) in [("t1", "9"), ("t2", "NULL")] {
+                tx.execute(
+                    &format!(
+                        "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, \
+                         at_ns, enabled, revision, created_at_ns, updated_at_ns, deleted_at_ns) \
+                         VALUES ('{id}','0199','nightly','SCHEDULED','ONE_OFF','b',5,1,1,1,1,{deleted})"
+                    ),
+                    [],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO prompts VALUES ('p1','0199','TRIGGER_RESULT','QUEUED','{}',1)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO operational_events VALUES ('e1','TRIGGER_MISSED','0199',1,'{}')",
+                [],
+            )
+        })
+        .expect("the widened vocabularies and the partial name index");
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                 enabled, revision, created_at_ns, updated_at_ns) \
+                 VALUES ('t3','0199','nightly','SCHEDULED','ONE_OFF','b',5,1,1,1,1)",
+                [],
+            ))
+            .is_err(),
+        "a second live trigger of the same name must be rejected"
+    );
+    drop(store);
+
+    // A migration-2 database upgrades in place, carrying its rows; the new
+    // attribution columns arrive NULL.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
+             INSERT INTO prompts VALUES ('p0','0199','EVALUATION','QUEUED','{\"a\":1}',1100);
+             INSERT INTO trading_actions VALUES \
+               ('0199','buy-1','a0','SUBMIT','SESSION','{\"q\":1}','{\"o\":2}',1200);
+             INSERT INTO operational_events VALUES ('e0','RECOVERY',NULL,1300,'{\"b\":3}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 2i64).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        3
+    );
+    let prompt: (String, String, String) = store
+        .call(|c| {
+            c.query_row("SELECT kind, state, payload FROM prompts", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        prompt,
+        ("EVALUATION".into(), "QUEUED".into(), "{\"a\":1}".into())
+    );
+    let action: (String, String, String, Option<String>, Option<String>) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT action_id, source, outcome, trigger_id, firing_id FROM trading_actions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        action,
+        (
+            "buy-1".into(),
+            "SESSION".into(),
+            "{\"o\":2}".into(),
+            None,
+            None
+        )
+    );
+    let event: (String, String) = store
+        .call(|c| {
+            c.query_row("SELECT kind, payload FROM operational_events", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+        })
+        .unwrap();
+    assert_eq!(event, ("RECOVERY".into(), "{\"b\":3}".into()));
+    // The rebuilt CHECK ties TRIGGER to a firing.
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO trading_actions \
+                 (desk_id, action_id, id, kind, source, request, created_at_ns) \
+                 VALUES ('0199','x','a1','SUBMIT','TRIGGER','{}',1)",
+                [],
+            ))
+            .is_err(),
+        "a TRIGGER action without a firing_id must be rejected"
+    );
+}
+
 #[cfg(test)]
 #[test]
 fn newer_database_rejected() {
@@ -468,7 +640,7 @@ fn newer_database_rejected() {
     let path = dir.path().join("marketrig.sqlite3");
     let store = Store::open(&path).unwrap();
     store
-        .call(|c| c.pragma_update(None, "user_version", 3i64))
+        .call(|c| c.pragma_update(None, "user_version", MIGRATIONS.len() as i64 + 1))
         .unwrap();
     drop(store);
 

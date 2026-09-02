@@ -113,22 +113,44 @@ impl Endpoint {
     }
 
     pub fn get(&self, path: &str) -> Result<String, Fault> {
-        let request = self
-            .agent
-            .get(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", self.credential));
+        let request = attribute(
+            self.agent
+                .get(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.credential)),
+        );
         finish(request.call())
     }
 
     pub fn post(&self, path: &str, body: Option<serde_json::Value>) -> Result<String, Fault> {
-        let request = self
-            .agent
-            .post(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", self.credential));
+        let request = attribute(
+            self.agent
+                .post(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {}", self.credential)),
+        );
         finish(match body {
             Some(body) => request.send_json(body),
             None => request.send_empty(),
         })
+    }
+}
+
+/// The attribution pair a trigger's environment carries, or nothing — both
+/// variables, both non-empty, or neither header rides (R2 feature SPEC §6).
+pub fn attribution(var: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    let value = |name| var(name).filter(|v| !v.is_empty());
+    Some((
+        value("MARKETRIG_TRIGGER_ID")?,
+        value("MARKETRIG_FIRING_ID")?,
+    ))
+}
+
+/// Adds that pair to a request; the daemon validates it against the firing row.
+fn attribute<B>(request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+    match attribution(|name| std::env::var(name).ok()) {
+        Some((trigger_id, firing_id)) => request
+            .header("X-MarketRig-Trigger-Id", trigger_id)
+            .header("X-MarketRig-Firing-Id", firing_id),
+        None => request,
     }
 }
 
@@ -166,5 +188,41 @@ fn envelope(status: u16, body: &str) -> Fault {
             "INTERNAL",
             format!("The daemon answered {status} with an unreadable body."),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// client::attribution_headers_from_env (R2 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+/// Both variables set means both headers; anything less means neither. Driven
+/// through the pure lookup, so no test touches this process's environment.
+#[cfg(test)]
+#[test]
+fn attribution_headers_from_env() {
+    let env = |pairs: &'static [(&str, &str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    };
+    assert_eq!(
+        attribution(env(&[
+            ("MARKETRIG_TRIGGER_ID", "t-1"),
+            ("MARKETRIG_FIRING_ID", "f-1"),
+        ])),
+        Some(("t-1".to_string(), "f-1".to_string()))
+    );
+    for missing in [
+        &[("MARKETRIG_TRIGGER_ID", "t-1")][..],
+        &[("MARKETRIG_FIRING_ID", "f-1")][..],
+        &[][..],
+        // An empty value is not a value.
+        &[("MARKETRIG_TRIGGER_ID", "t-1"), ("MARKETRIG_FIRING_ID", "")][..],
+        &[("MARKETRIG_TRIGGER_ID", ""), ("MARKETRIG_FIRING_ID", "f-1")][..],
+    ] {
+        assert_eq!(attribution(env(missing)), None, "{missing:?}");
     }
 }
