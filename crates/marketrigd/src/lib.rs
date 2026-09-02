@@ -5,6 +5,7 @@ pub mod desk;
 pub mod feed;
 pub mod log;
 pub mod node;
+pub mod schedule;
 pub mod store;
 pub mod trade;
 pub mod trigger;
