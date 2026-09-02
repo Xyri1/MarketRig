@@ -15,7 +15,7 @@
 //! earlier scenarios created, on the stand-in feed.
 
 use std::fs::{self, File};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use marketrig_acceptance::{Harness, parse, standin, within};
@@ -368,11 +368,11 @@ fn gate() {
     let (mut doomed, mut survivor) = {
         // (a) recorded args still on its command line; (b) recorded args that
         // never match, so it must survive (R0 §4.4, per D73).
-        let doomed = Command::new("/bin/sleep")
+        let doomed = std::process::Command::new("/bin/sleep")
             .arg("27101")
             .spawn()
             .expect("spawn sleeper");
-        let survivor = Command::new("/bin/sleep")
+        let survivor = std::process::Command::new("/bin/sleep")
             .arg("27102")
             .spawn()
             .expect("spawn sleeper");
