@@ -119,12 +119,13 @@ struct Terminal {
     sink: Arc<Mutex<Sink>>,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     interrupting: Arc<AtomicBool>,
-    /// The session leader, and so the process group `killpg` ends (Unix only:
-    /// Windows terminates through the child's handle).
-    #[cfg(unix)]
+    /// The session leader, and so the process group `killpg` ends on Unix and
+    /// the process the Windows fallback terminates.
     pid: u32,
+    /// The Job Object the child was assigned to at spawn, `0` when the
+    /// assignment failed. Closing it kills the tree (`KILL_ON_JOB_CLOSE`).
     #[cfg(windows)]
-    handle: usize,
+    job: usize,
 }
 
 /// The daemon's single terminal manager, one live terminal per desk.
@@ -168,10 +169,12 @@ impl Manager {
         // The slave fd must go, or the reader never sees EOF.
         drop(pair.slave);
         let pid = child.process_id().unwrap_or_default();
-        #[cfg(unix)]
-        let group = pid;
+        // The R2 containment mechanics, applied to a child `portable-pty`
+        // spawned: on Unix its own `setsid` already made the process group the
+        // tree, on Windows the job has to be assigned here so that everything
+        // the session starts later is inside it (slice 004 §2).
         #[cfg(windows)]
-        let handle = child.as_raw_handle().map_or(0, |h| h as usize);
+        let job = contain(pid);
         let mut reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
 
@@ -230,10 +233,9 @@ impl Manager {
                 sink,
                 reader: Mutex::new(Some(reader_thread)),
                 interrupting,
-                #[cfg(unix)]
-                pid: group,
+                pid,
                 #[cfg(windows)]
-                handle,
+                job,
             }),
         );
         Ok(pid)
@@ -356,11 +358,8 @@ fn wait_for(handle: &std::thread::JoinHandle<()>, budget: Duration) -> bool {
 }
 
 impl Terminal {
-    /// The R2 containment mechanics on a child MarketRig did not spawn itself:
-    /// `portable-pty` already put it in its own session with `setsid`, so the
-    /// process group is the tree (`exec::spawn`'s `ProcessSession`); on Windows
-    /// the child's handle is assigned to a fresh Job Object and the job is
-    /// terminated (`exec::spawn`'s `JobObject`).
+    /// `portable-pty` already put the child in its own session with `setsid`,
+    /// so the process group is the tree (`exec::spawn`'s `ProcessSession`).
     #[cfg(unix)]
     fn terminate_tree(&self) {
         let pid = self.pid as i32;
@@ -376,31 +375,75 @@ impl Terminal {
         }
     }
 
-    /// ponytail: the job is created at termination rather than at spawn, since
-    /// `portable-pty` owns the spawn — a grandchild that has already left the
-    /// job's reach survives. Upgrade path if that ever shows up in evidence: a
-    /// ConPTY spawn helper of our own that assigns the job before resuming the
-    /// child.
+    /// Closing the job kills everything in it (`exec::spawn`'s `JobObject`,
+    /// through `KILL_ON_JOB_CLOSE`). Without a job — the assignment failed —
+    /// only the leader can be reached.
     #[cfg(windows)]
     fn terminate_tree(&self) {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        use windows::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
-        };
-        if self.handle == 0 {
-            return;
-        }
-        let child = HANDLE(self.handle as *mut core::ffi::c_void);
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
         unsafe {
-            let Ok(job) = CreateJobObjectW(None, windows::core::PCWSTR::null()) else {
+            if self.job != 0 {
+                let _ = CloseHandle(handle(self.job));
                 return;
-            };
-            if AssignProcessToJobObject(job, child).is_ok() {
-                let _ = TerminateJobObject(job, 1);
-            } else {
-                let _ = windows::Win32::System::Threading::TerminateProcess(child, 1);
             }
+            if let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, self.pid) {
+                let _ = TerminateProcess(process, 1);
+                let _ = CloseHandle(process);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn handle(raw: usize) -> windows::Win32::Foundation::HANDLE {
+    windows::Win32::Foundation::HANDLE(raw as *mut core::ffi::c_void)
+}
+
+/// Puts the freshly spawned child in its own kill-on-close Job Object and
+/// answers the job handle, or `0` when it could not be assigned — in which case
+/// shutdown falls back to terminating the leader alone.
+#[cfg(windows)]
+fn contain(pid: u32) -> usize {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) else {
+            return 0;
+        };
+        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
+            Ok(job) => job,
+            Err(_) => {
+                let _ = CloseHandle(process);
+                return 0;
+            }
+        };
+        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let contained = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_ok()
+            && AssignProcessToJobObject(job, process).is_ok();
+        let _ = CloseHandle(process);
+        if contained {
+            job.0 as usize
+        } else {
             let _ = CloseHandle(job);
+            0
         }
     }
 }
