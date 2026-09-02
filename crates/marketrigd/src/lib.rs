@@ -1,5 +1,6 @@
 pub mod api;
 pub mod catalog;
+pub mod codex;
 pub mod daemon;
 pub mod desk;
 pub mod exec;

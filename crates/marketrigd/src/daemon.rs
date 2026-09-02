@@ -293,6 +293,24 @@ struct ChildrenFile {
     children: Vec<ChildRecord>,
 }
 
+/// Records one managed child in `runtime/children.json` (§4.4) so a crashed
+/// daemon's successor can reap it. A write failure is a log line: the child is
+/// already running and the daemon must not fail the launch over its bookkeeping.
+pub fn record_child(roots: &Roots, record: ChildRecord) {
+    let path = children_path(roots);
+    let mut file: ChildrenFile = fs::read(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default();
+    file.children.push(record);
+    let written = serde_json::to_vec(&file)
+        .map_err(io::Error::other)
+        .and_then(|raw| fs::write(&path, raw));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "recording a managed child failed");
+    }
+}
+
 /// Recovery's first step (§4.4, per D73): resolve a crashed daemon's recorded
 /// children and report each outcome for the `RECOVERY` payload. A missing file
 /// yields no outcomes. The file itself is removed by [`start`] only after the
