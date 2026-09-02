@@ -41,6 +41,8 @@ pub struct ApiState {
     pub search_path: String,
     /// The one terminal manager both adapters spawn through (R3 feature SPEC §3).
     pub terminals: Arc<crate::terminal::Manager>,
+    /// The desks' Claude Code channel connections (R3 feature SPEC §5.3).
+    pub channels: Arc<crate::claude::Channels>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -83,6 +85,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
         .route("/desks/{desk_id}/session", get(session))
         .route("/desks/{desk_id}/terminal", get(terminal))
+        .route("/desks/{desk_id}/channel", get(channel))
         .route("/desks/{desk_id}/session/hook", post(session_hook))
         .route("/runtimes", get(runtimes))
         .route("/runtimes/{runtime}/discover", post(runtime_discover))
@@ -301,16 +304,89 @@ async fn session_hook(
             "The hook body must be a JSON object.".to_string(),
         ));
     }
-    Ok(match crate::session::hook(&state.store, &desk_id, &body)? {
-        crate::session::Hook::Accepted => {
-            (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
-        }
-        crate::session::Hook::Unparseable => envelope(
+    Ok(
+        match crate::session::hook(&state.store, &desk_id, &body, state.channels.events())? {
+            crate::session::Hook::Accepted => {
+                (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
+            }
+            crate::session::Hook::Unparseable => envelope(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION",
+                "The hook body must be a JSON object.".to_string(),
+            ),
+        },
+    )
+}
+
+/// `GET /desks/{desk_id}/channel` (R3 feature SPEC §5.3): the Claude Code
+/// bridge's socket. The connection itself is the session's readiness, so a
+/// connection with no open process row is closed `4002` rather than served.
+async fn channel(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    request: Request,
+) -> Result<Response, DeskError> {
+    use axum::extract::FromRequestParts;
+    let desk = desk::get(&state.store, &desk_id)?;
+    let (mut parts, _) = request.into_parts();
+    let Ok(upgrade) =
+        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+    else {
+        return Ok(envelope(
             StatusCode::BAD_REQUEST,
             "VALIDATION",
-            "The hook body must be a JSON object.".to_string(),
-        ),
-    })
+            "This route serves a WebSocket upgrade.".to_string(),
+        ));
+    };
+    Ok(upgrade.on_upgrade(move |socket| bridged(socket, state, desk.id)))
+}
+
+/// One bridge connection: readiness, then the desk's frames out, until the
+/// connection is superseded (`4001`) or either side goes away.
+async fn bridged(mut socket: axum::extract::ws::WebSocket, state: Arc<ApiState>, desk_id: String) {
+    use axum::extract::ws::{CloseFrame, Message};
+
+    // §5.3: no open process, no session to be ready for.
+    match crate::session::live_process(&state.store, &desk_id) {
+        Ok(Some(_)) => {}
+        _ => {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4002,
+                    reason: "no live session".into(),
+                })))
+                .await;
+            return;
+        }
+    }
+    let (generation, mut frames) = state.channels.connect(&desk_id);
+    loop {
+        tokio::select! {
+            frame = frames.recv() => match frame {
+                Some(text) => {
+                    if socket.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                // Superseded: the newer connection owns the desk now.
+                None => {
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 4001,
+                            reason: "superseded".into(),
+                        })))
+                        .await;
+                    return;
+                }
+            },
+            // The bridge sends nothing; its socket closing is the signal.
+            client = socket.recv() => match client {
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => break,
+            },
+        }
+    }
+    state.channels.disconnect(&desk_id, generation);
 }
 
 /// `GET /desks/{desk_id}/terminal` (R3 feature SPEC §3): the attachment socket.
@@ -825,6 +901,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     let state = ApiState {
         search_path: String::new(),
         terminals: crate::terminal::Manager::new().0,
+        channels: Arc::new(crate::claude::Channels::default()),
         store: store.clone(),
         desks_home: desks_home.clone(),
         daemon_uuid: DAEMON_UUID.to_string(),
@@ -2265,4 +2342,62 @@ async fn terminal_route_answers_before_any_upgrade() {
         401,
         "UNAUTHORIZED",
     );
+}
+
+/// The channel socket's two answers before a frame is ever written: no open
+/// process is `4002`, and a second bridge supersedes the first `4001`
+/// (R3 feature SPEC §5.3).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn channel_socket_needs_an_open_process_and_supersedes() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let served = serve().await;
+    let base = served.base.clone();
+    let ok = Some(CREDENTIAL);
+    let created = call_post(
+        format!("{base}/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"channel-desk"}"#)),
+    );
+    let desk_id = json(&created.1)["id"].as_str().unwrap().to_string();
+    let url = format!("{base}/desks/{desk_id}/channel").replacen("http://", "ws://", 1);
+    let connect = || {
+        let url = url.clone();
+        async move {
+            let mut request = url.into_client_request().unwrap();
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer {CREDENTIAL}").parse().unwrap(),
+            );
+            tokio_tungstenite::connect_async(request).await.unwrap().0
+        }
+    };
+    let closed = |message: Option<Result<Message, _>>| match message {
+        Some(Ok(Message::Close(Some(frame)))) => u16::from(frame.code),
+        other => panic!("expected a close frame, got {other:?}"),
+    };
+
+    // No process row: the connection is refused as soon as it is made.
+    let mut early = connect().await;
+    assert_eq!(closed(early.next().await), 4002);
+
+    served
+        .store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO agent_processes (id, desk_id, runtime, pid, daemon_uuid, \
+                 started_at_ns) VALUES ('p1', (SELECT id FROM desks), 'claude', 1, 'd', 1)",
+                [],
+            )
+        })
+        .unwrap();
+    let mut first = connect().await;
+    let mut second = connect().await;
+    assert_eq!(closed(first.next().await), 4001);
+    // The survivor is live: it stays open until it goes away itself.
+    second.send(Message::Ping(Vec::new().into())).await.unwrap();
+    assert!(matches!(second.next().await, Some(Ok(Message::Pong(_)))));
 }
