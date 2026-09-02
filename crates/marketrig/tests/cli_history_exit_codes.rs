@@ -21,7 +21,7 @@ fn stdout(output: &Output) -> String {
 #[test]
 fn history_exit_codes_zero_on_success() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (
             200,
@@ -89,7 +89,7 @@ fn history_exit_codes_zero_on_success() {
 #[test]
 fn history_exit_codes_one_on_unknown_desk() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (200, r#"{"desks":[]}"#),
         _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
@@ -107,7 +107,7 @@ fn history_exit_codes_one_on_unknown_desk() {
 #[test]
 fn history_exit_codes_one_on_daemon_error() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         _ => (
             409,

@@ -9,18 +9,28 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Arc, Mutex};
 
 /// The daemon identity the fake endpoint and [`health_ok`] agree on.
 const DAEMON_UUID: &str = "01997f00-0000-7000-8000-000000000001";
 
-/// Serve canned responses by "METHOD /path" until the test process exits. The
-/// responder's second argument is the request's `Authorization` header value.
+/// Every request a fake endpoint saw, in arrival order, as `"METHOD /path"`
+/// and the request body — what a test asserts the CLI actually sent.
+pub type Requests = Arc<Mutex<Vec<(String, String)>>>;
+
+/// Serve canned responses by "METHOD /path" until the test process exits,
+/// recording every request. The responder's second argument is the request's
+/// `Authorization` header value.
 ///
 /// ponytail: the thread is never joined — the listener dies with the test
 /// binary. Add a shutdown signal only if a test ever needs the port back.
-pub fn fake_daemon(respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 'static) -> u16 {
+pub fn fake_daemon(
+    respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 'static,
+) -> (u16, Requests) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake endpoint");
     let port = listener.local_addr().expect("local addr").port();
+    let requests: Requests = Requests::default();
+    let recorder = Arc::clone(&requests);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
@@ -44,8 +54,8 @@ pub fn fake_daemon(respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 
                     authorization = header["authorization:".len()..].trim().to_string();
                 }
             }
+            let mut body = vec![0u8; length];
             if length > 0 {
-                let mut body = vec![0u8; length];
                 let _ = reader.read_exact(&mut body);
             }
             let mut parts = request_line.split_whitespace();
@@ -54,6 +64,10 @@ pub fn fake_daemon(respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 
                 parts.next().unwrap_or(""),
                 parts.next().unwrap_or("")
             );
+            recorder
+                .lock()
+                .expect("request log")
+                .push((route.clone(), String::from_utf8_lossy(&body).into_owned()));
             let (status, body) = respond(&route, &authorization);
             let _ = write!(
                 stream,
@@ -63,7 +77,7 @@ pub fn fake_daemon(respond: impl Fn(&str, &str) -> (u16, &'static str) + Send + 
             let _ = stream.flush();
         }
     });
-    port
+    (port, requests)
 }
 
 /// The `GET /health` body every fake endpoint answers, carrying [`DAEMON_UUID`].

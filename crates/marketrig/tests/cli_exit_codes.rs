@@ -13,7 +13,7 @@ use common::{code, fake_daemon, health_ok, marketrig, write_endpoint};
 #[test]
 fn success_exits_zero() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (
             200,
@@ -41,7 +41,7 @@ fn success_exits_zero() {
 #[test]
 fn show_resolves_a_name_through_the_desk_list() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "GET /desks" => (
             200,
@@ -71,7 +71,7 @@ fn show_resolves_a_name_through_the_desk_list() {
 #[test]
 fn daemon_error_exits_one() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (200, health_ok()),
         "POST /desks" => (
             409,
@@ -138,7 +138,7 @@ fn unreachable_port_exits_three() {
 #[test]
 fn rejected_credential_exits_three() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|_, _| {
+    let (port, _) = fake_daemon(|_, _| {
         (
             401,
             r#"{"code":"UNAUTHORIZED","message":"Missing or wrong credential."}"#,
@@ -160,7 +160,7 @@ fn rejected_credential_exits_three() {
 #[test]
 fn daemon_uuid_mismatch_exits_three() {
     let root = tempfile::tempdir().expect("tempdir");
-    let port = fake_daemon(|route, _| match route {
+    let (port, _) = fake_daemon(|route, _| match route {
         "GET /health" => (
             200,
             r#"{"daemon_uuid":"01997f00-0000-7000-8000-0000000000ff","version":"0.1.0","started_at_ns":1}"#,
@@ -178,7 +178,7 @@ fn bearer_credential_is_sent_and_never_printed() {
     let root = tempfile::tempdir().expect("tempdir");
     // Every route answers only when the bearer credential arrived, so a request
     // that forgot the header turns into exit 3 instead of exit 0.
-    let port = fake_daemon(|route, authorization| {
+    let (port, _) = fake_daemon(|route, authorization| {
         if authorization
             != "Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         {

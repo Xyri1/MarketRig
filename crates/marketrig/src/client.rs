@@ -113,20 +113,40 @@ impl Endpoint {
     }
 
     pub fn get(&self, path: &str) -> Result<String, Fault> {
-        let request = attribute(
-            self.agent
-                .get(format!("{}{path}", self.base))
-                .header("Authorization", format!("Bearer {}", self.credential)),
-        );
-        finish(request.call())
+        finish(self.authorize(self.agent.get(self.uri(path))).call())
     }
 
     pub fn post(&self, path: &str, body: Option<serde_json::Value>) -> Result<String, Fault> {
-        let request = attribute(
-            self.agent
-                .post(format!("{}{path}", self.base))
-                .header("Authorization", format!("Bearer {}", self.credential)),
-        );
+        self.send(self.agent.post(self.uri(path)), body)
+    }
+
+    /// Partial update — the trigger group's one mutation shape (R2 feature
+    /// SPEC §8), carrying the same headers and timeouts as [`Self::post`].
+    pub fn patch(&self, path: &str, body: Option<serde_json::Value>) -> Result<String, Fault> {
+        self.send(self.agent.patch(self.uri(path)), body)
+    }
+
+    /// Soft delete (R2 feature SPEC §8); no request body either way.
+    pub fn delete(&self, path: &str) -> Result<String, Fault> {
+        finish(self.authorize(self.agent.delete(self.uri(path))).call())
+    }
+
+    fn uri(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    /// The bearer and, under a trigger, the attribution pair (§6): every
+    /// request carries the same headers whatever its method.
+    fn authorize<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        attribute(request.header("Authorization", format!("Bearer {}", self.credential)))
+    }
+
+    fn send(
+        &self,
+        request: ureq::RequestBuilder<ureq::typestate::WithBody>,
+        body: Option<serde_json::Value>,
+    ) -> Result<String, Fault> {
+        let request = self.authorize(request);
         finish(match body {
             Some(body) => request.send_json(body),
             None => request.send_empty(),

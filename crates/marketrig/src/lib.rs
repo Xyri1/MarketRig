@@ -1,6 +1,7 @@
 //! `marketrig` — the continuity-plane CLI (feature SPEC
 //! `r0-workspace-desk-identity` §8, extended with the `history` group by
-//! `r1-equity-paper-trading` §9).
+//! `r1-equity-paper-trading` §9 and the `trigger` and `prompt` groups by
+//! `r2-scheduled-triggers` §9).
 //!
 //! The crate is also the shared daemon-access library: `marketrig-mcp` reuses
 //! [`client::Endpoint`] for discovery, verification, and HTTP rather than
@@ -8,8 +9,11 @@
 
 pub mod client;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
+
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use client::{Endpoint, Fault};
+use serde_json::{Map, Value, json};
 
 /// Global flags precede the group (root SPEC §13.2).
 #[derive(Parser)]
@@ -36,6 +40,18 @@ enum Group {
         /// Desk name or UUID.
         desk: String,
     },
+    /// Scheduled triggers and their firings.
+    // R2 feature SPEC §9. Boxed because `create` alone carries a dozen
+    // options and every other group would pay for its size.
+    Trigger {
+        #[command(subcommand)]
+        command: Box<TriggerCommand>,
+    },
+    /// The desk's daemon-prompt queue, newest first.
+    Prompt {
+        #[command(subcommand)]
+        command: PromptCommand,
+    },
 }
 
 #[derive(Clone, ValueEnum)]
@@ -55,6 +71,152 @@ enum DeskCommand {
     Show { desk: String },
     /// Retry a failed desk creation.
     Retry { desk: String },
+}
+
+#[derive(Subcommand)]
+enum TriggerCommand {
+    /// Define a trigger. Exactly one schedule shape is required.
+    #[command(group = clap::ArgGroup::new("schedule").required(true).args(["at", "rrule"]))]
+    Create {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name, unique among the desk's live triggers.
+        #[arg(long)]
+        name: String,
+        /// What the trigger is for, snapshotted into every firing.
+        #[arg(long)]
+        brief: String,
+        /// Extra material carried beside the brief.
+        #[arg(long)]
+        context: Option<String>,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+        #[command(flatten)]
+        code: CodeArgs,
+    },
+    /// List the desk's live triggers in creation order.
+    List {
+        /// Desk name or UUID.
+        desk: String,
+    },
+    /// Show one trigger by name or UUID, deleted ones included.
+    Show {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+    },
+    /// Change a trigger; at least one flag is required.
+    Update {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+        /// Replace the brief.
+        #[arg(long)]
+        brief: Option<String>,
+        /// Replace the context.
+        #[arg(long)]
+        context: Option<String>,
+        /// Clear the context.
+        #[arg(long, conflicts_with = "context")]
+        no_context: bool,
+        #[command(flatten)]
+        schedule: ScheduleArgs,
+        #[command(flatten)]
+        code: CodeArgs,
+        /// Detach the code snapshot.
+        #[arg(long, conflicts_with = "code")]
+        no_code: bool,
+    },
+    /// Enable a trigger and project its next occurrence.
+    Enable {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+    },
+    /// Disable a trigger; it becomes never due.
+    Disable {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+    },
+    /// Delete a trigger, keeping its firings readable.
+    Delete {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+    },
+    /// List one trigger's firings, newest first.
+    Firings {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+    },
+    /// Show one firing with its captured streams.
+    Firing {
+        /// Desk name or UUID.
+        desk: String,
+        /// Firing UUID.
+        firing: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PromptCommand {
+    /// List the desk's prompts, newest first, without payloads.
+    List {
+        /// Desk name or UUID.
+        desk: String,
+    },
+    /// Show one prompt with its payload.
+    Show {
+        /// Desk name or UUID.
+        desk: String,
+        /// Prompt UUID.
+        prompt: String,
+    },
+}
+
+/// One schedule shape or the other, never both and never half of the recurring
+/// trio (R2 feature SPEC §2). Values pass through untouched; the daemon
+/// validates them.
+#[derive(Args)]
+struct ScheduleArgs {
+    /// One-off instant, RFC 3339 with an offset.
+    #[arg(long, value_name = "RFC3339", conflicts_with_all = ["rrule", "dtstart", "tz"])]
+    at: Option<String>,
+    /// Recurrence rule, the text after `RRULE:`.
+    #[arg(long, value_name = "RULE", requires_all = ["dtstart", "tz"])]
+    rrule: Option<String>,
+    /// Recurrence anchor as naive local wall clock, `YYYY-MM-DDTHH:MM:SS`.
+    #[arg(long, value_name = "LOCAL", requires_all = ["rrule", "tz"])]
+    dtstart: Option<String>,
+    /// IANA time zone the wall clock is read in.
+    #[arg(long, value_name = "IANA", requires_all = ["rrule", "dtstart"])]
+    tz: Option<String>,
+}
+
+/// The code snapshot, read from a file because the CLI cannot carry a script
+/// any other way (R2 feature SPEC §4.1, §9).
+#[derive(Args)]
+struct CodeArgs {
+    /// Read the trigger's code from this file.
+    #[arg(long, value_name = "FILE")]
+    code: Option<PathBuf>,
+    /// Script suffix; defaults to the file's own extension.
+    #[arg(long, value_name = "SUFFIX", requires = "code")]
+    suffix: Option<String>,
+    /// One argv entry; repeat to build the whole vector. Defaults to `{script}`.
+    #[arg(long = "arg", value_name = "ARG", requires = "code")]
+    arg: Vec<String>,
+    /// Seconds the child may run; the daemon's default by omission.
+    #[arg(long, value_name = "SECS", requires = "code")]
+    timeout: Option<u64>,
 }
 
 /// Exit codes (feature SPEC §8): 0 success, 1 daemon error, 2 usage (clap's
@@ -81,6 +243,12 @@ pub fn run() -> i32 {
 }
 
 fn dispatch(group: &Group) -> Result<String, Fault> {
+    // Built before discovery: an unreadable or non-UTF-8 `--code` file and an
+    // empty `update` are usage errors whether or not a daemon is up (§9).
+    let body = match group {
+        Group::Trigger { command } => trigger_body(command),
+        _ => None,
+    };
     let endpoint = Endpoint::discover()?;
     match group {
         Group::Desk { command } => match command {
@@ -89,16 +257,16 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             }
             DeskCommand::List => endpoint.get("/desks"),
             DeskCommand::Show { desk } => {
-                let id = resolve(&endpoint, desk)?;
+                let id = resolve(&endpoint, "/desks", "desk", desk)?;
                 endpoint.get(&format!("/desks/{id}"))
             }
             DeskCommand::Retry { desk } => {
-                let id = resolve(&endpoint, desk)?;
+                let id = resolve(&endpoint, "/desks", "desk", desk)?;
                 endpoint.post(&format!("/desks/{id}/retry"), None)
             }
         },
         Group::History { record, desk } => {
-            let id = resolve(&endpoint, desk)?;
+            let id = resolve(&endpoint, "/desks", "desk", desk)?;
             let segment = match record {
                 HistoryRecord::Orders => "orders",
                 HistoryRecord::Fills => "fills",
@@ -106,35 +274,215 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             };
             endpoint.get(&format!("/desks/{id}/history/{segment}"))
         }
+        Group::Trigger { command } => {
+            let command = command.as_ref();
+            let desk = match command {
+                TriggerCommand::Create { desk, .. }
+                | TriggerCommand::List { desk }
+                | TriggerCommand::Show { desk, .. }
+                | TriggerCommand::Update { desk, .. }
+                | TriggerCommand::Enable { desk, .. }
+                | TriggerCommand::Disable { desk, .. }
+                | TriggerCommand::Delete { desk, .. }
+                | TriggerCommand::Firings { desk, .. }
+                | TriggerCommand::Firing { desk, .. } => desk,
+            };
+            let desk = resolve(&endpoint, "/desks", "desk", desk)?;
+            let triggers = format!("/desks/{desk}/triggers");
+            match command {
+                TriggerCommand::Create { .. } => endpoint.post(&triggers, body),
+                TriggerCommand::List { .. } => endpoint.get(&triggers),
+                TriggerCommand::Show { trigger, .. } => {
+                    let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
+                    endpoint.get(&format!("{triggers}/{id}"))
+                }
+                TriggerCommand::Update { trigger, .. }
+                | TriggerCommand::Enable { trigger, .. }
+                | TriggerCommand::Disable { trigger, .. } => {
+                    let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
+                    endpoint.patch(&format!("{triggers}/{id}"), body)
+                }
+                TriggerCommand::Delete { trigger, .. } => {
+                    let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
+                    endpoint.delete(&format!("{triggers}/{id}"))
+                }
+                TriggerCommand::Firings { trigger, .. } => {
+                    let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
+                    endpoint.get(&format!("{triggers}/{id}/firings"))
+                }
+                TriggerCommand::Firing { firing, .. } => {
+                    endpoint.get(&format!("/desks/{desk}/firings/{firing}"))
+                }
+            }
+        }
+        Group::Prompt { command } => {
+            let (PromptCommand::List { desk } | PromptCommand::Show { desk, .. }) = command;
+            let desk = resolve(&endpoint, "/desks", "desk", desk)?;
+            match command {
+                PromptCommand::List { .. } => endpoint.get(&format!("/desks/{desk}/prompts")),
+                PromptCommand::Show { prompt, .. } => {
+                    endpoint.get(&format!("/desks/{desk}/prompts/{prompt}"))
+                }
+            }
+        }
     }
+}
+
+/// The request body of the mutating `trigger` commands (R2 feature SPEC §8).
+/// Every value passes through untouched; the daemon validates it.
+fn trigger_body(command: &TriggerCommand) -> Option<Value> {
+    let mut body = Map::new();
+    match command {
+        TriggerCommand::Create {
+            name,
+            brief,
+            context,
+            schedule,
+            code,
+            ..
+        } => {
+            body.insert("name".to_string(), json!(name));
+            body.insert("brief".to_string(), json!(brief));
+            if let Some(context) = context {
+                body.insert("context".to_string(), json!(context));
+            }
+            if let Some(schedule) = schedule_json(schedule) {
+                body.insert("schedule".to_string(), schedule);
+            }
+            if let Some(code) = code_json(code) {
+                body.insert("code".to_string(), code);
+            }
+        }
+        TriggerCommand::Update {
+            brief,
+            context,
+            no_context,
+            schedule,
+            code,
+            no_code,
+            ..
+        } => {
+            if let Some(brief) = brief {
+                body.insert("brief".to_string(), json!(brief));
+            }
+            if let Some(context) = context {
+                body.insert("context".to_string(), json!(context));
+            }
+            if *no_context {
+                body.insert("context".to_string(), Value::Null);
+            }
+            if let Some(schedule) = schedule_json(schedule) {
+                body.insert("schedule".to_string(), schedule);
+            }
+            if let Some(code) = code_json(code) {
+                body.insert("code".to_string(), code);
+            }
+            if *no_code {
+                body.insert("code".to_string(), Value::Null);
+            }
+            if body.is_empty() {
+                usage(
+                    "trigger update needs at least one of --brief, --context, --no-context, \
+                     a schedule, --code, or --no-code",
+                );
+            }
+        }
+        TriggerCommand::Enable { .. } => {
+            body.insert("enabled".to_string(), json!(true));
+        }
+        TriggerCommand::Disable { .. } => {
+            body.insert("enabled".to_string(), json!(false));
+        }
+        _ => return None,
+    }
+    Some(Value::Object(body))
+}
+
+/// `--at` or the recurring trio; clap has already rejected any other shape.
+fn schedule_json(schedule: &ScheduleArgs) -> Option<Value> {
+    if let Some(at) = &schedule.at {
+        return Some(json!({ "at": at }));
+    }
+    let rrule = schedule.rrule.as_ref()?;
+    Some(json!({
+        "rrule": rrule,
+        "dtstart": schedule.dtstart,
+        "tz": schedule.tz,
+    }))
+}
+
+/// The §4.1 snapshot read from `--code`'s file. The suffix defaults to the
+/// file's own extension, `argv` to `{script}` alone, and an omitted timeout
+/// leaves the daemon's default in place.
+fn code_json(code: &CodeArgs) -> Option<Value> {
+    let path = code.code.as_ref()?;
+    let source = std::fs::read(path)
+        .unwrap_or_else(|e| usage(format!("cannot read the code file {}: {e}", path.display())));
+    let source = String::from_utf8(source)
+        .unwrap_or_else(|_| usage(format!("the code file {} is not UTF-8", path.display())));
+    let suffix = code.suffix.clone().unwrap_or_else(|| {
+        path.extension()
+            .map_or(String::new(), |e| format!(".{}", e.to_string_lossy()))
+    });
+    let argv = if code.arg.is_empty() {
+        vec!["{script}".to_string()]
+    } else {
+        code.arg.clone()
+    };
+    let mut snapshot = Map::new();
+    snapshot.insert("source".to_string(), json!(source));
+    snapshot.insert("suffix".to_string(), json!(suffix));
+    snapshot.insert("argv".to_string(), json!(argv));
+    if let Some(timeout) = code.timeout {
+        snapshot.insert("timeout_secs".to_string(), json!(timeout));
+    }
+    Some(Value::Object(snapshot))
+}
+
+/// A usage error the parser cannot state itself, surfaced the way clap
+/// surfaces its own and exiting `2` (feature SPEC §8).
+fn usage(message: impl std::fmt::Display) -> ! {
+    Cli::command()
+        .error(clap::error::ErrorKind::InvalidValue, message)
+        .exit()
 }
 
 /// Name-or-id: a canonical lowercase UUID is used as is, any other token is a
-/// name resolved through `GET /desks` and never any other way (§8).
-fn resolve(endpoint: &Endpoint, desk: &str) -> Result<String, Fault> {
-    if uuid::Uuid::try_parse(desk).is_ok_and(|u| u.hyphenated().to_string() == desk) {
-        return Ok(desk.to_string());
+/// name resolved through the daemon's own listing at `route` and never any
+/// other way (R0 §8, R2 §9). `noun` names both the listing key (`{noun}s`) and
+/// the `{NOUN}_NOT_FOUND` code the CLI reports client-side.
+fn resolve(endpoint: &Endpoint, route: &str, noun: &str, token: &str) -> Result<String, Fault> {
+    if uuid::Uuid::try_parse(token).is_ok_and(|u| u.hyphenated().to_string() == token) {
+        return Ok(token.to_string());
     }
-    let body = endpoint.get("/desks")?;
-    let listing: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| Fault::reported("INTERNAL", format!("Cannot read the desk listing: {e}.")))?;
-    listing["desks"]
+    let body = endpoint.get(route)?;
+    let listing: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        Fault::reported("INTERNAL", format!("Cannot read the {noun} listing: {e}."))
+    })?;
+    listing[format!("{noun}s")]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|d| d["name"].as_str() == Some(desk))
-        .and_then(|d| d["id"].as_str())
+        .find(|row| row["name"].as_str() == Some(token))
+        .and_then(|row| row["id"].as_str())
         .map(str::to_string)
-        .ok_or_else(|| Fault::reported("DESK_NOT_FOUND", format!("No desk is named {desk}.")))
+        .ok_or_else(|| {
+            Fault::reported(
+                format!("{}_NOT_FOUND", noun.to_uppercase()),
+                format!("No {noun} is named {token}."),
+            )
+        })
 }
 
 /// The list bodies the CLI renders as tab-separated rows, in the daemon's own
-/// order — newest first for the history routes (R1 feature SPEC §7, §9).
+/// order — newest first for the history, firing, and prompt routes (R1 feature
+/// SPEC §7, §9; R2 feature SPEC §8, §9).
 ///
 /// `a|b` prints the first field present: a history order carries the sandbox's
-/// `status`, or its latest event `kind` before a status exists. The daemon owns
-/// every shape, so a missing or unknown field prints blank and never panics.
-const LISTS: [(&str, &[&str]); 4] = [
+/// `status`, or its latest event `kind` before a status exists. `a.b` reads one
+/// level down. The daemon owns every shape, so a missing or unknown field
+/// prints blank and never panics.
+const LISTS: [(&str, &[&str]); 7] = [
     ("desks", &["name", "state", "id"]),
     (
         "orders",
@@ -164,6 +512,52 @@ const LISTS: [(&str, &[&str]); 4] = [
         "cycles",
         &["closed_at_ns", "instrument_id", "realized_pnl", "currency"],
     ),
+    (
+        "triggers",
+        &["name", "recurrence", "enabled", "next_occurrence_ns", "id"],
+    ),
+    (
+        "firings",
+        &["id", "occurrence_ns", "accepted_at_ns", "execution.outcome"],
+    ),
+    ("prompts", &["id", "kind", "state", "created_at_ns"]),
+];
+
+/// Single resources print `field: value` in the daemon's own key order. One
+/// ordered union covers every resource the CLI reads — a field the resource at
+/// hand does not carry is simply skipped — and anything the daemon adds that
+/// this list does not name follows, so nothing is silently dropped.
+const FIELDS: [&str; 30] = [
+    "id",
+    "desk_id",
+    "name",
+    "source",
+    "recurrence",
+    "kind",
+    "state",
+    "trigger_id",
+    "occurrence_ns",
+    "accepted_at_ns",
+    "trigger_revision",
+    "brief",
+    "context",
+    "code_snapshot_id",
+    "execution",
+    "schedule",
+    "enabled",
+    "revision",
+    "next_occurrence_ns",
+    "code",
+    "workspace_path",
+    "workspace_status",
+    "workspace_status_reason",
+    "created_at_ns",
+    "updated_at_ns",
+    "deleted_at_ns",
+    "payload",
+    "ready_at_ns",
+    "failure_code",
+    "failure_message",
 ];
 
 /// `--json` passes the daemon's body through untouched; human output is plain
@@ -187,20 +581,14 @@ fn emit(json: bool, body: &str) {
         }
         return;
     }
-    for field in [
-        "id",
-        "name",
-        "state",
-        "workspace_path",
-        "workspace_status",
-        "workspace_status_reason",
-        "created_at_ns",
-        "ready_at_ns",
-        "failure_code",
-        "failure_message",
-    ] {
+    for field in FIELDS {
         if !value[field].is_null() {
             println!("{field}: {}", text(&value[field]));
+        }
+    }
+    for (field, entry) in value.as_object().into_iter().flatten() {
+        if !entry.is_null() && !FIELDS.contains(&field.as_str()) {
+            println!("{field}: {}", text(entry));
         }
     }
 }
@@ -208,7 +596,7 @@ fn emit(json: bool, body: &str) {
 fn cell(row: &serde_json::Value, column: &str) -> String {
     column
         .split('|')
-        .map(|field| &row[field])
+        .map(|field| field.split('.').fold(row, |value, key| &value[key]))
         .find(|value| !value.is_null())
         .map_or(String::new(), text)
 }
