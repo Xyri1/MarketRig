@@ -326,7 +326,7 @@ G22 + G25 + G26 together are the roadmap's R2 evidence line.
 - `schedule::accept_or_miss` — the §3.3 table against a fake clock and daemon start: firings, prompts, `TRIGGER_MISSED` payloads, projections.
 - `schedule::duplicate_wake_no_second_firing` — the unique index guards a repeated unit.
 - `schedule::wake_and_recheck` — a mutation wakes the task; an idle task sleeps at most 60 s.
-- `exec::fingerprint_stable` — the §4.1 hash over a fixed snapshot; any field change changes it.
+- `trigger::fingerprint_stable` — the §4.1 hash over a fixed snapshot; any field change changes it.
 - `exec::document_and_environment` — the child receives the version-1 document and the four identifiers, in the workspace.
 - `exec::outcomes_one_record_one_prompt` — exit 0, nonzero, timeout, output limit, spawn failure: one `executions` row and one prompt each, in one unit, no rerun.
 - `exec::group_terminated_on_timeout` — a script (`sh` on macOS, `powershell` on Windows) that spawns a grandchild and prints its pid; after `TIMED_OUT` the grandchild is gone.
