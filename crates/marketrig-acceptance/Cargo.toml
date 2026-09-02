@@ -25,3 +25,13 @@ serde_json.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 ureq.workspace = true
+
+# E4 makes the operator's own console the desk's terminal (R3 feature SPEC
+# §9.3): raw mode and the window size, from the platform itself. Both crates are
+# already in the workspace graph; the acceptance crate only names the console
+# API it needs on Windows.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Console"] }

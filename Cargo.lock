@@ -1647,12 +1647,14 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "futures-util",
+ "libc",
  "rmcp",
  "rusqlite",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "ureq",
+ "windows",
 ]
 
 [[package]]

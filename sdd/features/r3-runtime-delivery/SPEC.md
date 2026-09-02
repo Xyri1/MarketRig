@@ -219,7 +219,7 @@ Recovery step `sessions` (registered after `executions`): open `agent_processes`
 
 ### 9.1 The stand-in runtime
 
-`runtime-standin` reads `MARKETRIG_STANDIN_SCRIPT` (a JSON file the gate writes) for that launch's knobs; every key is optional and its default is the plain happy path.
+`runtime-standin` reads `MARKETRIG_STANDIN_SCRIPT` (a JSON file the gate writes) for that launch's knobs; every key is optional and its default is the plain happy path. The gate sets that variable on the **daemon's** environment, which is the whole delivery mechanism: `runtime::discover`'s probes, the app-server child, and the PTY launch all inherit it — the launch environment §4.2 lists is an overlay on the daemon's own, not a cleared one. There is one script file per gate run and the knobs are rewritten in place, so a rewrite arms the next launch and never disturbs one already running: a knob the long-lived app-server reads (`drop_socket_on_turn_start`, `delay_turn_start_response_ms`, and `active_after_input_ms`, which it applies) needs a daemon restart to take effect, while a knob a launch reads (`version`, `exit_before_ready`, `mcp_read`, and Claude's) takes effect at the next launch. `<script>.sessions`, the Claude half's ledger, is beside it and therefore spans the run's launches.
 
 | Key | Default | Effect |
 | --- | --- | --- |
@@ -245,10 +245,10 @@ Both halves print to the PTY, flushed per line: `INPUT <n>: <text>` per delivere
 ### 9.2 Gate scenarios (continuing R2's chain)
 
 - **G27 — discovery.** Both runtimes `UNDISCOVERED`; explicit discover to the stand-in → `AVAILABLE` with version `99.0.0`; a discover to a nonexistent path → `UNAVAILABLE NOT_FOUND`; a stand-in scripted to print `0.1.0` → `VERSION_UNSUPPORTED`.
-- **G28 — trigger fires, nobody home (Codex).** A code-less one-off fires → activation → `SESSION_STARTED`, `SESSION_READY`, `PROMPT_DELIVERED`; the attachment shows `INPUT 1: MarketRig TRIGGER_RESULT …`; the stand-in's `mcp_read` of `…/quotes` succeeds through the adapter the launch registered.
+- **G28 — trigger fires, nobody home (Codex).** A code-less one-off fires → activation → `SESSION_STARTED`, `SESSION_READY`, `PROMPT_DELIVERED`; the attachment shows the orientation as `INPUT 1` and `INPUT 2: MarketRig TRIGGER_RESULT …` — a new session's orientation heads the FIFO (§6.1) — and the stand-in's `mcp_read` of `…/quotes` succeeds through the adapter the launch registered.
 - **G29 — FIFO behind a turn, then resume.** Two firings while the stand-in stays `active` 5 s; order and timing per §6.3's scenarios; `exit` → `INTERRUPTED`; a third firing → `SESSION_STARTED {mode: RESUME}` with the same thread id.
 - **G30 — the Claude half.** G28 and G29 repeated on `claude` after `switch`: channel readiness, two frames FIFO, hooks recorded (`SESSION_TURN_ENDED` after each turn, `SESSION_POINTER_CHANGED` on a scripted `clear`), Interrupt `409`.
-- **G31 — failure and disclosure.** Stand-in scripted `exit_before_ready` → `PROMPT_FAILED ACTIVATION_FAILED`; the stand-in's app-server scripted to drop the socket on `turn/start` → `HANDOFF_UNKNOWN`, `CONTROL_PLANE_LOST`, one restart, `CONTROL_PLANE_STARTED`; the next new session's first input is the `DISCLOSURE` naming both ids and codes; `prompt show` reads the failed content.
+- **G31 — failure and disclosure.** On its own desk: stand-in scripted `exit_before_ready` → `PROMPT_FAILED ACTIVATION_FAILED`; then, after a daemon restart that arms a fresh app-server, one scripted to drop the socket on `turn/start` → `HANDOFF_UNKNOWN`, `CONTROL_PLANE_LOST`, one restart, `CONTROL_PLANE_STARTED`. A `switch` to `claude` — the desk has no Claude pointer, so the next activation is a new session without depending on any exit path — makes the next launch's first input the `DISCLOSURE` naming both ids and codes, and delivering it stamps `disclosed_at_ns`; `prompt show` reads the failed row without its content.
 - **G32 — hard kill.** Daemon killed with a live session and a prompt mid-attempt (the stand-in delays its `turn/start` response) → recovery event lists `sessions_lost` and `prompts_unknown`, no stand-in process survives, the pointer survives, the terminal route answers `NO_LIVE_SESSION`.
 
 ### 9.3 Experiment scenario

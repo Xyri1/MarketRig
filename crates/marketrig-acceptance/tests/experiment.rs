@@ -572,3 +572,599 @@ fn finish(g: &mut Harness, scenario: &str, daemon: marketrig_acceptance::Daemon,
         json!({ "evidence": evidence, "actions": actions }),
     );
 }
+
+// ---------------------------------------------------------------------------
+// E4 — the runtime plane, attended (R3 feature SPEC §9.3)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e4_codex_cli() {
+    delivery("E4", "codex", "Codex CLI", "claude");
+}
+
+#[test]
+fn e4_claude_code() {
+    delivery("E4", "claude", "Claude Code", "codex");
+}
+
+/// **E4 — MarketRig starts the real runtime and delivers to it** (R3 feature
+/// SPEC §9.3). The operator's own console *is* the desk's terminal for the whole
+/// cell — raw, with the window size relayed — so the trust and channel
+/// confirmations the real CLI asks for are answered by hand. What the daemon
+/// records is mechanical and asserted; what the agent does is inconclusive.
+fn delivery(scenario: &str, cell: &str, runtime: &str, other: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e4-{cell}"));
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    // Startup discovery is skipped under the test seam (§2), so the cell asks
+    // for it: the operator's own installation, resolved from the login PATH.
+    let (status, row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{cell}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["state"], "AVAILABLE",
+        "the cell's runtime must be installed and discoverable: {row}"
+    );
+
+    let desk = format!("{cell}-e4-{}", marketrig_acceptance::now_secs());
+    let (status, created) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/desks",
+        Some(&json!({ "name": desk, "runtime": cell }).to_string()),
+    );
+    assert_eq!(status, 201, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+
+    let at = format!(
+        "{}Z",
+        marketrig_acceptance::utc(marketrig_acceptance::now_secs() as i64 + 120)
+    );
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — MarketRig starts {runtime} and delivers to it (feature SPEC §9.3)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:      {desk}\n\
+         Runtime:   {runtime} {version} at {path}\n\
+         Data root: {root}\n\
+         Evidence:  {root}\n\
+         \n\
+         Nothing to register and nothing to start: MarketRig launches the runtime\n\
+         itself, in the desk's workspace, with the adapter already registered.\n\
+         \n\
+         1. This console becomes the desk's terminal in a moment. Everything you\n\
+         \x20  type goes to the session; everything it prints appears here.\n\
+         \n\
+         2. Answer whatever {runtime} asks on first launch — trust, permissions,\n\
+         \x20  the development channel — and nothing else. Do not send the session\n\
+         \x20  work of your own: the point of the cell is what MarketRig delivers.\n\
+         \n\
+         3. A one-off trigger is due at {at} (about two minutes out). When it\n\
+         \x20  fires you must see its result arrive as the session's own input,\n\
+         \x20  after the orientation MarketRig sends first. Read it and say so.\n\
+         \n\
+         4. When the harness says so, keep the session busy — ask it something\n\
+         \x20  that takes a moment — and a second trigger's result will be waiting\n\
+         \x20  behind it, delivered when the turn ends.\n\
+         \n\
+         5. The harness then switches the desk to {other} and stops. The desk's\n\
+         \x20  history and pointers must survive that.\n\
+         \n\
+         The harness waits up to {patience} minutes per step; ^C stops the run.\n\
+         ===========================================================================\n",
+        version = row["version"].as_str().unwrap_or_default(),
+        path = row["executable_path"].as_str().unwrap_or_default(),
+        root = g.out.display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e4.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "runtime": row }),
+    );
+
+    // The console is the terminal from here until the cell ends.
+    let console = console::attach(&endpoint, &desk_id);
+
+    let (exit, trigger) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &desk,
+            "--name",
+            "e4-first",
+            "--brief",
+            "the first delivery",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{trigger}");
+    let first = trigger["id"].as_str().expect("id").to_owned();
+
+    let started = waited(PATIENCE, "MarketRig to start the runtime", || {
+        !kinds(&g, &desk_id, "SESSION_STARTED").is_empty()
+    });
+    if !started {
+        g.inconclusive(
+            scenario,
+            "no session was started within the cell's patience",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let activation = kinds(&g, &desk_id, "SESSION_STARTED").remove(0);
+    assert_eq!(activation["runtime"], cell, "{activation}");
+    g.note(
+        scenario,
+        "MarketRig started the runtime itself",
+        json!({ "activation": activation }),
+    );
+
+    let ready = waited(PATIENCE, "the session to become ready", || {
+        !kinds(&g, &desk_id, "SESSION_READY").is_empty()
+    });
+    if !ready {
+        g.inconclusive(
+            scenario,
+            "the launch never reached readiness — the operator may not have answered its first-launch questions",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    g.note(
+        scenario,
+        "the launch reached readiness",
+        json!({ "process": g.column(
+            "SELECT id || ' ' || runtime || ' ' || coalesce(native_session_id, '-') \
+             FROM agent_processes WHERE desk_id = ?1 ORDER BY started_at_ns",
+            &[&desk_id],
+        ) }),
+    );
+
+    // Mechanical from here: whatever the daemon says it delivered, its own rows
+    // must agree with (root §17).
+    let delivered = |g: &Harness| -> i64 {
+        g.scalar(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'TRIGGER_RESULT' \
+             AND state = 'DELIVERED'",
+            &[&desk_id],
+        )
+    };
+    let fired = waited(
+        PATIENCE,
+        "the first trigger's result to be delivered",
+        || delivered(&g) >= 1,
+    );
+    if !fired {
+        g.inconclusive(
+            scenario,
+            "the first result was never delivered within the cell's patience",
+            json!({ "trigger_id": first, "prompts": prompt_states(&g, &desk_id) }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    assert_delivery(&g, &desk_id);
+    g.note(
+        scenario,
+        "the trigger fired with nobody home, MarketRig delivered its result to the session it started, and the rows agree",
+        json!({ "prompts": prompt_states(&g, &desk_id) }),
+    );
+    g.inconclusive(
+        scenario,
+        "whether the result appeared as the session's own input is the operator's to confirm on the console",
+        json!({ "expect": "MarketRig TRIGGER_RESULT <id>: followed by the firing's JSON" }),
+    );
+
+    // The second one, deliberately queued behind whatever the operator has the
+    // session doing.
+    println!(
+        "\r\n{scenario}: give the session something to chew on now — the next result is due in two minutes.\r\n"
+    );
+    let at = format!(
+        "{}Z",
+        marketrig_acceptance::utc(marketrig_acceptance::now_secs() as i64 + 120)
+    );
+    let (exit, trigger) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &desk,
+            "--name",
+            "e4-second",
+            "--brief",
+            "queued behind a turn",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{trigger}");
+    if waited(PATIENCE, "the second result to be delivered", || {
+        delivered(&g) >= 2
+    }) {
+        assert_delivery(&g, &desk_id);
+        g.note(
+            scenario,
+            "a second result was delivered while the session was in the operator's hands",
+            json!({ "prompts": prompt_states(&g, &desk_id) }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the second result was not delivered within the cell's patience",
+            json!({ "prompts": prompt_states(&g, &desk_id) }),
+        );
+    }
+
+    // The switch, and what it must not move.
+    let before = (
+        g.scalar::<i64>(
+            "SELECT count(*) FROM firings f JOIN triggers t ON t.id = f.trigger_id \
+             WHERE t.desk_id = ?1",
+            &[&desk_id],
+        ),
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1",
+            &[&desk_id],
+        ),
+        pointer(&g, &desk_id, cell),
+    );
+    let (status, other_row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{other}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{other_row}");
+    if other_row["state"] == "AVAILABLE" {
+        let (status, switched) = g.api(
+            scenario,
+            &endpoint,
+            "POST",
+            &format!("/desks/{desk_id}/session/switch"),
+            Some(&json!({ "runtime": other }).to_string()),
+        );
+        assert_eq!(status, 200, "{switched}");
+        assert_eq!(switched["selected_runtime"], other);
+        assert_eq!(
+            switched["pointers"][cell].as_str().map(str::to_owned),
+            before.2,
+            "a switch keeps the runtime's pointer (§7)"
+        );
+        let after = (
+            g.scalar::<i64>(
+                "SELECT count(*) FROM firings f JOIN triggers t ON t.id = f.trigger_id \
+                 WHERE t.desk_id = ?1",
+                &[&desk_id],
+            ),
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1",
+                &[&desk_id],
+            ),
+        );
+        assert_eq!(
+            (before.0, before.1),
+            after,
+            "the switch moved the desk's history"
+        );
+        g.note(
+            scenario,
+            "the desk switched runtimes with its pointers and history intact",
+            json!({ "switched": switched }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the other runtime is not installed on this machine, so the switch leg was not run",
+            json!({ "runtime": other_row }),
+        );
+    }
+
+    console.detach();
+    finish(&mut g, scenario, daemon, &desk_id);
+}
+
+/// One desk's events of a kind, oldest first, as payloads.
+fn kinds(g: &Harness, desk_id: &str, kind: &str) -> Vec<serde_json::Value> {
+    g.events()
+        .into_iter()
+        .filter(|e| e.desk_id.as_deref() == Some(desk_id) && e.kind == kind)
+        .map(|e| e.payload)
+        .collect()
+}
+
+fn prompt_states(g: &Harness, desk_id: &str) -> Vec<String> {
+    g.column(
+        "SELECT kind || ' ' || state || ' ' || coalesce(failure_code, '-') FROM prompts \
+         WHERE desk_id = ?1 ORDER BY created_at_ns, id",
+        &[&desk_id],
+    )
+}
+
+fn pointer(g: &Harness, desk_id: &str, runtime: &str) -> Option<String> {
+    g.db()
+        .query_row(
+            "SELECT native_session_id FROM native_sessions WHERE desk_id = ?1 AND runtime = ?2",
+            [desk_id, runtime],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+/// Every delivered prompt must name the runtime and the native session it was
+/// handed to, and a live process must carry the same pointer: a delivery the
+/// daemon's own rows contradict fails the cell (§9.3).
+fn assert_delivery(g: &Harness, desk_id: &str) {
+    let rows = g.column(
+        "SELECT coalesce(runtime, '-') || ' ' || coalesce(native_session_id, '-') FROM prompts \
+         WHERE desk_id = ?1 AND state = 'DELIVERED' ORDER BY resolved_at_ns",
+        &[&desk_id],
+    );
+    for row in &rows {
+        let mut parts = row.split(' ');
+        assert_ne!(
+            parts.next(),
+            Some("-"),
+            "a delivered prompt names no runtime"
+        );
+        assert_ne!(
+            parts.next(),
+            Some("-"),
+            "a delivered prompt names no native session"
+        );
+    }
+    assert_eq!(
+        rows.len() as i64,
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND state = 'DELIVERED'",
+            &[&desk_id],
+        )
+    );
+}
+
+/// The operator's console as the desk's terminal (§9.3): raw, with the window
+/// size relayed, for as long as the cell lasts. It reconnects on its own, so an
+/// attachment taken before the session exists — or across a switch — still
+/// lands. No terminal library: `termios` on Unix and the console API on
+/// Windows are the whole of it.
+mod console {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use marketrig_acceptance::Endpoint;
+
+    pub struct Console {
+        stop: Arc<AtomicBool>,
+        relay: Option<std::thread::JoinHandle<()>>,
+        saved: Saved,
+    }
+
+    impl Console {
+        /// Restores the console and lets the relay finish.
+        pub fn detach(mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(relay) = self.relay.take() {
+                let _ = relay.join();
+            }
+            self.saved.restore();
+            println!("\r");
+        }
+    }
+
+    pub fn attach(endpoint: &Endpoint, desk_id: &str) -> Console {
+        let saved = Saved::raw();
+        let stop = Arc::new(AtomicBool::new(false));
+        let url = format!("ws://127.0.0.1:{}/desks/{desk_id}/terminal", endpoint.port);
+        let credential = endpoint.credential.clone();
+        let flag = stop.clone();
+        let relay = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the console attachment");
+            runtime.block_on(relay(url, credential, flag));
+        });
+        Console {
+            stop,
+            relay: Some(relay),
+            saved,
+        }
+    }
+
+    async fn relay(url: String, credential: String, stop: Arc<AtomicBool>) {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+        let (keys, mut typed) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut stdin = std::io::stdin();
+            let mut buffer = [0u8; 1024];
+            while let Ok(read) = stdin.read(&mut buffer) {
+                if read == 0 || keys.send(buffer[..read].to_vec()).is_err() {
+                    return;
+                }
+            }
+        });
+
+        while !stop.load(Ordering::SeqCst) {
+            let mut request = match url.clone().into_client_request() {
+                Ok(request) => request,
+                Err(_) => return,
+            };
+            if let Ok(header) = format!("Bearer {credential}").parse() {
+                request.headers_mut().insert("authorization", header);
+            }
+            let Ok((mut socket, _)) = tokio_tungstenite::connect_async(request).await else {
+                // No terminal yet, or none any more: ask again in a moment.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            };
+            let mut size = (0u16, 0u16);
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    let _ = socket.close(None).await;
+                    return;
+                }
+                let now = Saved::size();
+                if now != size && now != (0, 0) {
+                    size = now;
+                    let resize = format!(r#"{{"resize":{{"cols":{},"rows":{}}}}}"#, size.0, size.1);
+                    if socket.send(Message::Text(resize.into())).await.is_err() {
+                        break;
+                    }
+                }
+                tokio::select! {
+                    keys = typed.recv() => match keys {
+                        Some(bytes) => {
+                            if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
+                    frame = socket.next() => match frame {
+                        Some(Ok(Message::Binary(bytes))) => {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(&bytes);
+                            let _ = out.flush();
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            let mut out = std::io::stdout();
+                            let _ = write!(out, "\r\n{text}\r\n");
+                            let _ = out.flush();
+                        }
+                        Some(Ok(_)) => {}
+                        _ => break,
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub struct Saved(libc::termios);
+
+    #[cfg(unix)]
+    impl Saved {
+        fn raw() -> Saved {
+            unsafe {
+                let mut saved: libc::termios = std::mem::zeroed();
+                libc::tcgetattr(libc::STDIN_FILENO, &mut saved);
+                let mut raw = saved;
+                libc::cfmakeraw(&mut raw);
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+                Saved(saved)
+            }
+        }
+
+        fn restore(&mut self) {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.0);
+            }
+        }
+
+        fn size() -> (u16, u16) {
+            unsafe {
+                let mut window: libc::winsize = std::mem::zeroed();
+                if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut window) != 0 {
+                    return (0, 0);
+                }
+                (window.ws_col, window.ws_row)
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub struct Saved(u32, u32);
+
+    #[cfg(windows)]
+    impl Saved {
+        fn raw() -> Saved {
+            use windows::Win32::System::Console::*;
+            unsafe {
+                let (mut input, mut output) = (CONSOLE_MODE(0), CONSOLE_MODE(0));
+                let stdin = GetStdHandle(STD_INPUT_HANDLE).unwrap_or_default();
+                let stdout = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or_default();
+                let _ = GetConsoleMode(stdin, &mut input);
+                let _ = GetConsoleMode(stdout, &mut output);
+                let raw = CONSOLE_MODE(
+                    (input.0
+                        & !(ENABLE_LINE_INPUT.0 | ENABLE_ECHO_INPUT.0 | ENABLE_PROCESSED_INPUT.0))
+                        | ENABLE_VIRTUAL_TERMINAL_INPUT.0,
+                );
+                let _ = SetConsoleMode(stdin, raw);
+                let _ = SetConsoleMode(
+                    stdout,
+                    CONSOLE_MODE(output.0 | ENABLE_VIRTUAL_TERMINAL_PROCESSING.0),
+                );
+                Saved(input.0, output.0)
+            }
+        }
+
+        fn restore(&mut self) {
+            use windows::Win32::System::Console::*;
+            unsafe {
+                if let Ok(stdin) = GetStdHandle(STD_INPUT_HANDLE) {
+                    let _ = SetConsoleMode(stdin, CONSOLE_MODE(self.0));
+                }
+                if let Ok(stdout) = GetStdHandle(STD_OUTPUT_HANDLE) {
+                    let _ = SetConsoleMode(stdout, CONSOLE_MODE(self.1));
+                }
+            }
+        }
+
+        fn size() -> (u16, u16) {
+            use windows::Win32::System::Console::*;
+            unsafe {
+                let Ok(stdout) = GetStdHandle(STD_OUTPUT_HANDLE) else {
+                    return (0, 0);
+                };
+                let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+                if GetConsoleScreenBufferInfo(stdout, &mut info).is_err() {
+                    return (0, 0);
+                }
+                let window = info.srWindow;
+                (
+                    (window.Right - window.Left + 1).max(0) as u16,
+                    (window.Bottom - window.Top + 1).max(0) as u16,
+                )
+            }
+        }
+    }
+}

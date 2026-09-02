@@ -196,6 +196,9 @@ pub struct Harness {
     /// The acceptance modes' own trigger script runner (R2 feature SPEC §10.1),
     /// which every code-bearing trigger names as `argv[0]`.
     pub trigger_code: PathBuf,
+    /// The stand-in runtime (R3 feature SPEC §9.1), which the gate registers by
+    /// explicit path and scripts through [`Harness::script`].
+    pub standin: PathBuf,
     observations: File,
     step: u32,
     daemons: u32,
@@ -206,6 +209,11 @@ pub struct Harness {
     /// Keeps the daemon off the public feed (root SPEC §17). Set in the gate,
     /// cleared by [`Harness::real_feed`].
     no_trading: bool,
+    /// The stand-in runtime's script (R3 feature SPEC §9.1). It is one file per
+    /// run, set on the daemon's own environment and inherited by every child it
+    /// launches, which is how a launch that the daemon spawns with an exact
+    /// environment still finds its knobs.
+    standin_script: Option<PathBuf>,
 }
 
 impl Harness {
@@ -225,7 +233,7 @@ impl Harness {
                 .join(format!("{prefix}-{}", now_secs())),
         };
         fs::create_dir_all(&out).expect("evidence directory");
-        let (daemond, cli, mcp, trigger_code) = build(&workspace);
+        let (daemond, cli, mcp, trigger_code, standin) = build(&workspace);
         eprintln!("acceptance evidence: {}", out.display());
         Harness {
             observations: File::create(out.join("observations.jsonl")).expect("observations"),
@@ -234,6 +242,7 @@ impl Harness {
             cli,
             mcp,
             trigger_code,
+            standin,
             step: 0,
             daemons: 0,
             // Same discipline as the CLI (R0 feature SPEC §8): no proxy, no
@@ -249,7 +258,18 @@ impl Harness {
             ),
             quote_url: None,
             no_trading: true,
+            standin_script: None,
         }
+    }
+
+    /// Writes the stand-in runtime's script (R3 feature SPEC §9.1) and points
+    /// every binary this harness starts at it. One path for the whole run: a
+    /// launch reads it when it starts, so rewriting it arms the next launch,
+    /// and the `<script>.sessions` ledger beside it spans the run's launches.
+    pub fn script(&mut self, script: Value) {
+        let path = self.out.join("standin-script.json");
+        fs::write(&path, script.to_string()).expect("write the stand-in script");
+        self.standin_script = Some(path);
     }
 
     /// Points the next daemon at the gate's stand-in feed (R1 feature SPEC
@@ -319,6 +339,10 @@ impl Harness {
         match &self.quote_url {
             Some(url) => command.env("MARKETRIG_TEST_QUOTE_URL", url),
             None => command.env_remove("MARKETRIG_TEST_QUOTE_URL"),
+        };
+        match &self.standin_script {
+            Some(path) => command.env("MARKETRIG_STANDIN_SCRIPT", path),
+            None => command.env_remove("MARKETRIG_STANDIN_SCRIPT"),
         };
         command
     }
@@ -625,7 +649,7 @@ impl Harness {
 /// harness is correct under `CARGO_TARGET_DIR` and on Windows. `trigger-code`
 /// is built with them and lands beside them, which is how it finds the adapter
 /// (R2 feature SPEC §10.1).
-fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .current_dir(workspace)
@@ -655,6 +679,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     let mut cli = None;
     let mut mcp = None;
     let mut trigger_code = None;
+    let mut standin = None;
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(message) = serde_json::from_slice::<Value>(line) else {
             continue;
@@ -673,6 +698,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
             "marketrig" => cli = Some(PathBuf::from(executable)),
             "marketrig-mcp" => mcp = Some(PathBuf::from(executable)),
             "trigger-code" => trigger_code = Some(PathBuf::from(executable)),
+            "runtime-standin" => standin = Some(PathBuf::from(executable)),
             _ => {}
         }
     }
@@ -681,5 +707,6 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         cli.expect("marketrig executable"),
         mcp.expect("marketrig-mcp executable"),
         trigger_code.expect("trigger-code executable"),
+        standin.expect("runtime-standin executable"),
     )
 }

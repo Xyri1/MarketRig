@@ -1,8 +1,8 @@
 # Running the attended experiment — Windows cells
 
-The experiment is the operator-attended half of the acceptance chain (root `sdd/SPEC.md` §17; R1 feature SPEC §10.3, R2 feature SPEC §10.3). Slice 002's exit needs E1 (Codex CLI) and E2 (Claude Code) once per platform-and-runtime cell; slice 003 adds E3, the scheduled-trigger scenario, to the same cells. The R1 macOS cells ran on 2026-09-02 (`target/acceptance/experiment-codex-1788316954/` and `experiment-claude-1788317581/`); this guide is for the two Windows cells and doubles as the procedure anywhere. Commands are PowerShell.
+The experiment is the operator-attended half of the acceptance chain (root `sdd/SPEC.md` §17; R1 feature SPEC §10.3, R2 feature SPEC §10.3). Slice 002's exit needs E1 (Codex CLI) and E2 (Claude Code) once per platform-and-runtime cell; slice 003 adds E3, the scheduled-trigger scenario, and slice 004 adds E4, the runtime-delivery scenario, to the same cells. The R1 macOS cells ran on 2026-09-02 (`target/acceptance/experiment-codex-1788316954/` and `experiment-claude-1788317581/`); this guide is for the two Windows cells and doubles as the procedure anywhere. Commands are PowerShell.
 
-One invocation per cell now runs **two** scenarios back to back — E1 or E2 first, then E3 — each on its own daemon, desk, and bundle. They share your terminal and your hands, so the harness serializes them: E3's instructions print only once the earlier scenario has finished.
+One invocation per cell now runs **three** scenarios back to back — E1 or E2, E3, and E4 — each on its own daemon, desk, and bundle. They share your terminal and your hands, so the harness serializes them: each scenario's instructions print only once the previous one has finished. E4 is unlike the other two: MarketRig launches the runtime itself, with the adapter already registered, and **your console becomes the desk's terminal** for the whole scenario.
 
 ## 1. Before you start
 
@@ -21,14 +21,14 @@ One invocation per cell now runs **two** scenarios back to back — E1 or E2 fir
 
 ## 2. Start the cell
 
-One cell per invocation; the other cell's tests skip. The harness builds `marketrigd`, `marketrig`, `marketrig-mcp`, and the `trigger-code` helper itself, spawns a daemon, creates a run-stamped desk, and prints its instructions. It then waits up to 15 minutes per step on the daemon's durable rows. Budget 30–40 minutes for a cell: E1/E2 first, then E3.
+One cell per invocation; the other cell's tests skip. The harness builds `marketrigd`, `marketrig`, `marketrig-mcp`, and the `trigger-code` helper itself, spawns a daemon, creates a run-stamped desk, and prints its instructions. It then waits up to 15 minutes per step on the daemon's durable rows. Budget 45–60 minutes for a cell: E1/E2, then E3, then E4.
 
 ```powershell
 $env:MARKETRIG_EXPERIMENT = "codex"     # or "claude"
 cargo test -p marketrig-acceptance --test experiment -- --nocapture
 ```
 
-The bundles are `target\acceptance\experiment-<cell>-<stamp>\` for E1/E2 and `target\acceptance\experiment-e3-<cell>-<stamp>\` for E3. Do **not** set `MARKETRIG_ACCEPTANCE_OUT` for a cell: it would point both scenarios at one directory and the second would overwrite the first's `observations.jsonl`. Copy the `Desk:`, `Data root:`, and `Adapter:` lines from each printout; the same text is in `<bundle>\instructions.txt` (E1/E2) and `<bundle>\instructions-e3.txt` (E3). Leave this window running and open a second one for the session.
+The bundles are `target\acceptance\experiment-<cell>-<stamp>\` for E1/E2, `target\acceptance\experiment-e3-<cell>-<stamp>\` for E3, and `target\acceptance\experiment-e4-<cell>-<stamp>\` for E4. Do **not** set `MARKETRIG_ACCEPTANCE_OUT` for a cell: it would point both scenarios at one directory and the second would overwrite the first's `observations.jsonl`. Copy the `Desk:`, `Data root:`, and `Adapter:` lines from each printout; the same text is in `<bundle>\instructions.txt` (E1/E2), `<bundle>\instructions-e3.txt` (E3), and `<bundle>\instructions-e4.txt` (E4). Leave this window running and open a second one for the session.
 
 ## 3. Register the adapter, project-scoped
 
@@ -97,7 +97,20 @@ E3 runs after E1/E2 in the same invocation and gets its **own desk and data root
 2. **The trigger.** Give the session the whole command line from the printout. It carries `MARKETRIG_TEST_DATA_ROOT` because the CLI needs the same data root the daemon is using — the adapter's registration does not cover a command the session runs itself. If the session takes more than two minutes to get there, have it pick a fresh `--at` a couple of minutes ahead, in the same RFC 3339 UTC form.
 3. **Nothing else.** You may close the session. The harness watches for the `triggers` row, the `firings` row, the completed `executions` row, the `trading_actions` row attributed to the firing, and the queued `TRIGGER_RESULT` prompt. Reading that prompt back (`marketrig prompt list <desk>`) is worth doing with the session if it is still open, but the harness does not wait on it.
 
-## 6. Read the result
+## 6. Drive the session — E4
+
+E4 is the R3 scenario, and it inverts the other two: **you register nothing and start nothing.** MarketRig discovers the runtime on your `PATH`, creates a desk on it, launches it in that desk's workspace with the MarketRig adapter already registered, and delivers a scheduled trigger's result to it as the session's own input. Your console becomes that session's terminal — raw mode, window size relayed — from the moment the instructions print until the scenario ends, so everything you type goes to the session and everything it prints appears in this window. The harness's own progress lines are interleaved in the same window; that is expected.
+
+1. **Answer the first launch.** A real CLI asks its own questions on a fresh workspace, and only you can answer them. Expect at least a folder-trust prompt; Claude Code additionally raises the MCP servers MarketRig registered for it, including the development channel it delivers through. Answer them and nothing more. *(Operator note — fill in from the cell you run: the exact prompts each runtime showed, in order, and which key answers them.)*
+   - Codex CLI: _(to fill in)_
+   - Claude Code: _(to fill in)_
+2. **Watch the first delivery.** A code-less one-off is due about two minutes after the instructions print. A new session is oriented first, so you should see MarketRig's orientation paragraph arrive as the session's first input, then `MarketRig TRIGGER_RESULT <id>:` with the firing's JSON. Read it; whether the session acts on it is not the point and is recorded `INCONCLUSIVE`.
+3. **Keep it busy.** When the harness prints `give the session something to chew on now`, ask the session something that takes a while. A second one-off is due two minutes later, and its result must arrive *after* that turn ends — behind the turn, never into it.
+4. **The switch.** The harness then discovers the other runtime, switches the desk to it, and asserts the desk's pointers and history did not move. If the other runtime is not installed, that leg is recorded `INCONCLUSIVE` and the cell is still complete.
+
+Nothing to clean up afterwards: the launch files live under the bundle's `data\runtime\launch\` and the daemon deletes them when the process row closes. Your own Codex or Claude configuration was never touched.
+
+## 7. Read the result
 
 `test result: ok` says only that the harness ran; the verdict is in `<bundle>\observations.jsonl`, one JSON line per step:
 
@@ -105,13 +118,14 @@ E3 runs after E1/E2 in the same invocation and gets its **own desk and data root
 - E1/E2's quote-reads step is `INCONCLUSIVE` in every cell;
 - E3's agent-dependent steps — no trigger, no firing, a trigger with no `--code`, or code that placed no order — end `INCONCLUSIVE` with what the harness did see, including the script's captured standard output. Everything after a code-bearing firing exists is the daemon's own and fails the cell instead: the completed execution, the queued prompt, and the attribution on any action row;
 - a step that timed out ends the cell with `INCONCLUSIVE` and `waited_secs: 900` instead. That is not a defect. Rerun the cell; every run creates a new desk and bundle, so rewrite the project-scoped file for the new `<desk>` and `<bundle>`, and delete the timed-out bundle;
+- E4's agent-dependent steps — no session started, no readiness (its first-launch questions unanswered), a result never delivered — end `INCONCLUSIVE`; a delivery the daemon's own rows contradict (a `DELIVERED` prompt naming no runtime or no native session) fails the cell. Whether the delivered text appeared as the session's input is yours to confirm on the console and is recorded `INCONCLUSIVE` by construction;
 - a mechanical failure (no daemon, no `LIVE` quote, a wrong row) panics the test with the reason; `<bundle>\marketrigd-1.stderr` and `<bundle>\logs\` hold the daemon's side.
 
 The macOS bundles named at the top are the reference shape for a complete cell.
 
-## 7. Evidence and cleanup
+## 8. Evidence and cleanup
 
-- Keep both bundles per cell: `experiment-<cell>-<stamp>` and `experiment-e3-<cell>-<stamp>`. The bundle is the evidence; the `.codex\config.toml` and `.mcp.json` inside it carry no secret, only the data-root path.
+- Keep all three bundles per cell: `experiment-<cell>-<stamp>`, `experiment-e3-<cell>-<stamp>`, and `experiment-e4-<cell>-<stamp>`. The bundle is the evidence; the `.codex\config.toml` and `.mcp.json` inside it carry no secret, only the data-root path.
 - Record each cell's stamps, runtime version, and the commit in the slice's freeze note and the roadmap's evidence line.
 - Nothing was written to `~\.codex\config.toml` or Claude Code's user config. If you used the global form from the printout instead, remove it: `codex mcp remove marketrig` / `claude mcp remove marketrig`.
-- Aborting the harness with Ctrl-C skips its teardown; check for a leftover daemon with `Get-Process marketrigd` and stop it before the next cell. On macOS a hard-stopped run can also leave a `trigger-code` child in its own session; `pkill trigger-code` clears it.
+- Aborting the harness with Ctrl-C skips its teardown; check for a leftover daemon with `Get-Process marketrigd` and stop it before the next cell. On macOS a hard-stopped run can also leave a `trigger-code` child in its own session; `pkill trigger-code` clears it. Aborting E4 also leaves your console in raw mode and the launched runtime running: `Get-Process codex, claude` (macOS: `pkill -f 'codex --remote'`), and `stty sane` on macOS restores the terminal.

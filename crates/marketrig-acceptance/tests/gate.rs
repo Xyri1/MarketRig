@@ -1,9 +1,11 @@
-//! The acceptance gate: scenarios G1–G26, in order, in one test.
+//! The acceptance gate: scenarios G1–G32, in order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
 //! (the stand-in feed and G12–G20) and `sdd/features/r2-scheduled-triggers/SPEC.md`
-//! §10 (the `trigger-code` binary and G21–G26), per D75, R0-7, R1-9, R2-8. The
+//! §10 (the `trigger-code` binary and G21–G26) and
+//! `sdd/features/r3-runtime-delivery/SPEC.md` §9 (the `runtime-standin` binary
+//! and G27–G32), per D75, R0-7, R1-9, R2-8, R3-8. The
 //! harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
@@ -198,6 +200,146 @@ fn projected(g: &Harness, trigger_id: &str) -> Option<i64> {
             |row| row.get(0),
         )
         .expect("the trigger row")
+}
+
+/// One code-less one-off, due `secs` from now (R2 §2), on the desk R3's
+/// scenarios queue prompts through.
+fn one_off(g: &mut Harness, scenario: &str, desk: &str, name: &str, secs: i64) -> String {
+    let at = format!(
+        "{}Z",
+        marketrig_acceptance::utc(marketrig_acceptance::now_secs() as i64 + secs)
+    );
+    let (exit, trigger) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "create",
+            desk,
+            "--name",
+            name,
+            "--brief",
+            "an R3 delivery",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{trigger}");
+    trigger["id"].as_str().expect("id").to_owned()
+}
+
+/// How many of a desk's prompts have been handed to a session.
+fn delivered(g: &Harness, desk_id: &str) -> i64 {
+    g.scalar(
+        "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND state = 'DELIVERED'",
+        &[&desk_id],
+    )
+}
+
+/// One prompt's outcome (R3 §6.2).
+fn prompt_state(g: &Harness, prompt_id: &str) -> (String, Option<String>) {
+    g.db()
+        .query_row(
+            "SELECT state, failure_code FROM prompts WHERE id = ?1",
+            [prompt_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the prompt row")
+}
+
+/// A desk's first event of one kind, as its payload.
+#[track_caller]
+fn one_event(g: &Harness, desk_id: &str, kind: &str) -> Value {
+    g.events()
+        .into_iter()
+        .find(|e| e.desk_id.as_deref() == Some(desk_id) && e.kind == kind)
+        .unwrap_or_else(|| panic!("no {kind} for {desk_id}"))
+        .payload
+}
+
+/// A desk's every event of one kind, oldest first.
+fn payloads(g: &Harness, desk_id: &str, kind: &str) -> Vec<Value> {
+    g.events()
+        .into_iter()
+        .filter(|e| e.desk_id.as_deref() == Some(desk_id) && e.kind == kind)
+        .map(|e| e.payload)
+        .collect()
+}
+
+/// The desk's native-session pointer for one runtime (R3 §8).
+fn pointer(g: &Harness, desk_id: &str, runtime: &str) -> Option<String> {
+    g.db()
+        .query_row(
+            "SELECT native_session_id FROM native_sessions WHERE desk_id = ?1 AND runtime = ?2",
+            [desk_id, runtime],
+            |row| row.get(0),
+        )
+        .ok()
+}
+
+/// Reads a desk's terminal attachment (R3 §3) until the transcript satisfies
+/// `until` or the bound passes, and answers what it read. The ring is replayed
+/// as the first binary frame, so a line printed before the attachment counts.
+fn transcript(
+    rt: &tokio::runtime::Runtime,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk_id: &str,
+    bound: Duration,
+    until: impl Fn(&str) -> bool,
+) -> String {
+    use futures_util::StreamExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let url = format!("ws://127.0.0.1:{}/desks/{desk_id}/terminal", endpoint.port);
+    let credential = endpoint.credential.clone();
+    rt.block_on(async move {
+        let mut request = url.into_client_request().expect("a ws url");
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {credential}").parse().expect("a header"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("attach to the desk's terminal");
+        let deadline = tokio::time::Instant::now() + bound;
+        let mut seen = String::new();
+        while !until(&seen) {
+            let Ok(Some(Ok(message))) = tokio::time::timeout_at(deadline, socket.next()).await
+            else {
+                break;
+            };
+            match message {
+                Message::Binary(bytes) => seen.push_str(&String::from_utf8_lossy(&bytes)),
+                Message::Text(text) => seen.push_str(&text),
+                _ => {}
+            }
+        }
+        seen
+    })
+}
+
+/// Whether a pid the daemon recorded is still running — asked of the platform,
+/// because the harness links nothing.
+fn alive(pid: i64) -> bool {
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
+            .unwrap_or(false)
+    }
 }
 
 async fn resource_text(service: &RunningService<RoleClient, ()>, uri: &str) -> String {
@@ -2684,6 +2826,593 @@ fn gate() {
         json!({ "recovery": recovery, "execution": lost["execution"] }),
     );
 
+    // The R3 scenarios attach to terminals over WebSockets, which needs a
+    // runtime; one for the rest of the chain.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime for the terminal attachments");
+
+    // ======================================================================
+    // R3 (feature SPEC `r3-runtime-delivery` §9.2). The chain continues on the
+    // same root with the stand-in runtime (§9.1) registered by explicit path:
+    // startup discovery is skipped under the test seam, so the gate never sees
+    // the operator's real installations. Every launch's knobs come from the one
+    // script file `MARKETRIG_STANDIN_SCRIPT` names, which the harness sets on
+    // the daemon's own environment: the app-server and the terminal children
+    // both inherit it, and rewriting the file arms the next launch.
+    // ======================================================================
+    let delta = format!("delta-{stamp}");
+    let epsilon = format!("epsilon-{stamp}");
+    let zeta = format!("zeta-{stamp}");
+    let standin = g.standin.display().to_string();
+    let discover = |runtime: &str| format!("/runtimes/{runtime}/discover");
+    let explicit = json!({ "executable": standin }).to_string();
+    let session_route = |desk_id: &str, leaf: &str| format!("/desks/{desk_id}/session/{leaf}");
+
+    // --- G27 — discovery ----------------------------------------------------
+    g.script(json!({}));
+    let daemon11 = g.spawn("G27");
+    endpoint = daemon11.endpoint.clone();
+    let (status, listed) = g.api("G27", &endpoint, "GET", "/runtimes", None);
+    assert_eq!(status, 200, "{listed}");
+    for row in listed["runtimes"].as_array().expect("runtimes") {
+        assert_eq!(row["state"], "UNDISCOVERED", "{row}");
+    }
+    for runtime in ["codex", "claude"] {
+        let (status, row) = g.api(
+            "G27",
+            &endpoint,
+            "POST",
+            &discover(runtime),
+            Some(&explicit),
+        );
+        assert_eq!(status, 200, "{row}");
+        assert_eq!(row["state"], "AVAILABLE", "{row}");
+        assert_eq!(row["version"], "99.0.0", "the script's own version (§9.1)");
+        assert_eq!(row["executable_path"], standin.as_str());
+        assert!(row.get("failure_code").is_none(), "{row}");
+    }
+    let missing = json!({ "executable": g.out.join("no-such-runtime") }).to_string();
+    let (status, gone) = g.api("G27", &endpoint, "POST", &discover("codex"), Some(&missing));
+    assert_eq!(status, 200, "{gone}");
+    assert_eq!(gone["state"], "UNAVAILABLE");
+    assert_eq!(gone["failure_code"], "NOT_FOUND");
+    g.script(json!({ "version": "0.1.0" }));
+    let (status, old) = g.api(
+        "G27",
+        &endpoint,
+        "POST",
+        &discover("codex"),
+        Some(&explicit),
+    );
+    assert_eq!(status, 200, "{old}");
+    assert_eq!(old["state"], "UNAVAILABLE");
+    assert_eq!(old["failure_code"], "VERSION_UNSUPPORTED");
+    g.note(
+        "G27",
+        "both runtimes discovered by explicit path, a missing path was NOT_FOUND, and a version below the floor was VERSION_UNSUPPORTED",
+        json!({ "available": listed["runtimes"], "not_found": gone, "unsupported": old }),
+    );
+
+    // --- G28 — a trigger fires with nobody home (Codex) ---------------------
+    // The turn stays active five seconds after every input, which G29 needs and
+    // G28 only has to outwait; the launch reads the desk's quotes resource
+    // through the adapter it registered itself.
+    let quotes_uri = format!("marketrig://desk/{delta}/quotes");
+    g.script(json!({ "mcp_read": quotes_uri, "active_after_input_ms": 5_000 }));
+    let (status, back) = g.api(
+        "G28",
+        &endpoint,
+        "POST",
+        &discover("codex"),
+        Some(&explicit),
+    );
+    assert_eq!(status, 200, "{back}");
+    assert_eq!(back["state"], "AVAILABLE");
+
+    let (exit, created) = g.cli_json("G28", &["--json", "desk", "create", &delta]);
+    assert_eq!(exit, 0, "{created}");
+    let delta_id = created["id"].as_str().expect("id").to_owned();
+    assert_eq!(created["state"], "READY");
+
+    let first = one_off(&mut g, "G28", &delta, "g28-once", 2);
+    let first_firing = await_firing(&g, &first, 0);
+    within(
+        Duration::from_secs(60),
+        "the firing's TRIGGER_RESULT to be delivered",
+        || delivered(&g, &delta_id) >= 2,
+    );
+    let kinds = g.kinds_for(&delta_id);
+    let order: Vec<&String> = kinds
+        .iter()
+        .filter(|kind| {
+            ["SESSION_STARTED", "SESSION_READY", "PROMPT_DELIVERED"].contains(&kind.as_str())
+        })
+        .collect();
+    assert_eq!(
+        order[..3],
+        ["SESSION_STARTED", "SESSION_READY", "PROMPT_DELIVERED"],
+        "{kinds:?}"
+    );
+    let started = one_event(&g, &delta_id, "SESSION_STARTED");
+    assert_eq!(started["runtime"], "codex");
+    assert_eq!(started["mode"], "NEW");
+    let thread = pointer(&g, &delta_id, "codex").expect("the desk's thread pointer");
+    assert_eq!(
+        g.scalar::<String>(
+            "SELECT native_session_id FROM agent_processes WHERE desk_id = ?1 \
+             ORDER BY started_at_ns LIMIT 1",
+            &[&delta_id],
+        ),
+        thread,
+        "the process row carries the pointer (§9.2)"
+    );
+    let result_prompt = result_prompts(&g, &delta_id, &first_firing)
+        .pop()
+        .expect("the firing's prompt");
+    assert_eq!(
+        prompt_state(&g, &result_prompt),
+        ("DELIVERED".to_string(), None)
+    );
+    // The attachment replays the ring, so everything the launch printed before
+    // it connected is still read (§3).
+    let seen = transcript(&rt, &endpoint, &delta_id, Duration::from_secs(30), |text| {
+        text.contains("INPUT 2: ")
+    });
+    assert!(
+        seen.contains(&format!("MCP_READ marketrig://desk/{delta}/quotes: ")),
+        "the launch read the desk's quotes through its own registration: {seen:?}"
+    );
+    assert!(
+        seen.contains("INPUT 1: You are the trading agent of the MarketRig desk"),
+        "a new session's first input is its orientation (§6.1): {seen:?}"
+    );
+    assert!(
+        seen.contains("INPUT 2: MarketRig TRIGGER_RESULT "),
+        "the firing's result reached the session as its second input: {seen:?}"
+    );
+    g.note(
+        "G28",
+        "a code-less firing woke the dispatcher, the stand-in started, became ready, read the desk's quotes through its own registration, and took the orientation and the result as its first two inputs",
+        json!({ "thread": thread, "firing": first_firing, "transcript": seen }),
+    );
+
+    // --- G29 — FIFO behind a turn, then resume ------------------------------
+    let queued_a = one_off(&mut g, "G29", &delta, "g29-a", 2);
+    let queued_b = one_off(&mut g, "G29", &delta, "g29-b", 3);
+    let firing_a = await_firing(&g, &queued_a, 0);
+    let firing_b = await_firing(&g, &queued_b, 0);
+    within(
+        Duration::from_secs(90),
+        "both queued results to be delivered",
+        || delivered(&g, &delta_id) >= 4,
+    );
+    let prompt_a = result_prompts(&g, &delta_id, &firing_a).pop().expect("a");
+    let prompt_b = result_prompts(&g, &delta_id, &firing_b).pop().expect("b");
+    let resolved =
+        |id: &str| -> i64 { g.scalar("SELECT resolved_at_ns FROM prompts WHERE id = ?1", &[&id]) };
+    let (a, b) = (resolved(&prompt_a), resolved(&prompt_b));
+    assert!(b > a, "FIFO: {a} then {b}");
+    assert!(
+        b - a > 4_000_000_000,
+        "the second waited out the first turn's five active seconds: {}ns",
+        b - a
+    );
+
+    let (status, ended) = g.api(
+        "G29",
+        &endpoint,
+        "POST",
+        &session_route(&delta_id, "exit"),
+        None,
+    );
+    assert_eq!(status, 202, "{ended}");
+    assert_eq!(
+        g.column(
+            "SELECT exit_reason FROM agent_processes WHERE desk_id = ?1 \
+             ORDER BY started_at_ns",
+            &[&delta_id],
+        )
+        .pop(),
+        Some("INTERRUPTED".to_string())
+    );
+    let (status, none) = g.api(
+        "G29",
+        &endpoint,
+        "GET",
+        &format!("/desks/{delta_id}/session"),
+        None,
+    );
+    assert_eq!(status, 200, "{none}");
+    assert_eq!(none, json!({ "process": null }));
+
+    let queued_c = one_off(&mut g, "G29", &delta, "g29-c", 2);
+    let firing_c = await_firing(&g, &queued_c, 0);
+    within(
+        Duration::from_secs(60),
+        "the resumed session to take the third result",
+        || delivered(&g, &delta_id) >= 5,
+    );
+    let resumed = g
+        .events()
+        .into_iter()
+        .filter(|e| e.desk_id.as_deref() == Some(delta_id.as_str()) && e.kind == "SESSION_STARTED")
+        .map(|e| e.payload)
+        .next_back()
+        .expect("the resumed session");
+    assert_eq!(resumed["mode"], "RESUME");
+    assert_eq!(
+        resumed["native_session_id"], thread,
+        "a resume points at the same thread (§4.2)"
+    );
+    let prompt_c = result_prompts(&g, &delta_id, &firing_c).pop().expect("c");
+    assert_eq!(prompt_state(&g, &prompt_c), ("DELIVERED".to_string(), None));
+    let seen = transcript(&rt, &endpoint, &delta_id, Duration::from_secs(30), |text| {
+        text.contains("INPUT 1: ")
+    });
+    assert!(
+        seen.contains("INPUT 1: MarketRig TRIGGER_RESULT "),
+        "a resumed session is oriented already: its first input is the result: {seen:?}"
+    );
+    g.note(
+        "G29",
+        "two firings behind one five-second turn were delivered in order, Exit ended the session INTERRUPTED, and a third firing resumed the same thread",
+        json!({ "gap_ns": b - a, "thread": thread, "resumed": resumed }),
+    );
+
+    // --- G30 — the Claude half ----------------------------------------------
+    // The same two shapes on the other runtime, after a Switch: readiness is the
+    // bridge's connection, hooks are the session's own evidence, and Interrupt is
+    // refused before anything is touched (§5).
+    g.script(json!({
+        "hooks": true,
+        "clear_after_inputs": 2,
+        "active_after_input_ms": 200,
+        "mcp_read": format!("marketrig://desk/{delta}/quotes"),
+    }));
+    let (status, switched) = g.api(
+        "G30",
+        &endpoint,
+        "POST",
+        &session_route(&delta_id, "switch"),
+        Some(r#"{"runtime":"claude"}"#),
+    );
+    assert_eq!(status, 200, "{switched}");
+    assert_eq!(switched["selected_runtime"], "claude");
+    assert_eq!(
+        switched["pointers"]["codex"], thread,
+        "a switch keeps the runtime's pointer (§7)"
+    );
+
+    let before = delivered(&g, &delta_id);
+    let claude_a = one_off(&mut g, "G30", &delta, "g30-a", 2);
+    let claude_b = one_off(&mut g, "G30", &delta, "g30-b", 3);
+    let claude_firing_a = await_firing(&g, &claude_a, 0);
+    let claude_firing_b = await_firing(&g, &claude_b, 0);
+    within(
+        Duration::from_secs(90),
+        "the Claude session's orientation and two results",
+        || delivered(&g, &delta_id) >= before + 3,
+    );
+    let claude_started = payloads(&g, &delta_id, "SESSION_STARTED")
+        .pop()
+        .expect("the Claude session");
+    assert_eq!(claude_started["runtime"], "claude");
+    assert_eq!(
+        claude_started["mode"], "NEW",
+        "no Claude pointer existed yet"
+    );
+    let prompt_a = result_prompts(&g, &delta_id, &claude_firing_a)
+        .pop()
+        .expect("a");
+    let prompt_b = result_prompts(&g, &delta_id, &claude_firing_b)
+        .pop()
+        .expect("b");
+    for id in [&prompt_a, &prompt_b] {
+        assert_eq!(prompt_state(&g, id), ("DELIVERED".to_string(), None));
+    }
+    within(
+        Duration::from_secs(30),
+        "a turn-ended hook per delivered input and the scripted clear",
+        || {
+            payloads(&g, &delta_id, "SESSION_TURN_ENDED").len() >= 3
+                && payloads(&g, &delta_id, "SESSION_POINTER_CHANGED")
+                    .iter()
+                    .any(|payload| payload["cause"] == "clear")
+        },
+    );
+    let cleared = payloads(&g, &delta_id, "SESSION_POINTER_CHANGED")
+        .into_iter()
+        .find(|payload| payload["cause"] == "clear")
+        .expect("the clear");
+    assert_eq!(cleared["runtime"], "claude");
+    assert_eq!(
+        pointer(&g, &delta_id, "claude").as_deref(),
+        cleared["to"].as_str(),
+        "the clear repointed the desk (§5.2)"
+    );
+    let seen = transcript(&rt, &endpoint, &delta_id, Duration::from_secs(30), |text| {
+        text.contains("INPUT 3: ")
+    });
+    assert!(
+        seen.contains("INPUT 1: You are the trading agent of the MarketRig desk"),
+        "{seen:?}"
+    );
+    assert!(
+        seen.matches("MarketRig TRIGGER_RESULT ").count() >= 2,
+        "both frames reached the session in order: {seen:?}"
+    );
+    let (status, refused) = g.api(
+        "G30",
+        &endpoint,
+        "POST",
+        &session_route(&delta_id, "interrupt"),
+        None,
+    );
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused["code"], "INTERRUPT_UNSUPPORTED");
+    g.note(
+        "G30",
+        "the desk switched to Claude keeping its Codex pointer, the bridge's connection was readiness, three inputs arrived FIFO with a turn-ended hook each, a scripted clear repointed the desk, and Interrupt was refused",
+        json!({ "switched": switched, "cleared": cleared, "transcript": seen }),
+    );
+
+    // --- G31 — failure and disclosure ---------------------------------------
+    // Two failures of different codes on one desk, then the next new session's
+    // first input naming both (§6.3).
+    g.script(json!({ "exit_before_ready": true }));
+    let (exit, created) = g.cli_json("G31", &["--json", "desk", "create", &epsilon]);
+    assert_eq!(exit, 0, "{created}");
+    let epsilon_id = created["id"].as_str().expect("id").to_owned();
+    let failing = one_off(&mut g, "G31", &epsilon, "g31-activation", 2);
+    await_firing(&g, &failing, 0);
+    within(
+        Duration::from_secs(90),
+        "the queued prompts to fail ACTIVATION_FAILED",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND failure_code = 'ACTIVATION_FAILED'",
+                &[&epsilon_id],
+            ) >= 1
+        },
+    );
+    let activation_failed = g
+        .column(
+            "SELECT id FROM prompts WHERE desk_id = ?1 AND failure_code = 'ACTIVATION_FAILED' \
+             ORDER BY created_at_ns, id",
+            &[&epsilon_id],
+        )
+        .remove(0);
+
+    // The app-server reads its knobs when it starts, so the socket-dropping one
+    // needs a fresh control plane: the restart is the whole mechanism.
+    g.script(json!({ "drop_socket_on_turn_start": true }));
+    g.stop("G31", daemon11);
+    let daemon12 = g.spawn("G31");
+    endpoint = daemon12.endpoint.clone();
+    let uncertain = one_off(&mut g, "G31", &epsilon, "g31-handoff", 2);
+    await_firing(&g, &uncertain, 0);
+    within(
+        Duration::from_secs(120),
+        "an uncertain handoff and the control plane's loss and restart",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND failure_code = 'HANDOFF_UNKNOWN'",
+                &[&epsilon_id],
+            ) >= 1
+                && g.event_kinds()
+                    .iter()
+                    .filter(|kind| kind.as_str() == "CONTROL_PLANE_LOST")
+                    .count()
+                    >= 1
+        },
+    );
+    let handoff_unknown = g
+        .column(
+            "SELECT id FROM prompts WHERE desk_id = ?1 AND failure_code = 'HANDOFF_UNKNOWN' \
+             ORDER BY created_at_ns, id",
+            &[&epsilon_id],
+        )
+        .remove(0);
+    within(
+        Duration::from_secs(60),
+        "the control plane to be started again after its loss",
+        || {
+            g.event_kinds()
+                .iter()
+                .filter(|kind| kind.as_str() == "CONTROL_PLANE_STARTED")
+                .count()
+                >= 2
+        },
+    );
+    within(
+        Duration::from_secs(120),
+        "the desk's queue to settle after the uncertain handoff",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND state = 'QUEUED'",
+                &[&epsilon_id],
+            ) == 0
+        },
+    );
+
+    // A genuinely new session, and the shortest honest way to one: the desk has
+    // no Claude pointer, so a Switch makes the next activation a NEW session
+    // whose first input is the disclosure.
+    g.script(json!({}));
+    let (status, switched) = g.api(
+        "G31",
+        &endpoint,
+        "POST",
+        &session_route(&epsilon_id, "switch"),
+        Some(r#"{"runtime":"claude"}"#),
+    );
+    assert_eq!(status, 200, "{switched}");
+    let disclosing = one_off(&mut g, "G31", &epsilon, "g31-disclosure", 2);
+    await_firing(&g, &disclosing, 0);
+    let seen = transcript(
+        &rt,
+        &endpoint,
+        &epsilon_id,
+        Duration::from_secs(90),
+        |text| text.contains("INPUT 2: "),
+    );
+    assert!(
+        seen.contains("INPUT 1: MarketRig could not deliver these prompts"),
+        "the disclosure heads the new session's FIFO (§6.1): {seen:?}"
+    );
+    for (id, code) in [
+        (&activation_failed, "ACTIVATION_FAILED"),
+        (&handoff_unknown, "HANDOFF_UNKNOWN"),
+    ] {
+        assert!(
+            seen.contains(&format!("{id} TRIGGER_RESULT {code}"))
+                || seen.contains(&format!("{id} ORIENTATION {code}")),
+            "the disclosure names {id} {code}: {seen:?}"
+        );
+        assert!(
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE id = ?1 AND disclosed_at_ns IS NOT NULL",
+                &[id],
+            ) == 1,
+            "delivering the disclosure marks {id} disclosed (§6.3)"
+        );
+    }
+    let (exit, shown) = g.cli_json(
+        "G31",
+        &["--json", "prompt", "show", &epsilon, &handoff_unknown],
+    );
+    assert_eq!(exit, 0, "{shown}");
+    assert_eq!(shown["state"], "FAILED");
+    assert_eq!(shown["failure_code"], "HANDOFF_UNKNOWN");
+    assert!(!shown["payload"].is_null(), "{shown}");
+    g.note(
+        "G31",
+        "a launch that exited before readiness failed its queue ACTIVATION_FAILED, a dropped socket on turn/start left one HANDOFF_UNKNOWN with the control plane lost and restarted, and the next new session's first input disclosed both by id and code while their content stayed unread",
+        json!({
+            "activation_failed": activation_failed,
+            "handoff_unknown": handoff_unknown,
+            "prompt_show": shown,
+            "transcript": seen,
+        }),
+    );
+
+    // --- G32 — a hard kill mid-attempt --------------------------------------
+    g.script(json!({ "delay_turn_start_response_ms": 20_000 }));
+    g.stop("G32", daemon12);
+    let daemon13 = g.spawn("G32");
+    endpoint = daemon13.endpoint.clone();
+    let (status, back) = g.api(
+        "G32",
+        &endpoint,
+        "POST",
+        &discover("codex"),
+        Some(&explicit),
+    );
+    assert_eq!(status, 200, "{back}");
+    assert_eq!(back["state"], "AVAILABLE", "{back}");
+    let (exit, created) = g.cli_json("G32", &["--json", "desk", "create", &zeta]);
+    assert_eq!(exit, 0, "{created}");
+    let zeta_id = created["id"].as_str().expect("id").to_owned();
+    let hanging = one_off(&mut g, "G32", &zeta, "g32-inflight", 2);
+    await_firing(&g, &hanging, 0);
+    within(
+        Duration::from_secs(90),
+        "a prompt attempted but unanswered",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND state = 'QUEUED' \
+                 AND attempted_at_ns IS NOT NULL",
+                &[&zeta_id],
+            ) == 1
+        },
+    );
+    let (process_id, session_pid): (String, i64) = g
+        .db()
+        .query_row(
+            "SELECT id, pid FROM agent_processes WHERE desk_id = ?1 AND ended_at_ns IS NULL",
+            [&zeta_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the live process row");
+    let attempted = g
+        .column(
+            "SELECT id FROM prompts WHERE desk_id = ?1 AND state = 'QUEUED' \
+             AND attempted_at_ns IS NOT NULL",
+            &[&zeta_id],
+        )
+        .remove(0);
+    let zeta_thread = pointer(&g, &zeta_id, "codex").expect("the thread pointer");
+    let app_server: i64 =
+        parse(&fs::read_to_string(g.children_path()).expect("children.json"))["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|child| child["kind"] == "codex-app-server")
+            .and_then(|child| child["pid"].as_i64())
+            .expect("the app-server's record");
+
+    let dead = daemon13.endpoint.daemon_uuid.clone();
+    let stale = daemon13.endpoint.clone();
+    g.kill("G32", daemon13);
+    g.await_unverifiable(&stale);
+    let daemon14 = g.spawn("G32");
+    endpoint = daemon14.endpoint.clone();
+
+    let recovery = g.recoveries().pop().expect("a RECOVERY");
+    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
+    assert_eq!(
+        recovery["sessions_lost"],
+        json!([{
+            "process_id": process_id, "desk_id": zeta_id,
+            "runtime": "codex", "native_session_id": zeta_thread,
+        }]),
+        "recovery names the session the dead daemon was holding (§8)"
+    );
+    assert_eq!(
+        recovery["prompts_unknown"],
+        json!([{
+            "prompt_id": attempted, "desk_id": zeta_id,
+            "kind": "ORIENTATION", "failure_code": "HANDOFF_UNKNOWN",
+        }]),
+        "an attempt the daemon did not outlive is an uncertain handoff (§8)"
+    );
+    assert!(
+        recovery["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| child["kind"] == "codex-app-server"),
+        "the successor reaped the control plane: {recovery}"
+    );
+    within(
+        Duration::from_secs(60),
+        "no stand-in process to survive the kill",
+        || !alive(app_server) && !alive(session_pid),
+    );
+    assert_eq!(
+        pointer(&g, &zeta_id, "codex").as_deref(),
+        Some(zeta_thread.as_str()),
+        "the pointer outlives the process (§8)"
+    );
+    let (status, no_session) = g.api(
+        "G32",
+        &endpoint,
+        "GET",
+        &format!("/desks/{zeta_id}/terminal"),
+        None,
+    );
+    assert_eq!(status, 409, "{no_session}");
+    assert_eq!(no_session["code"], "NO_LIVE_SESSION");
+    g.stop("G32", daemon14);
+    g.note(
+        "G32",
+        "a hard kill with a prompt mid-attempt left recovery naming the lost session and the uncertain prompt, no stand-in alive, the pointer intact, and the terminal route answering NO_LIVE_SESSION",
+        json!({ "recovery": recovery, "process": process_id, "prompt": attempted }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-G26 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-G32 complete", json!({ "evidence": evidence }));
 }
