@@ -17,7 +17,11 @@ publish = false
 axum.workspace = true
 # G19's own MCP client, spawning the real adapter over stdio (per D4, D75).
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+# `runtime-standin` (R3 feature SPEC §9.1): the Codex halves' WebSocket client
+# and the stream adapters it reads with, on the daemon's own pinned lines.
+futures-util.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 ureq.workspace = true

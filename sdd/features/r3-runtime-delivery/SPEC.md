@@ -219,7 +219,28 @@ Recovery step `sessions` (registered after `executions`): open `agent_processes`
 
 ### 9.1 The stand-in runtime
 
-`runtime-standin` reads `MARKETRIG_STANDIN_SCRIPT` (a JSON file the gate writes) naming, per launch, `ready_after_ms`, `active_after_input_ms`, `exit_before_ready`, `mcp_read` (a resource URI to read through the registered adapter and echo), and for Claude `hooks: true`. As Codex: `app-server --listen ws://…` implements `initialize`, `thread/start`, `thread/resume` (unknown id → JSON-RPC error), `thread/turns/list`, `turn/start` (echoes the text to the TUI's socket, broadcasts `active` then `idle` per script), `turn/interrupt`, and rejects every other method; `--remote … -C` and `resume <id> --remote … -C` connect and drive the thread. As Claude: honors `--session-id`, `--resume` (unknown id → exit 1), `--mcp-config` (spawns the listed servers over stdio, completes MCP `initialize`, and for `marketrig-channel` reads `notifications/claude/channel`), `--settings` (runs the hook commands with the documented input objects), and `--dangerously-load-development-channels`. Every echoed input line is `INPUT <n>: <text>` on the PTY so the gate can read the attachment.
+`runtime-standin` reads `MARKETRIG_STANDIN_SCRIPT` (a JSON file the gate writes) for that launch's knobs; every key is optional and its default is the plain happy path.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `version` | `"99.0.0"` | what `--version` prints (`runtime-standin <version>`), which is what discovery reads (G27) |
+| `ready_after_ms` | `0` | how long the launch waits before it starts (Codex) or resumes (Claude) its session |
+| `active_after_input_ms` | `0` | how long the session stays `active` after each input before going `idle` again (Codex: the status broadcast; Claude: the delay before the `Stop` hook) |
+| `exit_before_ready` | `false` | the launch exits `1` before readiness (G31) |
+| `mcp_read` | — | a resource URI read once through the adapter the launch registers, echoed on the PTY |
+| `hooks` | `false` | Claude only: run the commands `--settings` names |
+| `notification` | — | Claude only: a title for one `Notification` hook fired at start |
+| `clear_after_inputs` | — | Claude only: after that many inputs, a `SessionStart` with `source: "clear"` and a new session id (G30) |
+| `drop_socket_on_turn_start` | `false` | Codex only: the app-server drops the requesting connection instead of answering `turn/start` (G31) |
+| `delay_turn_start_response_ms` | `0` | Codex only: how long the app-server holds the `turn/start` response (G32) |
+
+`--help` prints usage naming `app-server`, `--dangerously-load-development-channels` and `--settings`, so one binary passes both runtimes' capability probe.
+
+As Codex: `app-server --listen ws://… --ws-auth capability-token --ws-token-file <path>` serves JSON-RPC over a WebSocket that requires `Authorization: Bearer <the token file's contents>`, and implements `initialize`, `thread/start`, `thread/resume` (unknown id → JSON-RPC error), `thread/turns/list`, `turn/start` (broadcasts `active` then `idle` per script), `turn/interrupt`, and rejects every other method; broadcasts are §4.1's `thread/started` (non-`ephemeral`, the launching workspace's `cwd`, inline `status: idle`), `thread/status/changed` and `thread/closed`. The turn's text reaches the TUI as one broadcast of the stand-in's own method `marketrig/standin/input {threadId, text}` — the two halves are one binary and need a wire between them; nothing in `marketrigd` reads it. `--remote <url> --remote-auth-token-env <var> -C <workspace>` and `resume <id> --remote … -C <workspace>` connect with the token from that variable and start or resume the thread.
+
+As Claude: honors `--session-id`, `--resume` (a session id the stand-in has not minted → exit `1`), `--mcp-config` (spawns the listed servers over stdio, completes MCP `initialize` advertising nothing, and for `marketrig-channel` reads `notifications/claude/channel`), `--settings` (runs each event's commands through the platform shell with the hook input object on standard input: `SessionStart {hook_event_name, session_id, source, cwd}`, `Notification {…, notification_type, title, message}`, `Stop {hook_event_name, session_id}`), and `--dangerously-load-development-channels`. The session ids it has minted are remembered in `<script>.sessions` beside the script file, which is what makes an unknown `--resume` distinguishable across the launches of one scenario.
+
+Both halves print to the PTY, flushed per line: `INPUT <n>: <text>` per delivered input, counted from 1 per launch, and `MCP_READ <uri>: <the first 80 characters of the resource text>` or `MCP_READ_ERROR <uri>: <message>` for `mcp_read`. The process lives until its socket or its channel server ends, or it is killed; exit codes are plain.
 
 ### 9.2 Gate scenarios (continuing R2's chain)
 

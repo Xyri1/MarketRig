@@ -1646,10 +1646,12 @@ name = "marketrig-acceptance"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "rmcp",
  "rusqlite",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "ureq",
 ]
 
