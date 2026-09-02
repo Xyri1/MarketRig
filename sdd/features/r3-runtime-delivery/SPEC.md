@@ -50,7 +50,7 @@ Scenarios:
 
 ### 4.1 Control plane
 
-Started lazily by the first Codex activation: bind `127.0.0.1:0`, take the port, release, spawn `<codex> app-server --listen ws://127.0.0.1:<port>` under the R2 containment primitive with cwd the data root, record it in `runtime/children.json`, connect within 15 s (retrying every 250 ms), send `initialize` (`clientInfo {name: "marketrigd", version}`) then `initialized`, append `CONTROL_PLANE_STARTED {runtime: "codex", pid, port}`. The connection reads broadcasts only:
+Started lazily by the first Codex activation: bind `127.0.0.1:0`, take the port, release, write a fresh capability token 0600 to `runtime/codex-ws-token`, spawn `<codex> app-server --listen ws://127.0.0.1:<port> --ws-auth capability-token --ws-token-file <that path>` under the R2 containment primitive with cwd the data root, record it in `runtime/children.json`, connect within 15 s (retrying every 250 ms) with an `Authorization: Bearer <token>` header, send `initialize` (`clientInfo {name: "marketrigd", version}`) then `initialized`, append `CONTROL_PLANE_STARTED {runtime: "codex", pid, port}`. The connection reads broadcasts only:
 
 | Broadcast | Use |
 | --- | --- |
@@ -63,7 +63,7 @@ Loss: the child exiting or the socket closing ends every Codex `agent_processes`
 
 ### 4.2 Sessions
 
-New: `<codex> --remote ws://127.0.0.1:<port> -C <workspace> -c mcp_servers.marketrig.command="<marketrig-mcp>" -c 'mcp_servers.marketrig.args=["--desk","<desk-id>"]' -c 'mcp_servers.marketrig.env={MARKETRIG_TEST_DATA_ROOT="…"}'` (the env override only under the test seam). Resume: `<codex> resume <thread-id> --remote … -C <workspace>` plus the same overrides. Environment: the captured login `PATH`, `HOME`, `TERM=xterm-256color`, `LANG` and `LC_*` from the daemon, `MARKETRIG_DESK_ID`; nothing else (no bearer, no secret). Pointer: `native_sessions[desk, codex] = thread.id` on `thread/started`; a resume that produces no `thread/started` for that id within 60 s, or whose TUI exits first, is unresumable (R3-5). Ready: the first `idle` for the pointer's thread → `agent_processes.ready_at_ns`, `SESSION_READY`.
+Before either launch the daemon writes `<workspace>/.codex/config.toml` with `[mcp_servers.marketrig]` `command = "<marketrig-mcp>"`, `args = ["--desk","<desk-id>"]`, and `env = {MARKETRIG_TEST_DATA_ROOT = "…"}` (the env key only under the test seam); `-c mcp_servers.*` on the TUI command line does not reach the remote thread (spike S). New: `<codex> --remote ws://127.0.0.1:<port> --remote-auth-token-env MARKETRIG_CODEX_WS_TOKEN -C <workspace>`. Resume: `<codex> resume <thread-id> --remote … -C <workspace>`, same flags. Environment: the captured login `PATH`, `HOME`, `TERM=xterm-256color`, `LANG` and `LC_*` from the daemon, `MARKETRIG_DESK_ID`, and `MARKETRIG_CODEX_WS_TOKEN` (the app-server capability token, the one secret the TUI needs to reach its own control plane); nothing else (no daemon bearer). Pointer: `native_sessions[desk, codex] = thread.id` on `thread/started`; a resume that produces no `thread/started` for that id within 60 s, or whose TUI exits first, is unresumable (R3-5). Ready: the first `idle` for the pointer's thread → `agent_processes.ready_at_ns`, `SESSION_READY`.
 
 ### 4.3 Delivery and interrupt
 
