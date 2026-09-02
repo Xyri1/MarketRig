@@ -1013,7 +1013,11 @@ async fn group_terminated_on_timeout() {
     } else {
         "sleep 60 &\necho $!\nwait\n"
     };
-    seed_firing(&store, "d1", "f1", source, &shell().1, 1, 10);
+    // PowerShell on a cold CI runner can take over a second to start and
+    // print the pid, so the Windows timeout leaves it room; the grandchild
+    // still outlives the bound by a wide margin either way.
+    let timeout_secs = if cfg!(windows) { 8 } else { 1 };
+    seed_firing(&store, "d1", "f1", source, &shell().1, timeout_secs, 10);
 
     let claimed = claim(&store, "daemon-1").unwrap();
     let (_keep, quit) = no_quit();

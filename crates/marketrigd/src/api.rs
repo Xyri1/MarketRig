@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -194,12 +193,32 @@ struct NewDesk {
 
 async fn create(
     State(state): State<Arc<ApiState>>,
-    body: Result<Json<NewDesk>, JsonRejection>,
+    headers: HeaderMap,
+    body: String,
 ) -> Result<Response, DeskError> {
+    // The body is consumed before any refusal: answering with bytes still
+    // unread makes the close a reset, which Windows reports to the client in
+    // place of the envelope.
+    let json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .is_some_and(|m| {
+            m == "application/json" || (m.starts_with("application/") && m.ends_with("+json"))
+        });
     // ponytail: an unusable body reuses DESK_NAME_INVALID because R0's only
     // request body is a desk name and §6 documents no generic bad-request code.
     // The first non-name POST body needs its own code, added by decision.
-    let Ok(Json(body)) = body else {
+    let Some(body) = json
+        .then(|| serde_json::from_str::<NewDesk>(&body).ok())
+        .flatten()
+    else {
         return Ok(envelope(
             StatusCode::BAD_REQUEST,
             "DESK_NAME_INVALID",
