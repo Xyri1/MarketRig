@@ -1,6 +1,6 @@
 # Slice 003 — R2 scheduled triggers
 
-**Status:** Active (2026-09-02)
+**Status:** Frozen 2026-09-02 — exit checks green on macOS and Windows CI (run 33607212054, commit 3208dbe); gate bundle `gate-1788336248`; E3 stays operator-attended per cell (2026-09-02)
 **Implements:** all of [`features/r2-scheduled-triggers/`](../features/r2-scheduled-triggers/SPEC.md)
 **Exit:** feature SPEC §11 in full — the 18 module checks, gate G21–G26 after G20, and the static checks green on macOS and Windows CI, plus E3 attended once per platform-and-runtime cell (agent-behavior aspects end inconclusive rather than failed, root §17).
 

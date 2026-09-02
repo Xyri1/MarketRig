@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0 and R1 are delivered; Milestone R2's design is next.
+Milestones R0, R1, and R2 are delivered; Milestone R3's design is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -79,7 +79,9 @@ Dependencies: Milestone R0.
 
 ## Milestone R2 — Scheduled triggers
 
-This milestone realizes the choices recorded per D34, D35, D37, D40, and D41.
+**Delivered 2026-09-02** — designed in [`features/r2-scheduled-triggers/`](features/r2-scheduled-triggers/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/003-r2-scheduled-triggers.md`](slices/003-r2-scheduled-triggers.md). Its eighteen module checks, the gate's G21–G26, and the static checks are green on macOS and Windows CI (run 33607212054); E3 stays operator-attended per cell.
+
+This milestone realizes the choices recorded per D34, D35, D37, D40, and D41, and settles their mechanics as D79.
 
 **Goal:** Let a desk define work now that happens later, with or without an agent alive.
 
@@ -102,6 +104,8 @@ a scheduled trigger with approved code fires while no agent process is alive
 -> a schedule missed across a daemon downtime becomes miss evidence, not a firing
 -> a restart mid-flight loses neither the firing nor the result
 ```
+
+**Produced** by the gate's G22, G25, and G26 on both platforms (macOS bundle `gate-1788336248`) — an `order` trigger firing with no session alive and placing one attributed, idempotent paper action through the real adapter, its result prompt queued before anything is delivered; a one-off and a minutely rule missed across a `POST /quit` becoming one `TRIGGER_MISSED` each and never a firing; and a hard kill mid-execution after which recovery lists the execution under `executions_lost`, completes it `DAEMON_LOST`, and leaves the firing and its prompt intact.
 
 **Why here:** later work is the half of the loop R1 cannot produce, and it needs something worth scheduling but not a live session — a trigger fires whether or not a desk has one.
 
