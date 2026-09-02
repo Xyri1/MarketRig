@@ -147,6 +147,33 @@ pub fn discover(
     })
 }
 
+/// The control plane's own failure path (§4.1): `runtimes.codex` goes
+/// `UNAVAILABLE` with `CONTROL_PLANE_FAILED` until `POST /runtimes/codex/retry`.
+pub fn mark_unavailable(
+    store: &Store,
+    runtime: &str,
+    code: &str,
+    message: &str,
+) -> Result<(), StoreError> {
+    let runtime = runtime.to_string();
+    let code = code.to_string();
+    let message = message.to_string();
+    store.unit(move |tx| {
+        tx.execute(
+            "UPDATE runtimes SET state = 'UNAVAILABLE', failure_code = ?2, failure_message = ?3 \
+             WHERE runtime = ?1",
+            params![runtime, code, message],
+        )?;
+        append_event(
+            tx,
+            "RUNTIME_UNAVAILABLE",
+            None,
+            now_ns(),
+            json!({ "runtime": runtime, "failure_code": code, "failure_message": message }),
+        )
+    })
+}
+
 /// Startup step 6a (§2): every `UNDISCOVERED` row is discovered before the
 /// listener binds. A discovery failure is a row, never a startup failure.
 pub fn discover_undiscovered(store: &Store) -> Result<(), StoreError> {

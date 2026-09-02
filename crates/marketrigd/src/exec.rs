@@ -59,6 +59,11 @@ pub fn spawn(command: Command) -> io::Result<Contained> {
 }
 
 impl Contained {
+    /// The leader's pid, for `children.json` (§4.4).
+    pub fn id(&self) -> Option<u32> {
+        self.child.id()
+    }
+
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.child.stdin().take()
     }
