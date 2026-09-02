@@ -162,6 +162,17 @@ impl Manager {
         let mut command =
             CommandBuilder::from_argv(spawn.argv.iter().map(std::ffi::OsString::from).collect());
         command.cwd(&spawn.cwd);
+        // §4.2/§5.1: exactly the adapter's variables reach the runtime. An
+        // inherited `CLAUDE_CODE_CHILD_SESSION` turns Claude's transcript off,
+        // which makes every later `--resume` "no conversation found". The
+        // daemon's own `MARKETRIG_*` variables ride along: root §17's test
+        // seam is how the acceptance runtimes are pointed at their scratch.
+        command.env_clear();
+        for (key, value) in std::env::vars() {
+            if key.starts_with("MARKETRIG_") {
+                command.env(key, value);
+            }
+        }
         for (key, value) in &spawn.env {
             command.env(key, value);
         }

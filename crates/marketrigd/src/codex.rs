@@ -579,12 +579,19 @@ impl Adapter for Codex {
         ]);
         let token =
             std::fs::read_to_string(inner.roots.runtime().join(TOKEN_FILE)).unwrap_or_default();
-        let env = vec![
+        let mut env = vec![
             ("PATH".to_string(), inner.search_path.clone()),
             ("TERM".to_string(), "xterm-256color".to_string()),
             ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
             ("MARKETRIG_CODEX_WS_TOKEN".to_string(), token),
         ];
+        // §4.2's `HOME` and locale, which the TUI needs once the environment is
+        // no longer inherited (`terminal::spawn`).
+        for (key, value) in std::env::vars() {
+            if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
+                env.push((key, value));
+            }
+        }
 
         {
             let mut threads = inner.threads.lock().expect("threads");
@@ -654,7 +661,10 @@ impl Adapter for Codex {
             Ok(result) if active_turn(&result).is_some() => return DeliverOutcome::Waiting,
             Ok(_) => {}
             Err(CallError::Lost) => return DeliverOutcome::Waiting,
-            Err(CallError::Rpc(_)) => return DeliverOutcome::Waiting,
+            // A thread with no user message yet is not materialized and the
+            // app-server refuses the listing (Codex 0.152.1); that is exactly
+            // the no-active-turn case, so the idle gate alone decides.
+            Err(CallError::Rpc(_)) => {}
         }
         match client
             .call(
