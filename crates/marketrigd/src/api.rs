@@ -1065,6 +1065,15 @@ async fn market_codes() {
     crate::node::within(10, "the first observation through the route", || {
         quotes_of(&alpha)[0]["sequence"] == serde_json::json!(1)
     });
+    // The route reports an observation the moment the feed accepts it; the
+    // node processes the same tick on its own thread, so an order that needs
+    // a price waits on the node's cache, not on the route (§4.3).
+    let node = served.registry.ensure(&alpha).expect("the node is started");
+    let aapl_id = nautilus_model::identifiers::InstrumentId::from("AAPL.XNAS");
+    crate::node::within(10, "the node's cache holds the first tick", || {
+        node.call(move |ctx| ctx.cache.borrow().quote(&aapl_id).is_some())
+            .unwrap_or(false)
+    });
     let quotes = quotes_of(&alpha);
     assert_eq!(
         quotes.as_array().map(Vec::len),
