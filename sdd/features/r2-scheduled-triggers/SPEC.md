@@ -68,7 +68,7 @@ A firing insert that violates `UNIQUE (desk_id, trigger_id, occurrence_ns)` mean
 | one-off due during downtime, daemon started after it | missed; one `TRIGGER_MISSED` with `count 1`; projection `NULL`; no firing; `enable` afterwards leaves it `NULL` |
 | recurring every minute, daemon down 3 minutes | one `TRIGGER_MISSED` with `count 3` and the range; projection = first candidate after now; anchor unchanged |
 | recurring, clock jumps forward 2 hours | one `TRIGGER_MISSED` for the range; no catch-up firing |
-| recurring, accepted 30 s late | accepted; projection = next candidate after the occurrence even when that is already past — the next pass misses or accepts it by the same rules |
+| recurring, accepted 30 s late | accepted; projection = next candidate after the occurrence, never after now — under the R2 form (finest cadence a minute, window 60 s) that candidate is always still ahead |
 | disabled for a day, then enabled | no miss record; projection = first candidate after now |
 | two wakes race on the same occurrence | one firing; the loser's insert violates the unique index and skips |
 | trigger deleted while due | ineligible; nothing |
@@ -323,7 +323,7 @@ G22 + G25 + G26 together are the roadmap's R2 evidence line.
 - `schedule::form_rejected` — every §2 rejection answers `TRIGGER_INVALID`; the accepted shapes parse.
 - `schedule::dst_gap_skipped_overlap_earlier` — the §2 table.
 - `schedule::projection_from_anchor` — `next_after` after acceptance, miss, enable, and creation; a one-off past its instant projects `NULL`.
-- `schedule::accept_or_miss` — the §3.3 table against a fake clock and daemon start: firings, prompts, `TRIGGER_MISSED` payloads, projections.
+- `schedule::tests::accept_or_miss` (nested, since the unit function owns the flat name) — the §3.3 table against a fake clock and daemon start: firings, prompts, `TRIGGER_MISSED` payloads, projections.
 - `schedule::duplicate_wake_no_second_firing` — the unique index guards a repeated unit.
 - `schedule::wake_and_recheck` — a mutation wakes the task; an idle task sleeps at most 60 s.
 - `trigger::fingerprint_stable` — the §4.1 hash over a fixed snapshot; any field change changes it.
