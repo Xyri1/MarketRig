@@ -20,6 +20,7 @@ use serde::Deserialize;
 use crate::desk::{self, Desk, DeskError};
 use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
+use crate::trigger::{self, TriggerError};
 
 /// Everything the routes need. The daemon builds one and hands it to
 /// [`router`]; nothing here is process-global (root SPEC §5.1).
@@ -61,6 +62,23 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks/{desk_id}/history/orders", get(history_orders))
         .route("/desks/{desk_id}/history/fills", get(history_fills))
         .route("/desks/{desk_id}/history/cycles", get(history_cycles))
+        .route(
+            "/desks/{desk_id}/triggers",
+            get(list_triggers).post(create_trigger),
+        )
+        .route(
+            "/desks/{desk_id}/triggers/{trigger_id}",
+            get(show_trigger)
+                .patch(patch_trigger)
+                .delete(delete_trigger),
+        )
+        .route(
+            "/desks/{desk_id}/triggers/{trigger_id}/firings",
+            get(trigger_firings),
+        )
+        .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
+        .route("/desks/{desk_id}/prompts", get(list_prompts))
+        .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -105,6 +123,23 @@ impl IntoResponse for TradeError {
             }
             TradeError::Rejected(_) | TradeError::NotReady(_) => StatusCode::CONFLICT,
             _ => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The R2 §8 code-to-status map, appended the same way. `TriggerError::code()`
+/// owns the code; this owns the status.
+impl IntoResponse for TriggerError {
+    fn into_response(self) -> Response {
+        // A desk lookup or store failure keeps R0's own mapping.
+        if let TriggerError::Desk(e) = self {
+            return e.into_response();
+        }
+        let status = match &self {
+            TriggerError::Invalid(_) => StatusCode::BAD_REQUEST,
+            TriggerError::NameTaken(_) | TriggerError::NotReady(_) => StatusCode::CONFLICT,
+            _ => StatusCode::NOT_FOUND,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -363,6 +398,85 @@ async fn cancel_order(
         &body,
         &source,
     )?))
+}
+
+// The trigger, firing, and prompt group (R2 feature SPEC §8). Daemon-local —
+// SQLite only, no node — and every body arrives as text, so an unusable one is
+// `TRIGGER_INVALID` like any other form failure. Every accepted mutation wakes
+// the scheduler once its unit has committed (§3.1).
+
+async fn create_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    body: String,
+) -> Result<Response, TriggerError> {
+    let created = trigger::create(&state.store, &desk_id, &body, store::now_ns())?;
+    state.scheduler_wake.notify_one();
+    Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+async fn list_triggers(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    let triggers = trigger::list(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "triggers": triggers })))
+}
+
+async fn show_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, trigger_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    Ok(Json(trigger::get(&state.store, &desk_id, &trigger_id)?))
+}
+
+async fn patch_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, trigger_id)): Path<(String, String)>,
+    body: String,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    let patched = trigger::patch(&state.store, &desk_id, &trigger_id, &body, store::now_ns())?;
+    state.scheduler_wake.notify_one();
+    Ok(Json(patched))
+}
+
+async fn delete_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, trigger_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    let deleted = trigger::delete(&state.store, &desk_id, &trigger_id, store::now_ns())?;
+    state.scheduler_wake.notify_one();
+    Ok(Json(deleted))
+}
+
+async fn trigger_firings(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, trigger_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    let firings = trigger::firings(&state.store, &desk_id, &trigger_id)?;
+    Ok(Json(serde_json::json!({ "firings": firings })))
+}
+
+async fn show_firing(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, firing_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    Ok(Json(trigger::firing(&state.store, &desk_id, &firing_id)?))
+}
+
+async fn list_prompts(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    let prompts = trigger::prompts(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "prompts": prompts })))
+}
+
+async fn show_prompt(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, prompt_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, TriggerError> {
+    Ok(Json(trigger::prompt(&state.store, &desk_id, &prompt_id)?))
 }
 
 /// Answers, then asks the daemon to shut down (§4.2). A full or closed channel
@@ -1324,4 +1438,490 @@ async fn action_attribution() {
     assert_eq!(row("buy-2"), ("SESSION".to_string(), None, None));
 
     served.registry.stop_all();
+}
+
+// ---------------------------------------------------------------------------
+// api::trigger_codes (R2 feature SPEC §11)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+fn call_patch(url: String, bearer: Option<&str>, body: &str) -> (u16, String) {
+    let mut request = agent()
+        .patch(url)
+        .header("content-type", "application/json");
+    if let Some(token) = bearer {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    read(request.send(body))
+}
+
+#[cfg(test)]
+fn call_delete(url: String, bearer: Option<&str>) -> (u16, String) {
+    let mut request = agent().delete(url);
+    if let Some(token) = bearer {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    read(request.call())
+}
+
+/// The §8 group end to end: the documented body on every success and the one
+/// envelope with the documented code on every refusal. Daemon-local routes, so
+/// no node and no feed take part.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trigger_codes() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+    let create_desk = |name: &str| {
+        let (status, body) = call_post(
+            url("/desks"),
+            ok,
+            Some(("application/json", &format!(r#"{{"name":"{name}"}}"#))),
+        );
+        assert_eq!(status, 201, "{body}");
+        json(&body)
+    };
+
+    let alpha = create_desk("alpha")["id"].as_str().unwrap().to_string();
+    // A planted file leaves this desk FAILED: not READY, so no definitions.
+    std::fs::write(served.desks_home.join("beta"), "not a directory").unwrap();
+    let beta = create_desk("beta");
+    assert_eq!(beta["state"], "FAILED");
+    let beta = beta["id"].as_str().unwrap().to_string();
+
+    // Every route of the group, for the sweeps that do not care about the body.
+    let routes = |desk: &str| -> Vec<(&'static str, String)> {
+        vec![
+            ("GET", url(&format!("/desks/{desk}/triggers"))),
+            ("POST", url(&format!("/desks/{desk}/triggers"))),
+            ("GET", url(&format!("/desks/{desk}/triggers/t-1"))),
+            ("PATCH", url(&format!("/desks/{desk}/triggers/t-1"))),
+            ("DELETE", url(&format!("/desks/{desk}/triggers/t-1"))),
+            ("GET", url(&format!("/desks/{desk}/triggers/t-1/firings"))),
+            ("GET", url(&format!("/desks/{desk}/firings/f-1"))),
+            ("GET", url(&format!("/desks/{desk}/prompts"))),
+            ("GET", url(&format!("/desks/{desk}/prompts/p-1"))),
+        ]
+    };
+    let send = |method: &str, route: String, bearer: Option<&str>| match method {
+        "GET" => call_get(route, bearer),
+        "POST" => call_post(route, bearer, Some(("application/json", "{}"))),
+        "PATCH" => call_patch(route, bearer, "{}"),
+        _ => call_delete(route, bearer),
+    };
+
+    // --- Every new route sits behind the bearer ----------------------------
+    for (method, route) in routes(&alpha) {
+        for bearer in [None, Some("wrong-credential")] {
+            expect_envelope(send(method, route.clone(), bearer), 401, "UNAUTHORIZED");
+        }
+    }
+
+    // --- An unknown desk is R0's own refusal, on every route ---------------
+    for id in ["01999999-0000-7000-8000-0000000000ff", "not-a-uuid"] {
+        for (method, route) in routes(id) {
+            expect_envelope(send(method, route, ok), 404, "DESK_NOT_FOUND");
+        }
+    }
+
+    // --- Definitions need a READY desk (§8) --------------------------------
+    let instant = |offset_secs: i64| {
+        chrono::DateTime::from_timestamp_nanos(crate::store::now_ns() + offset_secs * 1_000_000_000)
+            .to_rfc3339()
+    };
+    let triggers = url(&format!("/desks/{alpha}/triggers"));
+    let define = |desk: &str, body: &str| {
+        call_post(
+            url(&format!("/desks/{desk}/triggers")),
+            ok,
+            Some(("application/json", body)),
+        )
+    };
+    let one_off = |name: &str, seconds: i64| {
+        format!(
+            r#"{{"name":"{name}","brief":"look at AAPL","schedule":{{"at":"{}"}}}}"#,
+            instant(seconds)
+        )
+    };
+    expect_envelope(
+        define(&beta, &one_off("nightly", 3_600)),
+        409,
+        "DESK_NOT_READY",
+    );
+
+    // --- Every §2 and §4.1 form failure is one code ------------------------
+    let recurring = |rule: &str, tz: &str| {
+        format!(
+            r#"{{"name":"hourly","brief":"watch","schedule":
+                 {{"rrule":"{rule}","dtstart":"2026-09-03T09:30:00","tz":"{tz}"}}}}"#
+        )
+    };
+    // One byte past §8's 16,384-byte brief.
+    let long_brief = "x".repeat(16_385);
+    for (label, body) in [
+        ("malformed JSON", "{".to_string()),
+        ("a body that is not an object", "[]".to_string()),
+        ("a name outside the grammar", one_off("Bad--Name", 60)),
+        (
+            "no schedule",
+            r#"{"name":"nightly","brief":"b"}"#.to_string(),
+        ),
+        (
+            "a brief past its bound",
+            format!(
+                r#"{{"name":"nightly","brief":"{long_brief}","schedule":{{"at":"{}"}}}}"#,
+                instant(60)
+            ),
+        ),
+        ("a past instant", one_off("nightly", -60)),
+        ("sub-minute recurrence", recurring("FREQ=SECONDLY", "UTC")),
+        ("a bounded rule", recurring("FREQ=DAILY;COUNT=3", "UTC")),
+        ("an unknown zone", recurring("FREQ=DAILY", "Mars/Olympus")),
+        (
+            "a snapshot with no {script}",
+            format!(
+                r#"{{"name":"nightly","brief":"b","schedule":{{"at":"{}"}},
+                     "code":{{"source":"print(1)","argv":["python3"]}}}}"#,
+                instant(60)
+            ),
+        ),
+        (
+            "a snapshot with an unusable suffix",
+            format!(
+                r#"{{"name":"nightly","brief":"b","schedule":{{"at":"{}"}},
+                     "code":{{"source":"print(1)","suffix":"py"}}}}"#,
+                instant(60)
+            ),
+        ),
+        (
+            "a snapshot with a timeout outside its bound",
+            format!(
+                r#"{{"name":"nightly","brief":"b","schedule":{{"at":"{}"}},
+                     "code":{{"source":"print(1)","timeout_secs":0}}}}"#,
+                instant(60)
+            ),
+        ),
+    ] {
+        expect_envelope(define(&alpha, &body), 400, "TRIGGER_INVALID");
+        assert_eq!(
+            json(&call_get(triggers.clone(), ok).1)["triggers"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "{label} defined nothing"
+        );
+    }
+
+    // --- Creation: the §8 resource, revision 1, armed and fingerprinted -----
+    let code = r#""code":{"source":"print(1)","suffix":".py",
+                          "argv":["python3","{script}"],"timeout_secs":300}"#;
+    let (status, body) = define(
+        &alpha,
+        &format!(
+            r#"{{"name":"nightly","brief":"look at AAPL","context":"since open",
+                 "schedule":{{"at":"{}"}},{code}}}"#,
+            instant(3_600)
+        ),
+    );
+    assert_eq!(status, 201, "{body}");
+    let nightly = json(&body);
+    let nightly_id = nightly["id"].as_str().unwrap().to_string();
+    assert_eq!(nightly["desk_id"], alpha.as_str());
+    assert_eq!(nightly["name"], "nightly");
+    assert_eq!(nightly["source"], "SCHEDULED");
+    assert_eq!(nightly["recurrence"], "ONE_OFF");
+    assert_eq!(nightly["brief"], "look at AAPL");
+    assert_eq!(nightly["context"], "since open");
+    assert_eq!(nightly["revision"], 1);
+    assert_eq!(nightly["enabled"], true);
+    assert!(
+        nightly["deleted_at_ns"].is_null(),
+        "nulls are omitted: {nightly}"
+    );
+    let armed = nightly["next_occurrence_ns"].as_i64().expect("armed");
+    assert!(armed > crate::store::now_ns(), "the projection is ahead");
+    assert_eq!(nightly["schedule"], serde_json::json!({ "at_ns": armed }));
+    let argv = ["python3".to_string(), "{script}".to_string()];
+    assert_eq!(
+        nightly["code"],
+        serde_json::json!({
+            "snapshot_id": nightly["code"]["snapshot_id"],
+            "suffix": ".py",
+            "argv": ["python3", "{script}"],
+            "timeout_secs": 300,
+            "fingerprint": crate::trigger::fingerprint("print(1)", ".py", &argv, 300),
+            "approved_at_ns": nightly["created_at_ns"],
+            "source_bytes": 8,
+            "source": "print(1)",
+        }),
+        "the §4.1 snapshot, approved on creation under Always allow"
+    );
+
+    // --- The live name is taken until the row is deleted --------------------
+    expect_envelope(
+        define(&alpha, &one_off("nightly", 3_600)),
+        409,
+        "TRIGGER_NAME_TAKEN",
+    );
+
+    // --- The listing omits the source and reports its size ------------------
+    let listing = || json(&call_get(triggers.clone(), ok).1)["triggers"].clone();
+    let listed = listing();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    assert!(
+        listed[0]["code"].get("source").is_none(),
+        "the listing omits the source: {listed}"
+    );
+    assert_eq!(listed[0]["code"]["source_bytes"], 8);
+
+    let one = url(&format!("/desks/{alpha}/triggers/{nightly_id}"));
+    let (status, body) = call_get(one.clone(), ok);
+    assert_eq!(status, 200);
+    assert_eq!(json(&body), nightly, "the single read carries the source");
+
+    // --- Patch: one revision each, the projection recomputed ---------------
+    let patch = |body: &str| {
+        let (status, answer) = call_patch(one.clone(), ok, body);
+        assert_eq!(status, 200, "{answer}");
+        json(&answer)
+    };
+    let patched = patch(r#"{"brief":"look at MSFT"}"#);
+    assert_eq!(patched["brief"], "look at MSFT");
+    assert_eq!(patched["revision"], 2);
+    assert!(patched["updated_at_ns"].as_i64() >= nightly["updated_at_ns"].as_i64());
+    assert_eq!(
+        patched["code"], nightly["code"],
+        "the snapshot is untouched"
+    );
+
+    let disabled = patch(r#"{"enabled":false}"#);
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["revision"], 3);
+    assert!(
+        disabled["next_occurrence_ns"].is_null(),
+        "a disabled trigger is never due: {disabled}"
+    );
+    let enabled = patch(r#"{"enabled":true}"#);
+    assert_eq!(enabled["revision"], 4);
+    assert_eq!(
+        enabled["next_occurrence_ns"].as_i64(),
+        Some(armed),
+        "enable projects from the definition's own anchor"
+    );
+
+    let cleared = patch(r#"{"context":null,"code":null}"#);
+    assert!(
+        cleared["context"].is_null() && cleared["code"].is_null(),
+        "context clears and code detaches: {cleared}"
+    );
+    let rescheduled = patch(
+        r#"{"schedule":{"rrule":"FREQ=DAILY;BYHOUR=9;BYMINUTE=30",
+             "dtstart":"2026-09-03T09:30:00","tz":"America/New_York"}}"#,
+    );
+    assert_eq!(rescheduled["recurrence"], "RECURRING");
+    assert_eq!(
+        rescheduled["schedule"],
+        serde_json::json!({
+            "rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30",
+            "dtstart": "2026-09-03T09:30:00",
+            "tz": "America/New_York",
+        })
+    );
+    assert!(rescheduled["next_occurrence_ns"].as_i64().unwrap() > crate::store::now_ns());
+
+    for (label, body) in [
+        ("an empty patch", "{}"),
+        ("a patch naming nothing", r#"{"nothing":1}"#),
+        ("malformed JSON", "{"),
+        (
+            "a past instant",
+            r#"{"schedule":{"at":"2020-01-01T00:00:00Z"}}"#,
+        ),
+        ("an unusable enablement", r#"{"enabled":"yes"}"#),
+    ] {
+        expect_envelope(call_patch(one.clone(), ok, body), 400, "TRIGGER_INVALID");
+        assert_eq!(
+            json(&call_get(one.clone(), ok).1)["revision"],
+            rescheduled["revision"],
+            "{label} changed nothing"
+        );
+    }
+
+    // --- Delete is soft: hidden from the listing, still readable by id ------
+    let (status, body) = call_delete(one.clone(), ok);
+    assert_eq!(status, 200, "{body}");
+    let deleted = json(&body);
+    assert!(deleted["deleted_at_ns"].as_i64().is_some(), "{deleted}");
+    assert!(
+        deleted["next_occurrence_ns"].is_null(),
+        "a deleted trigger is never due: {deleted}"
+    );
+    assert_eq!(listing().as_array().map(Vec::len), Some(0));
+    assert_eq!(json(&call_get(one.clone(), ok).1), deleted);
+    expect_envelope(
+        call_patch(one.clone(), ok, r#"{"brief":"again"}"#),
+        404,
+        "TRIGGER_NOT_FOUND",
+    );
+    expect_envelope(call_delete(one.clone(), ok), 404, "TRIGGER_NOT_FOUND");
+    // Its name is free again, since the unique index covers undeleted rows only.
+    let (status, body) = define(&alpha, &one_off("nightly", 3_600));
+    assert_eq!(status, 201, "{body}");
+    let reborn = json(&body)["id"].as_str().unwrap().to_string();
+
+    // --- Firings and prompts, over rows planted by raw SQL ------------------
+    let (a, b, t) = (alpha.clone(), beta.clone(), reborn.clone());
+    served
+        .store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO firings VALUES ('f-1', ?1, ?2, 100, 100, 1, 'early', NULL, NULL)",
+                rusqlite::params![a, t],
+            )?;
+            tx.execute(
+                "INSERT INTO firings VALUES ('f-2', ?1, ?2, 200, 200, 2, 'late', 'ctx', NULL)",
+                rusqlite::params![a, t],
+            )?;
+            tx.execute(
+                "INSERT INTO executions (firing_id, desk_id, daemon_uuid, state, outcome, \
+                 exit_code, executable, error, stdout, stderr, stdout_truncated, \
+                 stderr_truncated, started_at_ns, finished_at_ns) \
+                 VALUES ('f-2', ?1, 'daemon-1', 'COMPLETE', 'EXITED', 0, '/bin/echo', NULL, \
+                 CAST('out' AS BLOB), CAST('err' AS BLOB), 0, 1, 300, 400)",
+                rusqlite::params![a],
+            )?;
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+                 VALUES ('p-1', ?1, 'EVALUATION', 'QUEUED', '{\"kind\":\"EVALUATION\"}', 500), \
+                        ('p-2', ?1, 'TRIGGER_RESULT', 'QUEUED', \
+                         '{\"kind\":\"TRIGGER_RESULT\",\"execution\":null}', 600)",
+                rusqlite::params![a],
+            )?;
+            // One trigger, firing, and prompt on the other desk: nothing of
+            // theirs is ever found under this one.
+            tx.execute(
+                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                 enabled, revision, created_at_ns, updated_at_ns) \
+                 VALUES ('t-beta', ?1, 'nightly', 'SCHEDULED', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
+                rusqlite::params![b],
+            )?;
+            tx.execute(
+                "INSERT INTO firings VALUES ('f-beta', ?1, 't-beta', 50, 60, 1, 'trade', NULL, NULL)",
+                rusqlite::params![b],
+            )?;
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+                 VALUES ('p-beta', ?1, 'TRIGGER_RESULT', 'QUEUED', '{}', 1)",
+                rusqlite::params![b],
+            )
+        })
+        .unwrap();
+
+    let (status, body) = call_get(
+        url(&format!("/desks/{alpha}/triggers/{reborn}/firings")),
+        ok,
+    );
+    assert_eq!(status, 200, "{body}");
+    let firings = json(&body)["firings"].clone();
+    assert_eq!(firings.as_array().map(Vec::len), Some(2), "{firings}");
+    assert_eq!(firings[0]["id"], "f-2", "newest first: {firings}");
+    assert_eq!(firings[1]["id"], "f-1");
+    assert!(
+        firings[1]["execution"].is_null() && firings[1]["context"].is_null(),
+        "a firing with no run carries no execution: {firings}"
+    );
+    assert_eq!(
+        firings[0],
+        serde_json::json!({
+            "id": "f-2", "desk_id": alpha, "trigger_id": reborn,
+            "occurrence_ns": 200, "accepted_at_ns": 200, "trigger_revision": 2,
+            "brief": "late", "context": "ctx",
+            "execution": {
+                "state": "COMPLETE", "daemon_uuid": "daemon-1", "outcome": "EXITED",
+                "exit_code": 0, "executable": "/bin/echo",
+                "stdout_bytes": 3, "stderr_bytes": 3,
+                "stdout_truncated": false, "stderr_truncated": true,
+                "started_at_ns": 300, "finished_at_ns": 400,
+            },
+        }),
+        "the listing carries the summary without the streams"
+    );
+
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/firings/f-2")), ok);
+    assert_eq!(status, 200, "{body}");
+    let firing = json(&body);
+    assert_eq!(firing["execution"]["stdout"], "out");
+    assert_eq!(firing["execution"]["stderr"], "err");
+    assert_eq!(firing["execution"]["stdout_bytes"], 3);
+    assert_eq!(firing["execution"]["stderr_bytes"], 3);
+
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/prompts")), ok);
+    assert_eq!(status, 200, "{body}");
+    let prompts = json(&body)["prompts"].clone();
+    assert_eq!(
+        prompts,
+        serde_json::json!([
+            { "id": "p-2", "desk_id": alpha, "kind": "TRIGGER_RESULT",
+              "state": "QUEUED", "created_at_ns": 600 },
+            { "id": "p-1", "desk_id": alpha, "kind": "EVALUATION",
+              "state": "QUEUED", "created_at_ns": 500 },
+        ]),
+        "newest first, every delivery fact and no payload"
+    );
+    let (status, body) = call_get(url(&format!("/desks/{alpha}/prompts/p-2")), ok);
+    assert_eq!(status, 200, "{body}");
+    let prompt = json(&body);
+    assert_eq!(
+        prompt["payload"],
+        serde_json::json!({ "kind": "TRIGGER_RESULT", "execution": null }),
+        "the stored payload, verbatim"
+    );
+
+    // --- Unknown, and another desk's, on every read ------------------------
+    for (path, code) in [
+        (
+            format!("/desks/{alpha}/triggers/t-nowhere"),
+            "TRIGGER_NOT_FOUND",
+        ),
+        (
+            format!("/desks/{alpha}/triggers/t-beta"),
+            "TRIGGER_NOT_FOUND",
+        ),
+        (
+            format!("/desks/{alpha}/triggers/t-nowhere/firings"),
+            "TRIGGER_NOT_FOUND",
+        ),
+        (
+            format!("/desks/{alpha}/triggers/t-beta/firings"),
+            "TRIGGER_NOT_FOUND",
+        ),
+        (
+            format!("/desks/{alpha}/firings/f-nowhere"),
+            "FIRING_NOT_FOUND",
+        ),
+        (format!("/desks/{alpha}/firings/f-beta"), "FIRING_NOT_FOUND"),
+        (
+            format!("/desks/{alpha}/prompts/p-nowhere"),
+            "PROMPT_NOT_FOUND",
+        ),
+        (format!("/desks/{alpha}/prompts/p-beta"), "PROMPT_NOT_FOUND"),
+    ] {
+        expect_envelope(call_get(url(&path), ok), 404, code);
+    }
+    expect_envelope(
+        call_patch(
+            url(&format!("/desks/{alpha}/triggers/t-beta")),
+            ok,
+            r#"{"enabled":false}"#,
+        ),
+        404,
+        "TRIGGER_NOT_FOUND",
+    );
+    expect_envelope(
+        call_delete(url(&format!("/desks/{alpha}/triggers/t-beta")), ok),
+        404,
+        "TRIGGER_NOT_FOUND",
+    );
 }
