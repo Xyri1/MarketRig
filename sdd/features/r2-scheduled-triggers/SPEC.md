@@ -128,14 +128,14 @@ Completion is one unit: `UPDATE executions` to `state = 'COMPLETE'` with `outcom
 
 | Outcome | When | `exit_code` | `error` |
 | --- | --- | --- | --- |
-| `EXITED` | the process ended by itself | the code, or `NULL` on a signal | the signal name when signalled |
+| `EXITED` | the process ended by itself | the code, or `NULL` on a signal | the signal name when signalled; the OS error if waiting on it failed |
 | `TIMED_OUT` | `timeout_secs` elapsed | `NULL` | — |
 | `OUTPUT_LIMIT` | a stream cap was exceeded | `NULL` | which stream |
-| `SPAWN_FAILED` | the launch failed | `NULL` | the OS error |
+| `SPAWN_FAILED` | the launch failed, or the script file could not be written | `NULL` | the OS error |
 | `QUIT` | the daemon stopped while the code ran | `NULL` | — |
 | `DAEMON_LOST` | recovery found it `RUNNING` under a dead daemon | `NULL` | the dead daemon's UUID |
 
-Recovery (root §15) registers one step after reaping: every `executions` row `RUNNING` with `daemon_uuid <> this daemon` completes as `DAEMON_LOST` with its prompt, inside the recovery transaction, and the `RECOVERY` payload lists them under `executions_lost` (`firing_id`, `desk_id`, `daemon_uuid`). Firings with a snapshot and no execution row stay pending and are claimed by the new daemon in FIFO order (R2-4). Shutdown (root §4.6): the executor terminates every running group, persists `QUIT` for each, and both tasks stop inside the 5-second bound; the scheduler's in-flight unit, if any, finishes first because store units are synchronous.
+Recovery (root §15) registers one step after reaping: every `executions` row `RUNNING` with `daemon_uuid <> this daemon` completes as `DAEMON_LOST` with its prompt, inside the recovery transaction, and the `RECOVERY` payload lists them under `executions_lost` (`firing_id`, `desk_id`, `daemon_uuid`). Firings with a snapshot and no execution row stay pending and are claimed by the new daemon in FIFO order (R2-4). Shutdown (root §4.6): the executor terminates every running group, persists `QUIT` for each (the completion update is conditioned on `daemon_uuid` and `RUNNING`, so a row another daemon's recovery already settled is left alone and gets no second prompt), and both tasks stop inside the 5-second bound; the scheduler's in-flight unit, if any, finishes first because store units are synchronous.
 
 ### 4.5 Containment
 

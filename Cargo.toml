@@ -42,6 +42,7 @@ process-wrap = { version = "=9.1.0", default-features = false, features = [
     "tokio1",
     "process-session",
     "job-object",
+    "kill-on-drop",
 ] }
 # Beside `ureq` because the chart client polls from inside the node thread's
 # `LocalSet`, where a blocking agent would stall the runner; pinned at 0.13.4,

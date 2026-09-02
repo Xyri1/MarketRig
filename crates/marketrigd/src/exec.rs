@@ -14,7 +14,7 @@ use std::time::Duration;
 use process_wrap::tokio::JobObject;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessSession;
-use process_wrap::tokio::{ChildWrapper, CommandWrap};
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -46,6 +46,9 @@ pub struct Contained {
 /// the working directory, and the environment.
 pub fn spawn(command: Command) -> io::Result<Contained> {
     let mut wrap = CommandWrap::from(command);
+    // `KillOnDrop` is what makes the job object kill-on-close (§4.5); on unix
+    // it is only the tokio `kill_on_drop` belt-and-braces.
+    wrap.wrap(KillOnDrop);
     #[cfg(unix)]
     wrap.wrap(ProcessSession);
     #[cfg(windows)]

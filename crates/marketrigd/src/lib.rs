@@ -104,12 +104,22 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             exec_wake.clone(),
             shut_rx.clone(),
         ));
+        let executor = tokio::spawn(exec::run(
+            startup.store.clone(),
+            startup.roots.clone(),
+            startup.daemon_uuid.clone(),
+            exec_wake,
+            shut_rx.clone(),
+        ));
         let mut began = shut_rx.clone();
         let _ = began.changed().await;
         // §4.2: bounded end to end at 5 seconds, after which the daemon exits
         // anyway. The desks' trading nodes stop inside that same budget.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let _ = tokio::time::timeout_at(deadline, serving).await;
+        // The executor returns only after every running group is terminated
+        // and recorded `QUIT` (R2 feature SPEC §4.4).
+        let _ = tokio::time::timeout_at(deadline, executor).await;
         let _ = tokio::time::timeout_at(deadline, scheduler).await;
         let _ = tokio::time::timeout_at(
             deadline,
