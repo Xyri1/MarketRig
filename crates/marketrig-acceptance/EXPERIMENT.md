@@ -101,12 +101,16 @@ E3 runs after E1/E2 in the same invocation and gets its **own desk and data root
 
 E4 is the R3 scenario, and it inverts the other two: **you register nothing and start nothing.** MarketRig discovers the runtime on your `PATH`, creates a desk on it, launches it in that desk's workspace with the MarketRig adapter already registered, and delivers a scheduled trigger's result to it as the session's own input. Your console becomes that session's terminal — raw mode, window size relayed — from the moment the instructions print until the scenario ends, so everything you type goes to the session and everything it prints appears in this window. The harness's own progress lines are interleaved in the same window; that is expected.
 
-1. **Answer the first launch.** A real CLI asks its own questions on a fresh workspace, and only you can answer them. Expect at least a folder-trust prompt; Claude Code additionally raises the MCP servers MarketRig registered for it, including the development channel it delivers through. Answer them and nothing more. *(Operator note — fill in from the cell you run: the exact prompts each runtime showed, in order, and which key answers them.)*
-   - Codex CLI: _(to fill in)_
-   - Claude Code: _(to fill in)_
+1. **Answer the first launch.** A real CLI asks its own questions, and only you can answer them; readiness — and therefore every delivery — waits on your answer, inside the adapter's 120-second deadline. Observed on macOS:
+   - **Codex CLI**, first launch per workspace only (remembered in `~/.codex`): *"Do you trust the contents of this directory? …"* › `1. Yes, continue` / `2. No, quit`. `1` is preselected, so Enter accepts. `SESSION_READY` arrives only after this.
+   - **Claude Code**, first launch per workspace: *"Quick safety check: Is this a project you created or one you trust?"* — **"No, exit" is preselected**, so press Down, then Enter.
+   - **Claude Code**, *every* launch including resumes: *"WARNING: Loading development channels … Channels: server:marketrig-channel"* › `1. I am using this for local development` / `2. Exit`; Enter accepts. Both Claude prompts block the bridge's connection, which is what readiness is (§5.3).
+
+   Answer them and nothing more.
 2. **Watch the first delivery.** A code-less one-off is due about two minutes after the instructions print. A new session is oriented first, so you should see MarketRig's orientation paragraph arrive as the session's first input, then `MarketRig TRIGGER_RESULT <id>:` with the firing's JSON. Read it; whether the session acts on it is not the point and is recorded `INCONCLUSIVE`.
 3. **Keep it busy.** When the harness prints `give the session something to chew on now`, ask the session something that takes a while. A second one-off is due two minutes later, and its result must arrive *after* that turn ends — behind the turn, never into it.
-4. **The switch.** The harness then discovers the other runtime, switches the desk to it, and asserts the desk's pointers and history did not move. If the other runtime is not installed, that leg is recorded `INCONCLUSIVE` and the cell is still complete.
+4. **Two things that look like faults and are not.** A Claude `--resume` only succeeds once the earlier session completed a turn, so let a `SESSION_TURN_ENDED` land before ending one. And a Codex thread lives inside one app-server lifetime: restart the daemon and the resume fails, the dispatcher repoints the desk `unresumable` and starts a new session — correct behaviour, recorded as evidence.
+5. **The switch.** The harness then discovers the other runtime, switches the desk to it, and asserts the desk's pointers and history did not move. If the other runtime is not installed, that leg is recorded `INCONCLUSIVE` and the cell is still complete.
 
 Nothing to clean up afterwards: the launch files live under the bundle's `data\runtime\launch\` and the daemon deletes them when the process row closes. Your own Codex or Claude configuration was never touched.
 

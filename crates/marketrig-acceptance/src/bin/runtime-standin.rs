@@ -275,6 +275,14 @@ async fn handle(server: &Arc<Server>, method: &str, params: &Value) -> Result<Va
         "thread/turns/list" => {
             let id = params["threadId"].as_str().unwrap_or_default();
             let threads = server.threads.lock().expect("threads");
+            // The real app-server refuses the listing for a thread that has not
+            // taken a turn yet (§9.1); scripted, so the gate covers the fall
+            // through to `turn/start` that this used to block.
+            if server.script.flag("turns_list_error_before_first_input")
+                && threads.get(id).is_none_or(|thread| thread.turns.is_empty())
+            {
+                return Err(format!("thread {id} has no first message"));
+            }
             let data: Vec<Value> = threads
                 .get(id)
                 .map(|thread| {

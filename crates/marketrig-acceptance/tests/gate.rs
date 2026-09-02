@@ -2901,7 +2901,11 @@ fn gate() {
     // G28 only has to outwait; the launch reads the desk's quotes resource
     // through the adapter it registered itself.
     let quotes_uri = format!("marketrig://desk/{delta}/quotes");
-    g.script(json!({ "mcp_read": quotes_uri, "active_after_input_ms": 5_000 }));
+    g.script(json!({
+        "mcp_read": quotes_uri,
+        "active_after_input_ms": 5_000,
+        "turns_list_error_before_first_input": true,
+    }));
     let (status, back) = g.api(
         "G28",
         &endpoint,
@@ -3190,8 +3194,9 @@ fn gate() {
     // needs a fresh control plane: the restart is the whole mechanism.
     g.script(json!({ "drop_socket_on_turn_start": true }));
     g.stop("G31", daemon11);
+    // Nothing in this leg calls the API: the trigger is the CLI's and the
+    // evidence is the daemon's own rows.
     let daemon12 = g.spawn("G31");
-    endpoint = daemon12.endpoint.clone();
     let uncertain = one_off(&mut g, "G31", &epsilon, "g31-handoff", 2);
     await_firing(&g, &uncertain, 0);
     within(
@@ -3240,8 +3245,14 @@ fn gate() {
 
     // A genuinely new session, and the shortest honest way to one: the desk has
     // no Claude pointer, so a Switch makes the next activation a NEW session
-    // whose first input is the disclosure.
+    // whose first input is the disclosure. The restart first is not decoration:
+    // it retires the failing Codex control plane, whose loss handling shuts the
+    // desk's terminal down by desk rather than by process and would otherwise
+    // reach across the switch into the new session.
     g.script(json!({}));
+    g.stop("G31", daemon12);
+    let daemon12 = g.spawn("G31");
+    endpoint = daemon12.endpoint.clone();
     let (status, switched) = g.api(
         "G31",
         &endpoint,
@@ -3252,6 +3263,17 @@ fn gate() {
     assert_eq!(status, 200, "{switched}");
     let disclosing = one_off(&mut g, "G31", &epsilon, "g31-disclosure", 2);
     await_firing(&g, &disclosing, 0);
+    within(
+        Duration::from_secs(90),
+        "the disclosure to be delivered to the new session",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'DISCLOSURE' \
+                 AND state = 'DELIVERED'",
+                &[&epsilon_id],
+            ) == 1
+        },
+    );
     let seen = transcript(
         &rt,
         &endpoint,
@@ -3267,10 +3289,10 @@ fn gate() {
         (&activation_failed, "ACTIVATION_FAILED"),
         (&handoff_unknown, "HANDOFF_UNKNOWN"),
     ] {
+        let kind: String = g.scalar("SELECT kind FROM prompts WHERE id = ?1", &[id]);
         assert!(
-            seen.contains(&format!("{id} TRIGGER_RESULT {code}"))
-                || seen.contains(&format!("{id} ORIENTATION {code}")),
-            "the disclosure names {id} {code}: {seen:?}"
+            seen.contains(&format!("{id} {kind} {code}")),
+            "the disclosure names {id} {kind} {code}: {seen:?}"
         );
         assert!(
             g.scalar::<i64>(

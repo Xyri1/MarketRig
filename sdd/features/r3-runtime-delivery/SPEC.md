@@ -231,6 +231,7 @@ Recovery step `sessions` (registered after `executions`): open `agent_processes`
 | `hooks` | `false` | Claude only: run the commands `--settings` names |
 | `notification` | — | Claude only: a title for one `Notification` hook fired at start |
 | `clear_after_inputs` | — | Claude only: after that many inputs, a `SessionStart` with `source: "clear"` and a new session id (G30) |
+| `turns_list_error_before_first_input` | `false` | Codex only: the app-server answers `thread/turns/list` with a JSON-RPC error until the thread has taken a turn, as the real one does for a thread with no first message; the gate keeps §4.3's fall through to `turn/start` covered (G28) |
 | `drop_socket_on_turn_start` | `false` | Codex only: the app-server drops the requesting connection instead of answering `turn/start` (G31) |
 | `delay_turn_start_response_ms` | `0` | Codex only: how long the app-server holds the `turn/start` response (G32) |
 
