@@ -209,7 +209,7 @@ fn capture_path() -> String {
     let mut command = Command::new(shell);
     command.args(["-l", "-c", "printf %s \"$PATH\""]);
     match run(command) {
-        Some((true, out)) if !out.trim().is_empty() => out.trim().to_string(),
+        Some((true, out, _)) if !out.trim().is_empty() => out.trim().to_string(),
         _ => own,
     }
 }
@@ -285,7 +285,7 @@ fn validate(runtime: &str, explicit: Option<&Path>, search_path: &str) -> Outcom
         };
     }
 
-    let Some((ok, version_out)) = run(probe(&executable, "--version")) else {
+    let Some((ok, version_out, _)) = run(probe(&executable, &["--version"])) else {
         return Outcome::Failed {
             code: "PROBE_FAILED",
             message: format!("{} --version did not answer.", executable.display()),
@@ -321,7 +321,7 @@ fn validate(runtime: &str, explicit: Option<&Path>, search_path: &str) -> Outcom
         };
     }
 
-    let Some((_, help)) = run(probe(&executable, "--help")) else {
+    let Some((_, help, _)) = run(probe(&executable, &["--help"])) else {
         return Outcome::Failed {
             code: "PROBE_FAILED",
             message: format!("{} --help did not answer.", executable.display()),
@@ -331,7 +331,10 @@ fn validate(runtime: &str, explicit: Option<&Path>, search_path: &str) -> Outcom
         "codex" => &["app-server"],
         _ => &["--dangerously-load-development-channels", "--settings"],
     };
-    if let Some(missing) = required.iter().find(|marker| !help.contains(**marker)) {
+    if let Some(missing) = required
+        .iter()
+        .find(|marker| !help.contains(**marker) && !accepts(&executable, marker))
+    {
         return Outcome::Failed {
             code: "CAPABILITY_MISSING",
             message: format!("{runtime} {version} does not offer {missing}."),
@@ -364,9 +367,22 @@ fn resolve(runtime: &str, search_path: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Whether the launcher accepts `flag` even though `--help` does not list it:
+/// Claude Code 2.1.258 hides `--dangerously-load-development-channels` from its
+/// help but still honours it (§2). Differential, so a launcher that reports
+/// nothing for either flag stays unsupported: the bogus flag must be refused
+/// and the real one must not be.
+fn accepts(executable: &Path, flag: &str) -> bool {
+    let refused = |flag: &str| {
+        run(probe(executable, &[flag, "marketrig-probe", "mcp", "list"]))
+            .is_some_and(|(_, _, err)| err.contains("unknown option"))
+    };
+    refused("--marketrig-probe-unknown-flag") && !refused(flag)
+}
+
 /// A probe command: the executable directly, or `%ComSpec% /d /c` in front of a
 /// Windows batch launcher (§2).
-fn probe(executable: &Path, arg: &str) -> Command {
+fn probe(executable: &Path, args: &[&str]) -> Command {
     let batch = executable
         .extension()
         .and_then(|e| e.to_str())
@@ -376,26 +392,32 @@ fn probe(executable: &Path, arg: &str) -> Command {
         let mut command = Command::new(shell);
         command.args(["/d", "/c"]);
         command.arg(executable);
-        command.arg(arg);
+        command.args(args);
         command
     } else {
         let mut command = Command::new(executable);
-        command.arg(arg);
+        command.args(args);
         command
     }
 }
 
-/// Runs a probe with the §2 timeout, answering `(exit succeeded, stdout)` or
-/// `None` when it could not be started or did not finish in time.
-fn run(mut command: Command) -> Option<(bool, String)> {
+/// Runs a probe with the §2 timeout, answering `(exit succeeded, stdout,
+/// stderr)` or `None` when it could not be started or did not finish in time.
+fn run(mut command: Command) -> Option<(bool, String, String)> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
+    command.stderr(Stdio::piped());
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
     let reader = std::thread::spawn(move || {
         let mut buffer = String::new();
         let _ = stdout.read_to_string(&mut buffer);
+        buffer
+    });
+    let errors = std::thread::spawn(move || {
+        let mut buffer = String::new();
+        let _ = stderr.read_to_string(&mut buffer);
         buffer
     });
     let deadline = Instant::now() + PROBE_TIMEOUT;
@@ -413,7 +435,8 @@ fn run(mut command: Command) -> Option<(bool, String)> {
         }
     };
     let out = reader.join().unwrap_or_default();
-    status.map(|status| (status.success(), out))
+    let err = errors.join().unwrap_or_default();
+    status.map(|status| (status.success(), out, err))
 }
 
 /// The first `\d+.\d+.\d+` on standard output (§2).
