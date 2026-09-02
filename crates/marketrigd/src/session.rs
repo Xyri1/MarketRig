@@ -71,20 +71,25 @@ pub fn pointers(store: &Store, desk_id: &str) -> Result<Value, StoreError> {
 }
 
 /// Opens the process row and appends `SESSION_STARTED` in one unit (§6.1).
-pub fn open_process(
+/// `also` runs inside that same unit with the unit's instant — the dispatcher
+/// heads the FIFO with a new session's orientation and disclosure there.
+pub fn open_process<F>(
     store: &Store,
     desk_id: &str,
     runtime: &str,
-    native_session_id: Option<&str>,
-    pid: u32,
+    activation: &Activation,
     daemon_uuid: &str,
     mode: &str,
-) -> Result<Process, StoreError> {
+    also: F,
+) -> Result<Process, StoreError>
+where
+    F: FnOnce(&Transaction<'_>, i64) -> rusqlite::Result<()> + Send + 'static,
+{
     let process = Process {
         id: Uuid::now_v7().to_string(),
         runtime: runtime.to_string(),
-        native_session_id: native_session_id.map(str::to_string),
-        pid: i64::from(pid),
+        native_session_id: activation.native_session_id.clone(),
+        pid: i64::from(activation.pid),
         started_at_ns: now_ns(),
         ready_at_ns: None,
     };
@@ -116,7 +121,8 @@ pub fn open_process(
                 "mode": mode,
                 "native_session_id": row.native_session_id,
             }),
-        )
+        )?;
+        also(tx, row.started_at_ns)
     })?;
     Ok(process)
 }
@@ -180,6 +186,53 @@ pub fn close_process(
             at_ns,
             json!({ "reason": reason, "code": code }),
         )
+    })
+}
+
+/// Ends every open row of this daemon with one reason — Quit's `QUIT` (§7).
+pub fn close_all(store: &Store, daemon_uuid: &str, reason: &str) -> Result<(), StoreError> {
+    let (daemon_uuid, reason) = (daemon_uuid.to_string(), reason.to_string());
+    store.unit(move |tx| {
+        let open: Vec<(String, String)> = tx
+            .prepare(
+                "SELECT id, desk_id FROM agent_processes WHERE ended_at_ns IS NULL \
+                 AND daemon_uuid = ?1 ORDER BY started_at_ns, id",
+            )?
+            .query_map([&daemon_uuid], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let at_ns = now_ns();
+        for (id, desk_id) in open {
+            tx.execute(
+                "UPDATE agent_processes SET ended_at_ns = ?2, exit_reason = ?3 WHERE id = ?1",
+                params![id, at_ns, reason],
+            )?;
+            desk::append_event(
+                tx,
+                "SESSION_EXITED",
+                Some(&desk_id),
+                at_ns,
+                json!({ "reason": reason, "code": Value::Null }),
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// Fills in the open row's `native_session_id` once the adapter learns it
+/// (Codex discovers its thread after the spawn, §4.2). Never overwrites.
+pub fn adopt_native_session(
+    store: &Store,
+    desk_id: &str,
+    native_session_id: &str,
+) -> Result<(), StoreError> {
+    let (desk_id, native) = (desk_id.to_string(), native_session_id.to_string());
+    store.unit(move |tx| {
+        tx.execute(
+            "UPDATE agent_processes SET native_session_id = ?2 WHERE desk_id = ?1 \
+             AND ended_at_ns IS NULL AND native_session_id IS NULL",
+            params![desk_id, native],
+        )?;
+        Ok(())
     })
 }
 

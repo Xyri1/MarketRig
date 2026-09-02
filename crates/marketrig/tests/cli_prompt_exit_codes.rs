@@ -58,7 +58,7 @@ fn list_and_show_hit_the_documented_routes() {
     let (port, requests) = fake_daemon(respond);
     write_endpoint(root.path(), port);
 
-    // Listing: id, kind, state, created — the delivery facts without payloads.
+    // Listing: id, kind, state, failure code, created — the delivery facts without payloads.
     let list = marketrig(root.path(), &["prompt", "list", "alpha"]);
     assert_eq!(code(&list), 0, "{list:?}");
     assert_eq!(
@@ -72,8 +72,8 @@ fn list_and_show_hit_the_documented_routes() {
     assert_eq!(
         lines(&list),
         [
-            format!("{PROMPT}\tTRIGGER_RESULT\tQUEUED\t20"),
-            "01997f00-0000-7000-8000-000000000010\tEVALUATION\tDELIVERED\t19".to_string(),
+            format!("{PROMPT}\tTRIGGER_RESULT\tQUEUED\t\t20"),
+            "01997f00-0000-7000-8000-000000000010\tEVALUATION\tDELIVERED\t\t19".to_string(),
         ]
     );
 

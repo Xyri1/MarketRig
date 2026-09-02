@@ -477,6 +477,10 @@ pub async fn run(
         if pass.accepted.iter().any(|a| a.has_code) {
             exec_wake.notify_one();
         }
+        // A code-free acceptance queued its result prompt (R3 §6.1).
+        if pass.accepted.iter().any(|a| !a.has_code) {
+            crate::dispatch::wake();
+        }
         if !pass.accepted.is_empty() || pass.missed > 0 {
             tracing::info!(
                 accepted = pass.accepted.len(),

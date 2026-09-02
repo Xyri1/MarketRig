@@ -4,6 +4,7 @@ pub mod claude;
 pub mod codex;
 pub mod daemon;
 pub mod desk;
+pub mod dispatch;
 pub mod exec;
 pub mod feed;
 pub mod log;
@@ -84,9 +85,40 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
         // on mutations and acceptances, and both stop on the shutdown watch.
         let scheduler_wake = Arc::new(tokio::sync::Notify::new());
         let exec_wake = Arc::new(tokio::sync::Notify::new());
-        // The terminal manager both adapters spawn through (R3 feature SPEC §3);
-        // `_terminal_exits` is the dispatcher's stream, wired with C27.
-        let (terminals, _terminal_exits) = terminal::Manager::new();
+        // The terminal manager both adapters spawn through (R3 feature SPEC §3)
+        // and the dispatcher's two evidence streams (§6.2).
+        let (terminals, terminal_exits) = terminal::Manager::new();
+        let (adapter_events, adapter_rx) = tokio::sync::mpsc::unbounded_channel();
+        let channels = Arc::new(claude::Channels::default());
+        let search_path = runtime::search_path();
+        let test_data_root =
+            std::env::var_os(store::TEST_DATA_ROOT_ENV).map(std::path::PathBuf::from);
+        let mcp_path = claude::sibling("marketrig-mcp")
+            .unwrap_or_else(|| std::path::PathBuf::from("marketrig-mcp"));
+        let codex = codex::Codex::new(
+            startup.store.clone(),
+            startup.roots.clone(),
+            terminals.clone(),
+            adapter_events.clone(),
+            search_path.clone(),
+            mcp_path,
+            test_data_root,
+        );
+        let dispatcher = dispatch::Dispatcher::new(
+            startup.store.clone(),
+            dispatch::Adapters {
+                codex: Arc::new(codex.clone()),
+                claude: Arc::new(claude::Claude::new(
+                    startup.store.clone(),
+                    daemon::launch_dir(&startup.roots),
+                    search_path.clone(),
+                    terminals.clone(),
+                    channels.clone(),
+                    adapter_events,
+                )),
+            },
+            startup.daemon_uuid.clone(),
+        );
         let router = api::router(api::ApiState {
             store: startup.store.clone(),
             desks_home: startup.roots.desks.clone(),
@@ -96,9 +128,10 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             quit: quit_tx,
             registry: registry.clone(),
             scheduler_wake: scheduler_wake.clone(),
-            search_path: runtime::search_path(),
+            search_path,
             terminals: terminals.clone(),
-            channels: Arc::new(claude::Channels::default()),
+            channels,
+            dispatch: dispatcher.clone(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -122,6 +155,12 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             exec_wake,
             shut_rx.clone(),
         ));
+        let dispatcher_task = tokio::spawn(dispatch::run(
+            dispatcher.clone(),
+            adapter_rx,
+            terminal_exits,
+            shut_rx.clone(),
+        ));
         let mut began = shut_rx.clone();
         let _ = began.changed().await;
         // §4.2: bounded end to end at 5 seconds, after which the daemon exits
@@ -132,12 +171,18 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
         // and recorded `QUIT` (R2 feature SPEC §4.4).
         let _ = tokio::time::timeout_at(deadline, executor).await;
         let _ = tokio::time::timeout_at(deadline, scheduler).await;
-        // Terminals first, then the desks' trading nodes (§4.2).
+        // The dispatcher stops before the terminals do, so their exits are the
+        // Quit path's to record, not an activation failure's (§6.2, §7).
+        let _ = tokio::time::timeout_at(deadline, dispatcher_task).await;
+        // Terminals first, then the app-server, then the desks' trading nodes
+        // (§4.1, §4.2); every row that was still open ends `QUIT`.
         let _ = tokio::time::timeout_at(
             deadline,
             tokio::task::spawn_blocking(move || terminals.shutdown_all()),
         )
         .await;
+        let _ = tokio::time::timeout_at(deadline, codex.stop()).await;
+        let _ = dispatcher.quit_rows();
         let _ = tokio::time::timeout_at(
             deadline,
             tokio::task::spawn_blocking(move || registry.stop_all()),

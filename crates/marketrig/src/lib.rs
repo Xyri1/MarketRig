@@ -593,7 +593,10 @@ const LISTS: [(&str, &[&str]); 7] = [
         "firings",
         &["id", "occurrence_ns", "accepted_at_ns", "execution.outcome"],
     ),
-    ("prompts", &["id", "kind", "state", "created_at_ns"]),
+    (
+        "prompts",
+        &["id", "kind", "state", "failure_code", "created_at_ns"],
+    ),
 ];
 
 /// Single resources print `field: value` in the daemon's own key order. One

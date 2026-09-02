@@ -1132,6 +1132,8 @@ fn capture_position(
     if let Err(e) = written {
         tracing::error!("a position event could not be captured: {e}");
     }
+    // A closed cycle queued an evaluation prompt (R3 §6.1).
+    crate::dispatch::wake();
 }
 
 /// One closed position cycle, as the closing event reports it. The realized P&L

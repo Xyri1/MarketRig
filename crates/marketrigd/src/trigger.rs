@@ -839,7 +839,8 @@ pub fn prompts(store: &Store, desk_id: &str) -> Result<Vec<Value>, TriggerError>
     let desk = desk_id.to_string();
     Ok(store.call(move |conn| {
         conn.prepare(
-            "SELECT id, desk_id, kind, state, created_at_ns FROM prompts WHERE desk_id = ?1 \
+            "SELECT id, desk_id, kind, state, created_at_ns, attempted_at_ns, resolved_at_ns, \
+             runtime, native_session_id, failure_code FROM prompts WHERE desk_id = ?1 \
              ORDER BY created_at_ns DESC, id DESC",
         )?
         .query_map(params![desk], |r| {
@@ -849,6 +850,11 @@ pub fn prompts(store: &Store, desk_id: &str) -> Result<Vec<Value>, TriggerError>
                 "kind": r.get::<_, String>(2)?,
                 "state": r.get::<_, String>(3)?,
                 "created_at_ns": r.get::<_, i64>(4)?,
+                "attempted_at_ns": r.get::<_, Option<i64>>(5)?,
+                "resolved_at_ns": r.get::<_, Option<i64>>(6)?,
+                "runtime": r.get::<_, Option<String>>(7)?,
+                "native_session_id": r.get::<_, Option<String>>(8)?,
+                "failure_code": r.get::<_, Option<String>>(9)?,
             }))
         })?
         .collect()
@@ -863,7 +869,8 @@ pub fn prompt(store: &Store, desk_id: &str, prompt_id: &str) -> Result<Value, Tr
     store
         .call(move |conn| {
             conn.query_row(
-                "SELECT id, desk_id, kind, state, created_at_ns, payload FROM prompts \
+                "SELECT id, desk_id, kind, state, created_at_ns, payload, attempted_at_ns, \
+                 resolved_at_ns, runtime, native_session_id, failure_code FROM prompts \
                  WHERE desk_id = ?1 AND id = ?2",
                 params![desk, id],
                 |r| {
@@ -874,6 +881,11 @@ pub fn prompt(store: &Store, desk_id: &str, prompt_id: &str) -> Result<Value, Tr
                         "kind": r.get::<_, String>(2)?,
                         "state": r.get::<_, String>(3)?,
                         "created_at_ns": r.get::<_, i64>(4)?,
+                        "attempted_at_ns": r.get::<_, Option<i64>>(6)?,
+                        "resolved_at_ns": r.get::<_, Option<i64>>(7)?,
+                        "runtime": r.get::<_, Option<String>>(8)?,
+                        "native_session_id": r.get::<_, Option<String>>(9)?,
+                        "failure_code": r.get::<_, Option<String>>(10)?,
                         "payload": serde_json::from_str::<Value>(&payload).unwrap_or(Value::Null),
                     }))
                 },

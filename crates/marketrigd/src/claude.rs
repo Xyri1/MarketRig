@@ -189,7 +189,7 @@ pub fn remove_launch_files(launch_dir: &Path, desk_id: &str) {
 }
 
 /// The binary named `name` beside the running daemon, when it is there.
-fn sibling(name: &str) -> Option<PathBuf> {
+pub fn sibling(name: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let path = exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     path.is_file().then_some(path)

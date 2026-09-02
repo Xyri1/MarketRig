@@ -213,6 +213,8 @@ pub async fn execute(
     if let Err(e) = completion {
         tracing::error!(error = %e, "persisting an execution outcome failed");
     }
+    // The result prompt is queued; the dispatcher activates for it (R3 §6.1).
+    crate::dispatch::wake();
     // Step 7's tail: the script is scratch, and a leftover is harmless.
     let _ = tokio::fs::remove_file(&script).await;
 }

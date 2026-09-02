@@ -491,10 +491,16 @@ fn scheduled(scenario: &str, cell: &str, runtime: &str) {
          AND payload LIKE '%' || ?2 || '%'",
         &[&desk_id, &firing_id],
     );
+    // R3: the dispatcher may already have failed it RUNTIME_UNAVAILABLE (the
+    // experiment discovers no runtime before E4); the row itself is the evidence.
     assert_eq!(
-        queued,
-        ["QUEUED"],
-        "one queued TRIGGER_RESULT per completed execution (§5)"
+        queued.len(),
+        1,
+        "one TRIGGER_RESULT per completed execution (§5)"
+    );
+    assert!(
+        matches!(queued[0].as_str(), "QUEUED" | "FAILED"),
+        "{queued:?}"
     );
 
     // Whether the code placed an order is the session's script; the attribution

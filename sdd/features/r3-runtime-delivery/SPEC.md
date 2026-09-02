@@ -121,7 +121,7 @@ loop: wait(notify | 30 s)
       Some(ready)     -> adapter.deliver(head)     (one prompt per desk per pass)
 ```
 
-`activate(desk)`: runtime = `desks.selected_runtime`; its `runtimes` row must be `AVAILABLE`, else every `QUEUED` prompt of the desk → `FAILED RUNTIME_UNAVAILABLE` now. Pointer present → resume; absent → new. In one unit: insert `agent_processes` (`ready_at_ns NULL`), append `SESSION_STARTED {runtime, mode: RESUME|NEW, native_session_id}`, and for a new session insert `ORIENTATION` (and `DISCLOSURE` if undisclosed `FAILED` rows exist) with `created_at_ns` = the unit's instant minus 1 ns and 2 ns so they head the FIFO. Readiness deadline 120 s from spawn.
+`activate(desk)`: runtime = `desks.selected_runtime`; its `runtimes` row must be `AVAILABLE`, else every `QUEUED` prompt of the desk → `FAILED RUNTIME_UNAVAILABLE` now. Pointer present → resume; absent → new. In one unit: insert `agent_processes` (`ready_at_ns NULL`), append `SESSION_STARTED {runtime, mode: RESUME|NEW, native_session_id}`, and for a new session insert `ORIENTATION` (and `DISCLOSURE` if undisclosed `FAILED` rows exist) with `created_at_ns` = one and two nanoseconds before the desk's oldest `QUEUED` prompt (the unit's instant when there is none), so they head the FIFO — the prompt that caused the activation was created before it — and the disclosure is the session's first input. Readiness deadline 120 s from spawn.
 
 ### 6.2 Outcomes
 
@@ -133,7 +133,7 @@ loop: wait(notify | 30 s)
 | deadline passed or exit before ready | end process (reason per evidence), every `QUEUED` prompt of the desk → `FAILED ACTIVATION_FAILED` with `failure_detail` (exit code or `"timeout"`) |
 | process exits while prompts are queued | prompts stay `QUEUED`; the next pass activates again |
 
-Delivery attempt unit: set `attempted_at_ns`, `runtime`, `native_session_id`; then the adapter call; then a second unit writing `state`, `resolved_at_ns`, `failure_code`, and `PROMPT_DELIVERED {prompt_id, kind, runtime, native_session_id}` or `PROMPT_FAILED {…, failure_code}`. Failure codes: `DELIVERY_REFUSED`, `HANDOFF_UNKNOWN`, `CHANNEL_UNAVAILABLE`, `ACTIVATION_FAILED`, `RUNTIME_UNAVAILABLE`.
+Delivery attempt unit: set `attempted_at_ns`, `runtime`, `native_session_id`; then the adapter call; then a second unit writing `state`, `resolved_at_ns`, `failure_code`, and `PROMPT_DELIVERED {prompt_id, kind, runtime, native_session_id}` or `PROMPT_FAILED {…, failure_code}`. Failure codes: `DELIVERY_REFUSED`, `HANDOFF_UNKNOWN`, `CHANNEL_UNAVAILABLE`, `ACTIVATION_FAILED`, `RUNTIME_UNAVAILABLE`. The attempt is written *before* the call, which is what makes a daemon lost mid-handoff `HANDOFF_UNKNOWN` (§8); a `Waiting` outcome — the gate was closed, nothing was handed over — clears `attempted_at_ns` again and leaves the row `QUEUED`, so a wait is never recovered as a handoff. `failure_detail` (an exit code, `"timeout"`, or the runtime's own refusal message) is a field of the `PROMPT_FAILED` payload; `prompts` has no such column.
 
 ### 6.3 Renderings
 

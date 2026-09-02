@@ -827,7 +827,7 @@ fn gate() {
             "SELECT (SELECT count(*) FROM position_cycles WHERE desk_id = ?1), \
                     (SELECT count(*) FROM position_cycles c \
                        LEFT JOIN prompts p ON p.desk_id = c.desk_id \
-                         AND p.kind = 'EVALUATION' AND p.state = 'QUEUED' \
+                         AND p.kind = 'EVALUATION' \
                          AND json_extract(p.payload, '$.cycle_id') = c.id \
                       WHERE c.desk_id = ?1 AND p.id IS NULL)",
             [&desk],
@@ -1626,7 +1626,13 @@ fn gate() {
         .expect("the one-off's prompt is listed")
         .clone();
     assert_eq!(queued["kind"], "TRIGGER_RESULT");
-    assert_eq!(queued["state"], "QUEUED");
+    // R3: with both runtimes UNDISCOVERED the dispatcher fails the queued row
+    // RUNTIME_UNAVAILABLE as soon as it wakes; either state proves the insert.
+    assert!(
+        matches!(queued["state"].as_str(), Some("QUEUED" | "FAILED")),
+        "{}",
+        queued
+    );
     assert!(
         queued.get("payload").is_none(),
         "the listing carries no payload (§8)"
@@ -1981,7 +1987,13 @@ fn gate() {
     assert_eq!(result.len(), 1, "one firing, one prompt (§5)");
     let (exit, summary) = g.cli_json("G22", &["--json", "prompt", "show", &gamma, &result[0]]);
     assert_eq!(exit, 0, "{summary}");
-    assert_eq!(summary["state"], "QUEUED");
+    // R3: with both runtimes UNDISCOVERED the dispatcher fails the queued row
+    // RUNTIME_UNAVAILABLE as soon as it wakes; either state proves the insert.
+    assert!(
+        matches!(summary["state"].as_str(), Some("QUEUED" | "FAILED")),
+        "{}",
+        summary
+    );
     assert_eq!(summary["payload"]["firing_id"], trading_firing.as_str());
     assert_eq!(summary["payload"]["trigger_id"], trading_id.as_str());
     assert_eq!(summary["payload"]["execution"]["outcome"], "EXITED");
@@ -2636,7 +2648,13 @@ fn gate() {
         "recovery queues the lost run's result (§4.4)"
     );
     let (_, settled_prompt) = g.cli_json("G26", &["--json", "prompt", "show", &gamma, &queued[0]]);
-    assert_eq!(settled_prompt["state"], "QUEUED");
+    // R3: with both runtimes UNDISCOVERED the dispatcher fails the queued row
+    // RUNTIME_UNAVAILABLE as soon as it wakes; either state proves the insert.
+    assert!(
+        matches!(settled_prompt["state"].as_str(), Some("QUEUED" | "FAILED")),
+        "{}",
+        settled_prompt
+    );
     assert_eq!(
         settled_prompt["payload"]["execution"]["outcome"],
         "DAEMON_LOST"

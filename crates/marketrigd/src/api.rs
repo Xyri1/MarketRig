@@ -43,6 +43,9 @@ pub struct ApiState {
     pub terminals: Arc<crate::terminal::Manager>,
     /// The desks' Claude Code channel connections (R3 feature SPEC §5.3).
     pub channels: Arc<crate::claude::Channels>,
+    /// Activation policy and the delivery queue, shared with the dispatcher
+    /// task so a route and the queue start sessions exactly one way (§6, §7).
+    pub dispatch: Arc<crate::dispatch::Dispatcher>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -84,6 +87,13 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
         .route("/desks/{desk_id}/session", get(session))
+        .route("/desks/{desk_id}/session/activate", post(session_activate))
+        .route(
+            "/desks/{desk_id}/session/interrupt",
+            post(session_interrupt),
+        )
+        .route("/desks/{desk_id}/session/exit", post(session_exit))
+        .route("/desks/{desk_id}/session/switch", post(session_switch))
         .route("/desks/{desk_id}/terminal", get(terminal))
         .route("/desks/{desk_id}/channel", get(channel))
         .route("/desks/{desk_id}/session/hook", post(session_hook))
@@ -287,6 +297,206 @@ async fn session(
     let desk = desk::get(&state.store, &desk_id)?;
     let process = crate::session::live_process(&state.store, &desk.id)?;
     Ok(Json(serde_json::json!({ "process": process })))
+}
+
+/// §7's lifecycle controls. Activation itself lives in `dispatch` so the route
+/// and the dispatcher share one path.
+
+#[derive(Deserialize)]
+struct ActivateBody {
+    mode: String,
+}
+
+async fn session_activate(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, DeskError> {
+    let mode = match is_json(&headers)
+        .then(|| serde_json::from_str::<ActivateBody>(&body).ok())
+        .flatten()
+        .as_ref()
+        .map(|b| b.mode.as_str())
+    {
+        Some("CONTINUE") => crate::dispatch::Mode::Continue,
+        Some("NEW") => crate::dispatch::Mode::New,
+        _ => {
+            return Ok(envelope(
+                StatusCode::BAD_REQUEST,
+                "VALIDATION",
+                r#"The body must be {"mode":"CONTINUE"|"NEW"}."#.to_string(),
+            ));
+        }
+    };
+    use crate::dispatch::ActivateError;
+    Ok(match state.dispatch.activate(&desk_id, mode).await {
+        Ok(process) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "process": process })),
+        )
+            .into_response(),
+        Err(ActivateError::Desk(e)) => e.into_response(),
+        Err(ActivateError::SessionLive) => envelope(
+            StatusCode::CONFLICT,
+            "SESSION_LIVE",
+            "The desk already has a live session.".to_string(),
+        ),
+        Err(ActivateError::NoNativeSession) => envelope(
+            StatusCode::CONFLICT,
+            "NO_NATIVE_SESSION",
+            "The desk has no session to continue on this runtime.".to_string(),
+        ),
+        Err(ActivateError::RuntimeUnavailable(runtime)) => envelope(
+            StatusCode::CONFLICT,
+            "RUNTIME_UNAVAILABLE",
+            format!("The {runtime} runtime is not available."),
+        ),
+        Err(ActivateError::Spawn(message)) => envelope(
+            StatusCode::CONFLICT,
+            "RUNTIME_UNAVAILABLE",
+            format!("The runtime could not be started: {message}"),
+        ),
+    })
+}
+
+async fn session_interrupt(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Response, DeskError> {
+    let desk = desk::get(&state.store, &desk_id)?;
+    if crate::session::live_process(&state.store, &desk.id)?.is_none() {
+        return Ok(envelope(
+            StatusCode::CONFLICT,
+            "NO_LIVE_SESSION",
+            "The desk has no live session.".to_string(),
+        ));
+    }
+    let adapter = state.dispatch.adapter(&desk.selected_runtime);
+    Ok(match adapter.interrupt(&desk.id).await {
+        Ok(turn_id) => {
+            let (id, turn) = (desk.id.clone(), turn_id.clone());
+            state.store.unit(move |tx| {
+                desk::append_event(
+                    tx,
+                    "SESSION_INTERRUPTED",
+                    Some(&id),
+                    store::now_ns(),
+                    serde_json::json!({ "turn_id": turn }),
+                )
+            })?;
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "turn_id": turn_id })),
+            )
+                .into_response()
+        }
+        Err(("RUNTIME_ERROR", message)) => {
+            envelope(StatusCode::BAD_GATEWAY, "RUNTIME_ERROR", message)
+        }
+        Err((code, message)) => envelope(StatusCode::CONFLICT, code, message),
+    })
+}
+
+async fn session_exit(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Response, DeskError> {
+    let desk = desk::get(&state.store, &desk_id)?;
+    if crate::session::live_process(&state.store, &desk.id)?.is_none() {
+        return Ok(envelope(
+            StatusCode::CONFLICT,
+            "NO_LIVE_SESSION",
+            "The desk has no live session.".to_string(),
+        ));
+    }
+    state.dispatch.exit(&desk.id).await?;
+    Ok(if state.dispatch.await_closed(&desk.id).await {
+        (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
+    } else {
+        envelope(
+            StatusCode::BAD_GATEWAY,
+            "RUNTIME_ERROR",
+            "The session did not end within five seconds; its shutdown continues.".to_string(),
+        )
+    })
+}
+
+#[derive(Deserialize)]
+struct SwitchBody {
+    runtime: String,
+}
+
+async fn session_switch(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, DeskError> {
+    let desk = desk::get(&state.store, &desk_id)?;
+    let Some(target) = is_json(&headers)
+        .then(|| serde_json::from_str::<SwitchBody>(&body).ok())
+        .flatten()
+        .map(|b| b.runtime)
+        .filter(|runtime| crate::runtime::known(runtime))
+    else {
+        return Ok(envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            r#"The body must be {"runtime":"codex"|"claude"}."#.to_string(),
+        ));
+    };
+    // §7: everything is validated before anything is stopped.
+    if target == desk.selected_runtime {
+        return Ok(envelope(
+            StatusCode::CONFLICT,
+            "SAME_RUNTIME",
+            format!("The desk is already on {target}."),
+        ));
+    }
+    match crate::runtime::get(&state.store, &target)? {
+        Some(row) if row.state == "AVAILABLE" => {}
+        _ => {
+            return Ok(envelope(
+                StatusCode::CONFLICT,
+                "RUNTIME_UNAVAILABLE",
+                format!("The {target} runtime is not available."),
+            ));
+        }
+    }
+    if crate::session::live_process(&state.store, &desk.id)?.is_some() {
+        state.dispatch.exit(&desk.id).await?;
+        if !state.dispatch.await_closed(&desk.id).await {
+            return Ok(envelope(
+                StatusCode::BAD_GATEWAY,
+                "RUNTIME_ERROR",
+                "The session did not end within five seconds; its shutdown continues.".to_string(),
+            ));
+        }
+    }
+    let (id, from, to) = (
+        desk.id.clone(),
+        desk.selected_runtime.clone(),
+        target.clone(),
+    );
+    state.store.unit(move |tx| {
+        tx.execute(
+            "UPDATE desks SET selected_runtime = ?2 WHERE id = ?1",
+            rusqlite::params![id, to],
+        )?;
+        desk::append_event(
+            tx,
+            "RUNTIME_SWITCHED",
+            Some(&id),
+            store::now_ns(),
+            serde_json::json!({ "from": from, "to": to }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "selected_runtime": target,
+        "pointers": crate::session::pointers(&state.store, &desk.id)?,
+    }))
+    .into_response())
 }
 
 /// Claude Code's hook ingress (§5.2). Well-formed objects are always `202`;
@@ -910,6 +1120,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         quit,
         registry: registry.clone(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -2250,9 +2461,13 @@ async fn trigger_codes() {
         prompts,
         serde_json::json!([
             { "id": "p-2", "desk_id": alpha, "kind": "TRIGGER_RESULT",
-              "state": "QUEUED", "created_at_ns": 600 },
+              "state": "QUEUED", "created_at_ns": 600, "attempted_at_ns": null,
+              "resolved_at_ns": null, "runtime": null, "native_session_id": null,
+              "failure_code": null },
             { "id": "p-1", "desk_id": alpha, "kind": "EVALUATION",
-              "state": "QUEUED", "created_at_ns": 500 },
+              "state": "QUEUED", "created_at_ns": 500, "attempted_at_ns": null,
+              "resolved_at_ns": null, "runtime": null, "native_session_id": null,
+              "failure_code": null },
         ]),
         "newest first, every delivery fact and no payload"
     );
