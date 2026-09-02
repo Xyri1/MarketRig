@@ -208,9 +208,14 @@ fn acquire(path: &Path) -> Result<File, DaemonError> {
     }
 }
 
-/// The one pre-service transaction (§4.3). R0 has no in-flight prompts, firings,
-/// or actions, so reaping is its only step and this appends its evidence.
-fn recover(store: &Store, daemon_uuid: &str, children: Vec<Value>) -> Result<(), StoreError> {
+/// The one pre-service transaction (§4.3): reap the predecessor's children, then
+/// settle the executions it left running (R2 feature SPEC §4.4), and append the
+/// evidence for both.
+pub(crate) fn recover(
+    store: &Store,
+    daemon_uuid: &str,
+    children: Vec<Value>,
+) -> Result<(), StoreError> {
     let uuid = daemon_uuid.to_string();
     store.unit(move |tx| {
         let previous: Option<String> = tx
@@ -222,15 +227,18 @@ fn recover(store: &Store, daemon_uuid: &str, children: Vec<Value>) -> Result<(),
             )
             .optional()?
             .flatten();
+        let at_ns = now_ns();
+        let executions_lost = crate::exec::recovery_step(tx, &uuid, at_ns)?;
         desk::append_event(
             tx,
             "RECOVERY",
             None,
-            now_ns(),
+            at_ns,
             json!({
                 "previous_daemon_uuid": previous,
                 "daemon_uuid": uuid,
                 "children": children,
+                "executions_lost": executions_lost,
             }),
         )
     })
