@@ -94,7 +94,7 @@ Launch: `<claude> --session-id <uuid> --mcp-config <mcp.json> --settings <settin
 | Event | Effect |
 | --- | --- |
 | `SessionStart`, `source: startup\|resume` | pointer confirmation; readiness is §5.3's |
-| `SessionStart`, `source: clear` | `native_sessions` repointed to `session_id`; `SESSION_POINTER_CHANGED {from, to, cause: "clear"}` |
+| `SessionStart`, `source: clear` | only when the desk's own live process row is this runtime's — the payload carries the *new* `session_id` and names no prior one, so nothing else distinguishes our clear from another session's: `native_sessions` repointed to `session_id`; `SESSION_POINTER_CHANGED {from, to, cause: "clear"}`. Otherwise `SESSION_ATTENTION {kind: "foreign_session"}` |
 | `SessionStart`, other `source` | recorded as `SESSION_ATTENTION {kind: "session_start", source}` only |
 | `Notification` | `SESSION_ATTENTION {kind: notification_type, title}`; `message` is not stored |
 | `Stop` | `SESSION_TURN_ENDED` |
@@ -121,7 +121,7 @@ loop: wait(notify | 30 s)
       Some(ready)     -> adapter.deliver(head)     (one prompt per desk per pass)
 ```
 
-`activate(desk)`: runtime = `desks.selected_runtime`; its `runtimes` row must be `AVAILABLE`, else every `QUEUED` prompt of the desk → `FAILED RUNTIME_UNAVAILABLE` now. Pointer present → resume; absent → new. In one unit: insert `agent_processes` (`ready_at_ns NULL`), append `SESSION_STARTED {runtime, mode: RESUME|NEW, native_session_id}`, and for a new session insert `ORIENTATION` (and `DISCLOSURE` if undisclosed `FAILED` rows exist) with `created_at_ns` = one and two nanoseconds before the desk's oldest `QUEUED` prompt (the unit's instant when there is none), so they head the FIFO — the prompt that caused the activation was created before it — and the disclosure is the session's first input. Readiness deadline 120 s from spawn.
+`activate(desk)`: runtime = `desks.selected_runtime`; its `runtimes` row must be `AVAILABLE`, else every `QUEUED` prompt of the desk → `FAILED RUNTIME_UNAVAILABLE` now. Pointer present → resume; absent → new. In one unit: insert `agent_processes` (`ready_at_ns NULL`), append `SESSION_STARTED {runtime, mode: RESUME|NEW, native_session_id}`, and for a new session insert `ORIENTATION` (and `DISCLOSURE` if undisclosed `FAILED` rows exist) with `created_at_ns` = one and two nanoseconds before the desk's oldest `QUEUED` prompt (the unit's instant when there is none), so they head the FIFO — the prompt that caused the activation was created before it — and the disclosure is the session's first input. Readiness deadline 120 s from spawn. A child can report itself before its row exists, so the spawn window is explicit: the dispatcher holds every `AdapterEvent` for a desk whose spawn is in flight and handles them as soon as the row and its live entry are there, and the channel route serves a bridge that connects inside that same window instead of closing it `4002` (§5.3).
 
 ### 6.2 Outcomes
 

@@ -125,11 +125,18 @@ struct Inner {
     connect_url: Option<String>,
     /// Where the live control plane listens, handed to every TUI as `--remote`.
     url: Mutex<String>,
+    /// The live control plane's capability token, the one secret the TUI needs
+    /// (§4.2). Written by `start_inner`; empty only under the test seam, where
+    /// the socket takes no auth.
+    token: Mutex<String>,
+    /// This daemon's UUID, stamped on the app-server's `children.json` record.
+    daemon_uuid: String,
     control: tokio::sync::Mutex<Option<Arc<Client>>>,
     child: Mutex<Option<crate::exec::Contained>>,
     threads: Mutex<Threads>,
-    /// Control-plane restarts since the last success; the second failure is
-    /// `CONTROL_PLANE_FAILED` (§4.1).
+    /// Control-plane restarts since the last `POST /runtimes/codex/retry`; the
+    /// second failure is `CONTROL_PLANE_FAILED` until that retry clears both
+    /// the row and this count (§4.1).
     restarts: AtomicU32,
 }
 
@@ -142,6 +149,9 @@ impl Codex {
     /// `search_path` is the `PATH` discovery captured (`ApiState::search_path`).
     /// The Codex executable and its availability are read from the `runtimes`
     /// row at every use, so a `retry` takes effect without a restart.
+    // Eight plainly-named things the daemon has and the adapter needs; a struct
+    // of them would be the same eight with one more name.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         roots: Roots,
@@ -150,6 +160,7 @@ impl Codex {
         search_path: String,
         mcp_path: PathBuf,
         test_data_root: Option<PathBuf>,
+        daemon_uuid: String,
     ) -> Codex {
         Codex(Arc::new(Inner {
             store,
@@ -161,6 +172,8 @@ impl Codex {
             test_data_root,
             connect_url: None,
             url: Mutex::new(String::new()),
+            token: Mutex::new(String::new()),
+            daemon_uuid,
             control: tokio::sync::Mutex::new(None),
             child: Mutex::new(None),
             threads: Mutex::new(Threads::default()),
@@ -257,7 +270,7 @@ impl Inner {
                         pid,
                         kind: "codex-app-server".to_string(),
                         args,
-                        daemon_uuid: String::new(),
+                        daemon_uuid: self.daemon_uuid.clone(),
                         launched_at_ns: now_ns(),
                     },
                 );
@@ -266,6 +279,7 @@ impl Inner {
         };
 
         *self.url.lock().expect("url") = url.clone();
+        *self.token.lock().expect("token") = token.clone();
         let stream = connect(&url, &token).await?;
         let (mut sink, mut source) = {
             use futures_util::StreamExt as _;
@@ -580,21 +594,11 @@ impl Adapter for Codex {
             "-C".to_string(),
             workspace.display().to_string(),
         ]);
-        let token =
-            std::fs::read_to_string(inner.roots.runtime().join(TOKEN_FILE)).unwrap_or_default();
-        let mut env = vec![
-            ("PATH".to_string(), inner.search_path.clone()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
-            ("MARKETRIG_CODEX_WS_TOKEN".to_string(), token),
-        ];
-        // §4.2's `HOME` and locale, which the TUI needs once the environment is
-        // no longer inherited (`terminal::spawn`).
-        for (key, value) in std::env::vars() {
-            if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
-                env.push((key, value));
-            }
-        }
+        // The live control plane's own token, from the start that just
+        // connected — never re-read from the file (§4.2).
+        let token = inner.token.lock().expect("token").clone();
+        let mut env = crate::session::base_env(&inner.search_path, desk_id);
+        env.push(("MARKETRIG_CODEX_WS_TOKEN".to_string(), token));
 
         {
             let mut threads = inner.threads.lock().expect("threads");
@@ -687,6 +691,13 @@ impl Adapter for Codex {
             Err(CallError::Rpc(message)) => DeliverOutcome::Refused(message),
             Err(CallError::Lost) => DeliverOutcome::HandoffUnknown,
         }
+    }
+
+    /// §4.1: `POST /runtimes/codex/retry` clears `CONTROL_PLANE_FAILED`, so it
+    /// clears the restart count that failure came from too — otherwise the very
+    /// next loss is a second failure again.
+    fn reset_failures(&self) {
+        self.0.restarts.store(0, Ordering::SeqCst);
     }
 
     async fn interrupt(&self, desk_id: &str) -> Result<String, (&'static str, String)> {
@@ -913,6 +924,7 @@ mod tests {
             String::new(),
             PathBuf::from("marketrig-mcp"),
             Some(dir.path().to_path_buf()),
+            "test-daemon".to_string(),
         );
         Arc::get_mut(&mut codex.0).unwrap().connect_url = Some(url);
         (dir, codex, rx, workspace)
@@ -1094,6 +1106,19 @@ mod tests {
         let row = crate::runtime::get(&store, "codex").unwrap().unwrap();
         assert_eq!(row.state, "UNAVAILABLE");
         assert_eq!(row.failure_code.as_deref(), Some("CONTROL_PLANE_FAILED"));
+
+        // `retry` clears the count with the row, so the runtime gets its one
+        // restart again instead of failing on the very next loss (§4.1).
+        codex.reset_failures();
+        codex.client().await.unwrap();
+        let connected = script.connections.load(Ordering::SeqCst);
+        script.broadcast.send(CLOSE.to_string()).unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            script.connections.load(Ordering::SeqCst),
+            connected + 1,
+            "the retry bought another restart"
+        );
         codex.stop().await;
     }
 }

@@ -5,7 +5,7 @@
 //! process itself is the terminal manager's (§3) and every row is the
 //! dispatcher's (§6); this module owns the runtime's own mechanics.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +45,10 @@ struct Connection {
 #[derive(Default)]
 pub struct Channels {
     live: Mutex<HashMap<String, Connection>>,
+    /// Desks whose launch is in flight. The bridge can connect before the
+    /// process row exists, and that connection is the session's readiness, so
+    /// it is served rather than closed `4002` (§5.3, §6.1).
+    spawning: Mutex<HashSet<String>>,
     events: Mutex<Option<AdapterEvents>>,
     connected: tokio::sync::Notify,
     generations: AtomicU64,
@@ -102,6 +106,21 @@ impl Channels {
             return false;
         }
         true
+    }
+
+    /// Opens and closes the spawn-in-flight window; the dispatcher closes it
+    /// through `Adapter::settled` once the process row exists.
+    pub fn spawning(&self, desk_id: &str, in_flight: bool) {
+        let mut spawning = self.spawning.lock().expect("spawning");
+        if in_flight {
+            spawning.insert(desk_id.to_string());
+        } else {
+            spawning.remove(desk_id);
+        }
+    }
+
+    pub fn is_spawning(&self, desk_id: &str) -> bool {
+        self.spawning.lock().expect("spawning").contains(desk_id)
     }
 
     pub fn is_connected(&self, desk_id: &str) -> bool {
@@ -242,21 +261,6 @@ impl Claude {
             channel_wait: CHANNEL_WAIT,
         }
     }
-
-    /// §4.2's environment plus `MARKETRIG_DESK_ID`; no bearer, no secret.
-    fn env(&self, desk_id: &str) -> Vec<(String, String)> {
-        let mut env = vec![
-            ("PATH".to_string(), self.search_path.clone()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-            ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
-        ];
-        for (key, value) in std::env::vars() {
-            if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
-                env.push((key, value));
-            }
-        }
-        env
-    }
 }
 
 #[async_trait::async_trait]
@@ -297,6 +301,8 @@ impl Adapter for Claude {
         argv.push("--dangerously-load-development-channels".to_string());
         argv.push("server:marketrig-channel".to_string());
 
+        // §5.3: the bridge may connect before the dispatcher opens the row.
+        self.channels.spawning(&desk.id, true);
         let pid = self
             .terminals
             .spawn(
@@ -304,7 +310,7 @@ impl Adapter for Claude {
                 Spawn {
                     argv,
                     cwd: PathBuf::from(&desk.workspace_path),
-                    env: self.env(&desk.id),
+                    env: crate::session::base_env(&self.search_path, &desk.id),
                     cols: COLS,
                     rows: ROWS,
                 },
@@ -360,6 +366,16 @@ impl Adapter for Claude {
         let _ = tokio::task::spawn_blocking(move || terminals.shutdown(&desk)).await;
         remove_launch_files(&self.launch_dir, desk_id);
     }
+
+    fn settled(&self, desk_id: &str) {
+        self.channels.spawning(desk_id, false);
+    }
+
+    /// §5.1: the launch files live exactly as long as the process row, whether
+    /// it ended by exit, deadline, or Quit.
+    fn closed(&self, desk_id: &str) {
+        remove_launch_files(&self.launch_dir, desk_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +429,20 @@ mod tests {
         remove_launch_files(dir.path(), "d1");
         assert!(!dir.path().join("d1").exists());
         assert!(dir.path().join("d2").exists(), "one desk at a time");
+
+        // §5.1: the row closing takes them, however it closed — a self-exit,
+        // the readiness deadline, and Quit never reach `exit`.
+        let (_home, claude, _events) = adapter();
+        write_launch_files(
+            &claude.launch_dir,
+            "d3",
+            Path::new("/bin/marketrig-mcp"),
+            None,
+        )
+        .unwrap();
+        assert!(claude.launch_dir.join("d3").exists());
+        claude.closed("d3");
+        assert!(!claude.launch_dir.join("d3").exists());
     }
 
     #[test]

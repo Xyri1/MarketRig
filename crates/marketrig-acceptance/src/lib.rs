@@ -178,12 +178,57 @@ pub struct Event {
 pub struct Daemon {
     pub child: Child,
     pub endpoint: Endpoint,
+    /// `MARKETRIG_TEST_DATA_ROOT`, so a dropped daemon can reap what it left
+    /// behind: the app-server it records in `runtime/children.json` and the
+    /// setsid-detached terminal children its `agent_processes` rows name.
+    pub data_root: PathBuf,
 }
 
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // A clean stop already took them; this is the panicking path's net. On
+        // Windows the job object holds the whole tree, so there is nothing to do.
+        #[cfg(unix)]
+        {
+            let kill = |pid: i32, group: bool| unsafe {
+                libc::kill(if group { -pid } else { pid }, libc::SIGKILL);
+            };
+            let children = self
+                .data_root
+                .join("data")
+                .join("runtime")
+                .join("children.json");
+            if let Ok(text) = fs::read_to_string(&children)
+                && let Ok(value) = serde_json::from_str::<Value>(&text)
+            {
+                for pid in value["children"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["pid"].as_i64())
+                {
+                    kill(pid as i32, false);
+                }
+            }
+            if let Ok(db) = rusqlite::Connection::open_with_flags(
+                self.data_root.join("data").join("marketrig.sqlite3"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            ) && let Ok(mut statement) =
+                db.prepare("SELECT pid FROM agent_processes WHERE ended_at_ns IS NULL")
+            {
+                let pids: Vec<i64> = statement
+                    .query_map([], |row| row.get(0))
+                    .map(|rows| rows.flatten().collect())
+                    .unwrap_or_default();
+                // Each terminal child is its own session leader (`setsid`), so
+                // the group carries the runtime and whatever it spawned.
+                for pid in pids {
+                    kill(pid as i32, true);
+                }
+            }
+        }
     }
 }
 
@@ -474,7 +519,11 @@ impl Harness {
                 "no_trading": self.no_trading,
             }),
         );
-        Daemon { child, endpoint }
+        Daemon {
+            child,
+            endpoint,
+            data_root: self.out.clone(),
+        }
     }
 
     /// The clean stop (R0 feature SPEC §4.2): `POST /quit`, bounded exit 0,

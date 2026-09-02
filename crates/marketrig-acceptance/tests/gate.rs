@@ -3091,6 +3091,7 @@ fn gate() {
     );
 
     let before = delivered(&g, &delta_id);
+    let ready_before = payloads(&g, &delta_id, "SESSION_READY").len();
     let claude_a = one_off(&mut g, "G30", &delta, "g30-a", 2);
     let claude_b = one_off(&mut g, "G30", &delta, "g30-b", 3);
     let claude_firing_a = await_firing(&g, &claude_a, 0);
@@ -3116,6 +3117,19 @@ fn gate() {
         .expect("b");
     for id in [&prompt_a, &prompt_b] {
         assert_eq!(prompt_state(&g, id), ("DELIVERED".to_string(), None));
+    }
+    {
+        // The bridge's connection is this session's readiness (§5.3), and the
+        // two frames left in FIFO order — the rows say so, not a count.
+        let resolved = |id: &str| -> i64 {
+            g.scalar("SELECT resolved_at_ns FROM prompts WHERE id = ?1", &[&id])
+        };
+        let (a, b) = (resolved(&prompt_a), resolved(&prompt_b));
+        assert!(b > a, "FIFO on the channel: {a} then {b}");
+        assert!(
+            payloads(&g, &delta_id, "SESSION_READY").len() > ready_before,
+            "the Claude session reached SESSION_READY"
+        );
     }
     within(
         Duration::from_secs(30),

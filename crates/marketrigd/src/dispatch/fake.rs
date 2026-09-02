@@ -31,6 +31,9 @@ pub struct Fake {
     pub exits: AtomicU32,
     /// `exit` emits `Exited { reason: "INTERRUPTED" }`, as a terminal would.
     pub exit_ends: AtomicBool,
+    /// When set, the spawn reports `Ready` *into the dispatcher* before it
+    /// returns — a child that is up before the process row is.
+    pub ready_inside_spawn: Mutex<Option<std::sync::Weak<super::Dispatcher>>>,
 }
 
 impl Fake {
@@ -45,6 +48,7 @@ impl Fake {
             interrupt: Mutex::new(Ok("turn-1".to_string())),
             exits: AtomicU32::new(0),
             exit_ends: AtomicBool::new(true),
+            ready_inside_spawn: Mutex::new(None),
         })
     }
 
@@ -65,7 +69,14 @@ impl Adapter for Fake {
         if let Some(detail) = self.spawn_fails.lock().unwrap().clone() {
             return Err(detail);
         }
-        if self.ready_on_spawn.load(Ordering::SeqCst) {
+        let early = self.ready_inside_spawn.lock().unwrap().clone();
+        if let Some(dispatcher) = early.and_then(|d| d.upgrade()) {
+            dispatcher
+                .event(AdapterEvent::Ready {
+                    desk_id: desk_id.to_string(),
+                })
+                .await;
+        } else if self.ready_on_spawn.load(Ordering::SeqCst) {
             let _ = self.events.send(AdapterEvent::Ready {
                 desk_id: desk_id.to_string(),
             });
@@ -135,6 +146,7 @@ pub fn dispatcher(store: crate::store::Store, daemon_uuid: &str) -> Arc<super::D
         daemon_uuid: daemon_uuid.to_string(),
         notify: Arc::new(tokio::sync::Notify::new()),
         live: Mutex::new(std::collections::HashMap::new()),
+        activating: Mutex::new(std::collections::HashMap::new()),
         ready_deadline: super::READY_DEADLINE,
         poll: super::POLL,
     })

@@ -556,9 +556,11 @@ async fn channel(
 async fn bridged(mut socket: axum::extract::ws::WebSocket, state: Arc<ApiState>, desk_id: String) {
     use axum::extract::ws::{CloseFrame, Message};
 
-    // §5.3: no open process, no session to be ready for.
+    // §5.3: no open process, no session to be ready for — except while the
+    // launch is still in flight, when the row is moments away (§6.1).
     match crate::session::live_process(&state.store, &desk_id) {
         Ok(Some(_)) => {}
+        _ if state.channels.is_spawning(&desk_id) => {}
         _ => {
             let _ = socket
                 .send(Message::Close(Some(CloseFrame {
@@ -787,6 +789,8 @@ async fn runtime_retry(
     if !crate::runtime::known(&name) {
         return Ok(unknown_runtime(&name));
     }
+    // §4.1: the adapter's own failure count goes with the row's failure.
+    state.dispatch.adapter(&name).reset_failures();
     let row = crate::runtime::retry(&state.store, &name, &state.search_path)?;
     Ok(Json(row).into_response())
 }
@@ -1087,6 +1091,7 @@ struct Served {
     quit: tokio::sync::mpsc::Receiver<()>,
     store: Store,
     registry: Arc<crate::node::Registry>,
+    channels: Arc<crate::claude::Channels>,
 }
 
 #[cfg(test)]
@@ -1108,10 +1113,11 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         Arc::new(crate::feed::MarketState::new()),
         feed_base,
     ));
+    let channels = Arc::new(crate::claude::Channels::default());
     let state = ApiState {
         search_path: String::new(),
         terminals: crate::terminal::Manager::new().0,
-        channels: Arc::new(crate::claude::Channels::default()),
+        channels: channels.clone(),
         store: store.clone(),
         desks_home: desks_home.clone(),
         daemon_uuid: DAEMON_UUID.to_string(),
@@ -1133,6 +1139,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         quit: quit_rx,
         store,
         registry,
+        channels,
     }
 }
 
@@ -2598,6 +2605,18 @@ async fn channel_socket_needs_an_open_process_and_supersedes() {
     // No process row: the connection is refused as soon as it is made.
     let mut early = connect().await;
     assert_eq!(closed(early.next().await), 4002);
+
+    // …unless the launch is still in flight, when the bridge may well beat the
+    // row it is the readiness of (§6.1).
+    served.channels.spawning(&desk_id, true);
+    let mut racing = connect().await;
+    racing.send(Message::Ping(Vec::new().into())).await.unwrap();
+    assert!(
+        matches!(racing.next().await, Some(Ok(Message::Pong(_)))),
+        "a bridge that beats the row is served"
+    );
+    served.channels.spawning(&desk_id, false);
+    drop(racing);
 
     served
         .store

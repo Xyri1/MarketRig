@@ -48,6 +48,8 @@ pub struct Adapters {
 }
 
 impl Adapters {
+    /// `desks.selected_runtime` is one of exactly two values (the column's
+    /// CHECK), so `codex` is the other name, not a fallback for an unknown one.
     fn get(&self, runtime: &str) -> Arc<dyn Adapter> {
         match runtime {
             "claude" => self.claude.clone(),
@@ -111,6 +113,10 @@ pub struct Dispatcher {
     daemon_uuid: String,
     notify: Arc<Notify>,
     live: Mutex<HashMap<String, Live>>,
+    /// Desks whose spawn is in flight, holding whatever the child already
+    /// reported: an event that arrives before the process row exists would
+    /// otherwise be dropped (§6.1).
+    activating: Mutex<HashMap<String, Vec<AdapterEvent>>>,
     ready_deadline: Duration,
     poll: Duration,
 }
@@ -125,6 +131,7 @@ impl Dispatcher {
             daemon_uuid,
             notify,
             live: Mutex::new(HashMap::new()),
+            activating: Mutex::new(HashMap::new()),
             ready_deadline: READY_DEADLINE,
             poll: POLL,
         })
@@ -166,10 +173,20 @@ impl Dispatcher {
         };
 
         let adapter = self.adapters.get(&runtime);
-        let activation = adapter
-            .spawn(&desk.id, resume.as_deref())
-            .await
-            .map_err(ActivateError::Spawn)?;
+        // From here until the row and the live entry exist, the child's events
+        // are held rather than dropped (§6.1).
+        self.activating
+            .lock()
+            .expect("activating")
+            .insert(desk.id.clone(), Vec::new());
+        let activation = match adapter.spawn(&desk.id, resume.as_deref()).await {
+            Ok(activation) => activation,
+            Err(detail) => {
+                self.buffered(&desk.id);
+                adapter.settled(&desk.id);
+                return Err(ActivateError::Spawn(detail));
+            }
+        };
 
         let activation = crate::session::Activation {
             pid: activation.pid,
@@ -191,7 +208,15 @@ impl Dispatcher {
                 }
                 Ok(())
             },
-        )?;
+        );
+        let process = match process {
+            Ok(process) => process,
+            Err(e) => {
+                self.buffered(&desk.id);
+                adapter.settled(&desk.id);
+                return Err(e.into());
+            }
+        };
 
         // A runtime that mints its own session id knows the pointer at spawn
         // (§5.1); a runtime that discovers it later sends `PointerDiscovered`.
@@ -210,8 +235,23 @@ impl Dispatcher {
                 retried: false,
             },
         );
+        // The row and the live entry are in place: the window is closed and
+        // whatever arrived inside it is handled now.
+        adapter.settled(&desk.id);
+        for event in self.buffered(&desk.id) {
+            Box::pin(self.event(event)).await;
+        }
         self.wake();
         Ok(process)
+    }
+
+    /// Takes (and stops) the desk's activation buffer.
+    fn buffered(&self, desk_id: &str) -> Vec<AdapterEvent> {
+        self.activating
+            .lock()
+            .expect("activating")
+            .remove(desk_id)
+            .unwrap_or_default()
     }
 
     /// §7's `exit`: end the session and wait for its row to close.
@@ -379,6 +419,15 @@ impl Dispatcher {
         if let Err(e) = session::close_process(&self.store, &process_id, reason, code_i32) {
             tracing::error!(error = %e, "closing a session row failed");
         }
+        // However the row ended — a self-exit, the deadline, or Quit — the
+        // runtime's per-session files go with it (§5.1).
+        let runtime = match &live {
+            Some(live) => live.runtime.clone(),
+            None => desk::get(&self.store, desk_id)
+                .map(|d| d.selected_runtime)
+                .unwrap_or_default(),
+        };
+        self.adapters.get(&runtime).closed(desk_id);
         let Some(live) = live else { return };
         if live.ready {
             // A ready session ending leaves its queue alone: the next pass
@@ -410,6 +459,16 @@ impl Dispatcher {
     }
 
     async fn event(&self, event: AdapterEvent) {
+        // The spawn is still in flight: hold it until the row exists (§6.1).
+        if let Some(buffer) = self
+            .activating
+            .lock()
+            .expect("activating")
+            .get_mut(event.desk_id())
+        {
+            buffer.push(event);
+            return;
+        }
         match event {
             AdapterEvent::Ready { desk_id } => {
                 if let Some(live) = self.live.lock().expect("live").get_mut(&desk_id) {

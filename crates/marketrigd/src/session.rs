@@ -392,12 +392,26 @@ pub fn hook(
     let runtime = desk.selected_runtime.clone();
 
     // `clear` is the one transition that moves the pointer instead of being
-    // judged against it.
+    // judged against it: the payload carries the *new* `session_id` and names
+    // no prior one, so the desk's own live Claude process row is the only
+    // evidence that this clear is ours. Anything else is a foreign session.
     if name == "SessionStart" && source == Some("clear") {
-        if let Some(id) = session_id {
-            repoint(store, &desk.id, &runtime, Some(id), "clear")?;
-        }
-        return Ok(Hook::Accepted);
+        let ours = runtime == "claude"
+            && live_process(store, &desk.id)?.is_some_and(|p| p.runtime == "claude");
+        return match (ours, session_id) {
+            (true, Some(id)) => {
+                repoint(store, &desk.id, &runtime, Some(id), "clear")?;
+                Ok(Hook::Accepted)
+            }
+            _ => {
+                attention(
+                    store,
+                    &desk.id,
+                    json!({ "kind": "foreign_session", "session_id": session_id }),
+                )?;
+                Ok(Hook::Accepted)
+            }
+        };
     }
 
     let pointer: Option<String> = {
@@ -592,7 +606,28 @@ fn hook_ingress_records_the_documented_rows() {
     assert_eq!(events()[0].0, "SESSION_ATTENTION");
     assert!(events()[0].1.contains("foreign_session"));
 
-    // `clear` moves the pointer whatever it was.
+    // A `clear` with no live Claude process of ours is another session's, and
+    // never repoints this desk (§5.2).
+    post(r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"s-9"}"#);
+    assert_eq!(pointers(&store, "d1").unwrap(), json!({}));
+    assert_eq!(events().pop().unwrap().0, "SESSION_ATTENTION");
+    assert!(events().pop().unwrap().1.contains("foreign_session"));
+
+    // With this desk's Claude session live, `clear` moves the pointer whatever
+    // it was.
+    open_process(
+        &store,
+        "d1",
+        "claude",
+        &Activation {
+            pid: 1,
+            native_session_id: None,
+        },
+        "daemon",
+        "NEW",
+        |_, _| Ok(()),
+    )
+    .unwrap();
     post(r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"s-2"}"#);
     assert_eq!(pointers(&store, "d1").unwrap(), json!({ "claude": "s-2" }));
     let changed = events().pop().unwrap();
@@ -683,6 +718,19 @@ pub enum AdapterEvent {
     },
 }
 
+impl AdapterEvent {
+    /// The desk every variant carries, so the dispatcher can hold an event for
+    /// a desk whose row is still being opened (§6.1).
+    pub fn desk_id(&self) -> &str {
+        match self {
+            AdapterEvent::Ready { desk_id }
+            | AdapterEvent::PointerDiscovered { desk_id, .. }
+            | AdapterEvent::Attention { desk_id, .. }
+            | AdapterEvent::Exited { desk_id, .. } => desk_id,
+        }
+    }
+}
+
 /// The channel every adapter reports on, held by the dispatcher.
 pub type AdapterEvents = tokio::sync::mpsc::UnboundedSender<AdapterEvent>;
 
@@ -720,4 +768,34 @@ pub trait Adapter: Send + Sync {
 
     /// Ends the session's process tree; the `Exited` event follows.
     async fn exit(&self, desk_id: &str);
+
+    /// The dispatcher has finished the spawn — the process row exists, or the
+    /// spawn failed and none will (§6.1). Claude closes its spawn-in-flight
+    /// window here.
+    fn settled(&self, _desk_id: &str) {}
+
+    /// The desk's process row has closed, however it ended (§6.2). Claude
+    /// deletes the launch files here.
+    fn closed(&self, _desk_id: &str) {}
+
+    /// `POST /runtimes/{r}/retry` cleared the row's failure; the adapter drops
+    /// whatever failure state of its own it was counting (§4.1).
+    fn reset_failures(&self) {}
+}
+
+/// §4.2's launch environment, shared by both adapters: the captured login
+/// `PATH`, `TERM`, the desk id, and the daemon's `HOME` and locale. Secrets are
+/// each adapter's own to add.
+pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("PATH".to_string(), search_path.to_string()),
+        ("TERM".to_string(), "xterm-256color".to_string()),
+        ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
+    ];
+    for (key, value) in std::env::vars() {
+        if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
+            env.push((key, value));
+        }
+    }
+    env
 }

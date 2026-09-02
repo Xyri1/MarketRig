@@ -59,6 +59,7 @@ fn rig_with(deadline: Duration) -> Rig {
         daemon_uuid: DAEMON.to_string(),
         notify: Arc::new(Notify::new()),
         live: Mutex::new(HashMap::new()),
+        activating: Mutex::new(HashMap::new()),
         ready_deadline: deadline,
         poll: POLL,
     });
@@ -437,6 +438,24 @@ async fn a_discovered_pointer_reaches_the_row_and_the_desk() {
     // The fake already named the row, so the discovery never overwrites it.
     let process = session::live_process(&rig.store, "d1").unwrap().unwrap();
     assert_eq!(process.native_session_id.as_deref(), Some("native-d1"));
+}
+
+/// §6.1: a child that reports itself before the dispatcher has opened its row
+/// is held, not dropped — readiness still lands.
+#[tokio::test]
+async fn readiness_inside_the_spawn_still_marks_the_row_ready() {
+    let mut rig = rig();
+    *rig.codex.ready_inside_spawn.lock().unwrap() = Some(Arc::downgrade(&rig.dispatcher));
+    rig.queue("d1", 100);
+    rig.tick().await;
+    let process = session::live_process(&rig.store, "d1").unwrap().unwrap();
+    assert!(process.ready_at_ns.is_some(), "the early Ready was kept");
+    assert!(
+        rig.events_of("d1")
+            .iter()
+            .any(|(kind, _)| kind == "SESSION_READY"),
+        "SESSION_READY lands"
+    );
 }
 
 #[tokio::test]

@@ -103,6 +103,7 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             search_path.clone(),
             mcp_path,
             test_data_root,
+            startup.daemon_uuid.clone(),
         );
         let dispatcher = dispatch::Dispatcher::new(
             startup.store.clone(),
