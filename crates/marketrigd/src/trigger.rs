@@ -319,11 +319,18 @@ fn compact(value: Value) -> Value {
     }
 }
 
-const TRIGGER_SELECT: &str = "SELECT t.id, t.desk_id, t.name, t.recurrence, t.brief, t.context, \
-     t.at_ns, t.rrule, t.dtstart, t.tz, t.enabled, t.revision, t.next_occurrence_ns, \
-     t.created_at_ns, t.updated_at_ns, t.deleted_at_ns, c.id, c.source, c.suffix, c.argv, \
-     c.timeout_secs, c.fingerprint, c.approved_at_ns \
-     FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id";
+/// The Trigger columns; the source text itself is selected only for the single
+/// read, so a listing never materializes every snapshot.
+fn trigger_select(with_source: bool) -> String {
+    format!(
+        "SELECT t.id, t.desk_id, t.name, t.recurrence, t.brief, t.context, \
+         t.at_ns, t.rrule, t.dtstart, t.tz, t.enabled, t.revision, t.next_occurrence_ns, \
+         t.created_at_ns, t.updated_at_ns, t.deleted_at_ns, c.id, {}, c.suffix, c.argv, \
+         c.timeout_secs, c.fingerprint, c.approved_at_ns, length(CAST(c.source AS BLOB)) \
+         FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id",
+        if with_source { "c.source" } else { "NULL" }
+    )
+}
 
 /// The §8 Trigger. `with_source` is the single read; the listing reports the
 /// snapshot's size instead (§4.1).
@@ -338,7 +345,7 @@ fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
     let code = match r.get::<_, Option<String>>(16)? {
         None => Value::Null,
         Some(snapshot_id) => {
-            let source: String = r.get(17)?;
+            let source: Option<String> = r.get(17)?;
             let argv: String = r.get(19)?;
             json!({
                 "snapshot_id": snapshot_id,
@@ -347,8 +354,8 @@ fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
                 "timeout_secs": r.get::<_, i64>(20)?,
                 "fingerprint": r.get::<_, String>(21)?,
                 "approved_at_ns": r.get::<_, Option<i64>>(22)?,
-                "source_bytes": source.len(),
-                "source": with_source.then_some(source),
+                "source_bytes": r.get::<_, i64>(23)?,
+                "source": with_source.then_some(source).flatten(),
             })
         }
     };
@@ -379,18 +386,33 @@ fn read_trigger(
     with_source: bool,
 ) -> rusqlite::Result<Option<Value>> {
     conn.query_row(
-        &format!("{TRIGGER_SELECT} WHERE t.desk_id = ?1 AND t.id = ?2"),
+        &format!(
+            "{} WHERE t.desk_id = ?1 AND t.id = ?2",
+            trigger_select(with_source)
+        ),
         params![desk_id, trigger_id],
         |r| trigger_resource(r, with_source),
     )
     .optional()
 }
 
-const FIRING_SELECT: &str = "SELECT f.id, f.desk_id, f.trigger_id, f.occurrence_ns, \
-     f.accepted_at_ns, f.trigger_revision, f.brief, f.context, f.code_snapshot_id, \
-     e.state, e.daemon_uuid, e.outcome, e.exit_code, e.error, e.executable, e.stdout, e.stderr, \
-     e.stdout_truncated, e.stderr_truncated, e.started_at_ns, e.finished_at_ns \
-     FROM firings f LEFT JOIN executions e ON e.firing_id = f.id";
+/// The Firing columns; the captured streams are selected only for the single
+/// read, so a listing never materializes every execution's output.
+fn firing_select(with_streams: bool) -> String {
+    format!(
+        "SELECT f.id, f.desk_id, f.trigger_id, f.occurrence_ns, \
+         f.accepted_at_ns, f.trigger_revision, f.brief, f.context, f.code_snapshot_id, \
+         e.state, e.daemon_uuid, e.outcome, e.exit_code, e.error, e.executable, {}, \
+         e.stdout_truncated, e.stderr_truncated, e.started_at_ns, e.finished_at_ns, \
+         length(e.stdout), length(e.stderr) \
+         FROM firings f LEFT JOIN executions e ON e.firing_id = f.id",
+        if with_streams {
+            "e.stdout, e.stderr"
+        } else {
+            "NULL, NULL"
+        }
+    )
+}
 
 /// The §8 Firing. `with_streams` is the single read; the per-trigger listing
 /// carries the same execution object without `stdout` and `stderr`.
@@ -400,8 +422,11 @@ fn firing_resource(r: &Row<'_>, with_streams: bool) -> rusqlite::Result<Value> {
         Some(state) => {
             // The captured bytes, exactly as produced (per R2-5); JSON carries
             // them lossily with the true byte counts beside them.
-            let stdout: Vec<u8> = r.get::<_, Option<Vec<u8>>>(15)?.unwrap_or_default();
-            let stderr: Vec<u8> = r.get::<_, Option<Vec<u8>>>(16)?.unwrap_or_default();
+            let stdout: Option<Vec<u8>> = r.get(15)?;
+            let stderr: Option<Vec<u8>> = r.get(16)?;
+            let lossy = |bytes: Option<Vec<u8>>| {
+                String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned()
+            };
             json!({
                 "state": state,
                 "daemon_uuid": r.get::<_, String>(10)?,
@@ -409,10 +434,10 @@ fn firing_resource(r: &Row<'_>, with_streams: bool) -> rusqlite::Result<Value> {
                 "exit_code": r.get::<_, Option<i64>>(12)?,
                 "error": r.get::<_, Option<String>>(13)?,
                 "executable": r.get::<_, Option<String>>(14)?,
-                "stdout": with_streams.then(|| String::from_utf8_lossy(&stdout).into_owned()),
-                "stderr": with_streams.then(|| String::from_utf8_lossy(&stderr).into_owned()),
-                "stdout_bytes": stdout.len(),
-                "stderr_bytes": stderr.len(),
+                "stdout": with_streams.then(|| lossy(stdout)),
+                "stderr": with_streams.then(|| lossy(stderr)),
+                "stdout_bytes": r.get::<_, Option<i64>>(21)?.unwrap_or(0),
+                "stderr_bytes": r.get::<_, Option<i64>>(22)?.unwrap_or(0),
                 "stdout_truncated": r.get::<_, Option<i64>>(17)?.map(|v| v == 1),
                 "stderr_truncated": r.get::<_, Option<i64>>(18)?.map(|v| v == 1),
                 "started_at_ns": r.get::<_, i64>(19)?,
@@ -529,6 +554,9 @@ pub fn create(
 
     let id = Uuid::now_v7().to_string();
     let (read_id, desk_owned, taken) = (id.clone(), desk_id.to_string(), name.clone());
+    // Projected before the unit: the candidate scan (§2) never holds the write
+    // transaction on the create path.
+    let next = schedule.next_after(now_ns);
     let created = store.unit(move |tx| {
         let snapshot_id = match &code {
             None => None,
@@ -552,7 +580,7 @@ pub fn create(
                 dtstart,
                 tz,
                 snapshot_id,
-                schedule.next_after(now_ns),
+                next,
                 now_ns,
             ],
         )?;
@@ -578,8 +606,9 @@ pub fn list(store: &Store, desk_id: &str) -> Result<Vec<Value>, TriggerError> {
     let desk = desk_id.to_string();
     Ok(store.call(move |conn| {
         conn.prepare(&format!(
-            "{TRIGGER_SELECT} WHERE t.desk_id = ?1 AND t.deleted_at_ns IS NULL \
-             ORDER BY t.created_at_ns, t.id"
+            "{} WHERE t.desk_id = ?1 AND t.deleted_at_ns IS NULL \
+             ORDER BY t.created_at_ns, t.id",
+            trigger_select(false)
         ))?
         .query_map(params![desk], |r| trigger_resource(r, false))?
         .collect()
@@ -695,6 +724,9 @@ pub fn patch(
             let (at_ns, rrule, dtstart, tz) = schedule_columns(&schedule);
             // Disabled is never due; otherwise the projection is recomputed from
             // the definition's own anchor against now (§2).
+            // ponytail: the scan runs inside the unit because the row's schedule
+            // is read here; it is bounded at 100,000 candidates (R2-1's ceiling,
+            // a persisted cursor is the upgrade).
             let next = enabled.then(|| schedule.next_after(now_ns)).flatten();
             tx.execute(
                 "UPDATE triggers SET brief = ?3, context = ?4, recurrence = ?5, at_ns = ?6, \
@@ -772,8 +804,9 @@ pub fn firings(store: &Store, desk_id: &str, trigger_id: &str) -> Result<Vec<Val
             }
             let firings = conn
                 .prepare(&format!(
-                    "{FIRING_SELECT} WHERE f.desk_id = ?1 AND f.trigger_id = ?2 \
-                     ORDER BY f.accepted_at_ns DESC, f.id DESC"
+                    "{} WHERE f.desk_id = ?1 AND f.trigger_id = ?2 \
+                     ORDER BY f.accepted_at_ns DESC, f.id DESC",
+                    firing_select(false)
                 ))?
                 .query_map(params![desk, id], |r| firing_resource(r, false))?
                 .collect::<rusqlite::Result<Vec<Value>>>()?;
@@ -790,7 +823,7 @@ pub fn firing(store: &Store, desk_id: &str, firing_id: &str) -> Result<Value, Tr
     store
         .call(move |conn| {
             conn.query_row(
-                &format!("{FIRING_SELECT} WHERE f.desk_id = ?1 AND f.id = ?2"),
+                &format!("{} WHERE f.desk_id = ?1 AND f.id = ?2", firing_select(true)),
                 params![desk, id],
                 |r| firing_resource(r, true),
             )

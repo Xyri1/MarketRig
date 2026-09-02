@@ -454,7 +454,12 @@ pub async fn run(
             Ok(pass) => pass,
             Err(e) => {
                 tracing::error!("scheduler pass failed: {e}");
-                continue;
+                // A failing unit backs off one full recheck instead of spinning
+                // on a projection that stays due.
+                tokio::select! {
+                    () = tokio::time::sleep(RECHECK) => continue,
+                    _ = shutdown.changed() => return,
+                }
             }
         };
         if pass.accepted.iter().any(|a| a.has_code) {

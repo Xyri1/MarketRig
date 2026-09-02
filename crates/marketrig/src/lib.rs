@@ -311,6 +311,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                     endpoint.get(&format!("{triggers}/{id}/firings"))
                 }
                 TriggerCommand::Firing { firing, .. } => {
+                    let firing = id_only("firing", firing)?;
                     endpoint.get(&format!("/desks/{desk}/firings/{firing}"))
                 }
             }
@@ -321,6 +322,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             match command {
                 PromptCommand::List { .. } => endpoint.get(&format!("/desks/{desk}/prompts")),
                 PromptCommand::Show { prompt, .. } => {
+                    let prompt = id_only("prompt", prompt)?;
                     endpoint.get(&format!("/desks/{desk}/prompts/{prompt}"))
                 }
             }
@@ -439,6 +441,24 @@ fn code_json(code: &CodeArgs) -> Option<Value> {
     Some(Value::Object(snapshot))
 }
 
+fn is_canonical_uuid(token: &str) -> bool {
+    uuid::Uuid::try_parse(token).is_ok_and(|u| u.hyphenated().to_string() == token)
+}
+
+/// An id-only argument (firings and prompts have no name): a canonical
+/// lowercase UUID reaches the route as is; anything else is the client-side
+/// not-found, never a path segment.
+fn id_only(noun: &str, token: &str) -> Result<String, Fault> {
+    if is_canonical_uuid(token) {
+        Ok(token.to_string())
+    } else {
+        Err(Fault::reported(
+            format!("{}_NOT_FOUND", noun.to_uppercase()),
+            format!("No {noun} has the id {token}."),
+        ))
+    }
+}
+
 /// A usage error the parser cannot state itself, surfaced the way clap
 /// surfaces its own and exiting `2` (feature SPEC §8).
 fn usage(message: impl std::fmt::Display) -> ! {
@@ -452,7 +472,7 @@ fn usage(message: impl std::fmt::Display) -> ! {
 /// other way (R0 §8, R2 §9). `noun` names both the listing key (`{noun}s`) and
 /// the `{NOUN}_NOT_FOUND` code the CLI reports client-side.
 fn resolve(endpoint: &Endpoint, route: &str, noun: &str, token: &str) -> Result<String, Fault> {
-    if uuid::Uuid::try_parse(token).is_ok_and(|u| u.hyphenated().to_string() == token) {
+    if is_canonical_uuid(token) {
         return Ok(token.to_string());
     }
     let body = endpoint.get(route)?;

@@ -59,10 +59,6 @@ pub fn spawn(command: Command) -> io::Result<Contained> {
 }
 
 impl Contained {
-    pub fn id(&self) -> Option<u32> {
-        self.child.id()
-    }
-
     pub fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.child.stdin().take()
     }
@@ -213,7 +209,7 @@ pub async fn execute(
         tracing::error!(error = %e, "persisting an execution outcome failed");
     }
     // Step 7's tail: the script is scratch, and a leftover is harmless.
-    let _ = std::fs::remove_file(&script);
+    let _ = tokio::fs::remove_file(&script).await;
 }
 
 /// Steps 1–6: write the script, spawn contained, feed the document, capture the
@@ -224,10 +220,14 @@ async fn attempt(
     firing: &FiringRow,
     mut quit: watch::Receiver<bool>,
 ) -> Finish {
-    let executable = plan.argv[0].clone();
+    // A well-formed snapshot never has an empty argv (§4.1); a corrupt row must
+    // still end in one completion unit rather than a wedged desk queue.
+    let Some(executable) = plan.argv.first().cloned() else {
+        return Finish::spawn_failed("", "the snapshot's argv is empty".to_string());
+    };
 
     // 1. the source, beside the runtime files and never in the workspace.
-    if let Err(e) = write_script(script, &plan.source) {
+    if let Err(e) = write_script(script, &plan.source).await {
         return Finish::spawn_failed(&executable, e.to_string());
     }
 
@@ -358,15 +358,15 @@ fn document(plan: &Plan, firing: &FiringRow) -> Value {
     })
 }
 
-fn write_script(script: &Path, source: &str) -> io::Result<()> {
+async fn write_script(script: &Path, source: &str) -> io::Result<()> {
     if let Some(parent) = script.parent() {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
-    std::fs::write(script, source.as_bytes())?;
+    tokio::fs::write(script, source.as_bytes()).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700))?;
+        tokio::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).await?;
     }
     Ok(())
 }
@@ -469,7 +469,7 @@ fn plan(store: &Store, firing: &FiringRow) -> Result<Plan, StoreError> {
                             Box::new(e),
                         )
                     })?,
-                    timeout_secs: r.get::<_, i64>(3)?.max(1) as u64,
+                    timeout_secs: r.get::<_, i64>(3)?.clamp(1, 3600) as u64,
                     trigger_name: r.get(4)?,
                     recurrence: r.get(5)?,
                     desk_name: r.get(6)?,
@@ -616,7 +616,7 @@ pub fn recovery_step(
             params![dead, now_ns, firing_id],
         )?;
         let firing =
-            load_firing(tx, &desk_id, &firing_id)?.expect("an execution row references its firing");
+            load_firing(tx, &desk_id, &firing_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
         let trigger_name: String = tx.query_row(
             "SELECT name FROM triggers WHERE id = ?1",
             params![firing.trigger_id],
