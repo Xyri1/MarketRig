@@ -18,7 +18,7 @@ anyhow = "=1.0.104"
 # The `nautilus-*` client traits are `#[async_trait(?Send)]`, so implementing
 # one needs the same macro; pinned at the line the nautilus graph resolves.
 async-trait = "=0.1.92"
-axum = "=0.8.9"
+axum = { version = "=0.8.9", features = ["ws"] }
 chrono = "=0.4.45"
 chrono-tz = "=0.10.4"
 clap = { version = "=4.6.6", features = ["derive"] }
@@ -35,6 +35,8 @@ nautilus-execution = { version = "=0.62.0", default-features = false }
 nautilus-live = { version = "=0.62.0", default-features = false, features = ["node"] }
 nautilus-model = { version = "=0.62.0", default-features = false }
 nautilus-sandbox = { version = "=0.62.0", default-features = false }
+# The PTY pair behind the terminal manager (per D31, R3-2); ConPTY on Windows.
+portable-pty = { version = "=0.9.0", default-features = false }
 # The one spawn-and-terminate primitive for every managed child (per D73, R2-3):
 # a `setsid` session on macOS, a Job Object on Windows. Already in the graph
 # under `rmcp =3.2.0`; MarketRig names only the wrappers it uses.
@@ -69,6 +71,9 @@ tokio = { version = "=1.53.1", features = [
     "time",
     "process",
 ] }
+# The daemon's app-server client and the bridge's channel client; the line
+# axum's `ws` feature resolves, so one copy. Loopback only, so no TLS.
+tokio-tungstenite = { version = "=0.29.0", default-features = false, features = ["connect"] }
 tracing = "=0.1.44"
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["json"] }

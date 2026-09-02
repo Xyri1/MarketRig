@@ -36,6 +36,9 @@ pub struct ApiState {
     pub registry: Arc<crate::node::Registry>,
     /// Wakes the scheduler after a trigger mutation (R2 feature SPEC §3.1).
     pub scheduler_wake: Arc<tokio::sync::Notify>,
+    /// The `PATH` runtime discovery searches, captured once at daemon start
+    /// (R3 feature SPEC §2).
+    pub search_path: String,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -76,11 +79,35 @@ pub fn router(state: ApiState) -> Router {
             get(trigger_firings),
         )
         .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
+        .route("/desks/{desk_id}/session", get(session))
+        .route("/desks/{desk_id}/session/hook", post(session_hook))
+        .route("/runtimes", get(runtimes))
+        .route("/runtimes/{runtime}/discover", post(runtime_discover))
+        .route("/runtimes/{runtime}/retry", post(runtime_retry))
         .route("/desks/{desk_id}/prompts", get(list_prompts))
         .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
+}
+
+/// A JSON request body's content type, checked only after the body has been
+/// consumed — answering with bytes still unread makes the close a reset, which
+/// Windows reports to the client in place of the envelope.
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .is_some_and(|m| {
+            m == "application/json" || (m.starts_with("application/") && m.ends_with("+json"))
+        })
 }
 
 /// The one error envelope (§6, per R0-5): a stable SCREAMING_SNAKE code and an
@@ -189,6 +216,9 @@ async fn list(State(state): State<Arc<ApiState>>) -> Result<Json<serde_json::Val
 #[derive(Deserialize)]
 struct NewDesk {
     name: String,
+    /// The runtime the desk activates on; `codex` by omission (R3 §7).
+    #[serde(default)]
+    runtime: Option<String>,
 }
 
 async fn create(
@@ -199,19 +229,7 @@ async fn create(
     // The body is consumed before any refusal: answering with bytes still
     // unread makes the close a reset, which Windows reports to the client in
     // place of the envelope.
-    let json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| {
-            v.split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase()
-        })
-        .is_some_and(|m| {
-            m == "application/json" || (m.starts_with("application/") && m.ends_with("+json"))
-        });
+    let json = is_json(&headers);
     // ponytail: an unusable body reuses DESK_NAME_INVALID because R0's only
     // request body is a desk name and §6 documents no generic bad-request code.
     // The first non-name POST body needs its own code, added by decision.
@@ -227,7 +245,20 @@ async fn create(
     };
     // Creation is synchronous (§7.2): the row exists either way, so a bootstrap
     // failure is a 201 FAILED desk, not an envelope.
-    let desk = desk::create(&state.store, &state.desks_home, &body.name)?;
+    let selected_runtime = body.runtime.as_deref().unwrap_or("codex");
+    if !crate::runtime::known(selected_runtime) {
+        return Ok(envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            format!("Unknown runtime {selected_runtime:?}; MarketRig knows codex and claude."),
+        ));
+    }
+    let desk = desk::create(
+        &state.store,
+        &state.desks_home,
+        &body.name,
+        selected_runtime,
+    )?;
     Ok((StatusCode::CREATED, Json(desk)).into_response())
 }
 
@@ -235,7 +266,128 @@ async fn show(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
 ) -> Result<Json<Desk>, DeskError> {
-    Ok(Json(desk::get(&state.store, &desk_id)?))
+    let mut desk = desk::get(&state.store, &desk_id)?;
+    desk.native_sessions = Some(crate::session::pointers(&state.store, &desk.id)?);
+    Ok(Json(desk))
+}
+
+// The R3 session and runtime surface (R3 feature SPEC §5.2, §7). The lifecycle
+// controls — activate, interrupt, exit, switch — arrive with the dispatcher.
+
+async fn session(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    let desk = desk::get(&state.store, &desk_id)?;
+    let process = crate::session::live_process(&state.store, &desk.id)?;
+    Ok(Json(serde_json::json!({ "process": process })))
+}
+
+/// Claude Code's hook ingress (§5.2). Well-formed objects are always `202`;
+/// only an unparseable body is refused, and the CLI swallows that too.
+async fn session_hook(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, DeskError> {
+    if !is_json(&headers) {
+        return Ok(envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            "The hook body must be a JSON object.".to_string(),
+        ));
+    }
+    Ok(match crate::session::hook(&state.store, &desk_id, &body)? {
+        crate::session::Hook::Accepted => {
+            (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
+        }
+        crate::session::Hook::Unparseable => envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            "The hook body must be a JSON object.".to_string(),
+        ),
+    })
+}
+
+async fn runtimes(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    let runtimes = crate::runtime::rows(&state.store)?;
+    Ok(Json(serde_json::json!({ "runtimes": runtimes })))
+}
+
+#[derive(Deserialize)]
+struct DiscoverRequest {
+    executable: Option<PathBuf>,
+}
+
+async fn runtime_discover(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, DeskError> {
+    if !crate::runtime::known(&name) {
+        return Ok(unknown_runtime(&name));
+    }
+    // The body is optional; when one is sent it must be a JSON object.
+    let request = if body.trim().is_empty() {
+        DiscoverRequest { executable: None }
+    } else {
+        match is_json(&headers)
+            .then(|| serde_json::from_str::<DiscoverRequest>(&body).ok())
+            .flatten()
+        {
+            Some(request) => request,
+            None => {
+                return Ok(envelope(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION",
+                    r#"The request body must be a JSON object with an optional "executable" path."#
+                        .to_string(),
+                ));
+            }
+        }
+    };
+    if let Some(executable) = &request.executable
+        && !executable.is_absolute()
+    {
+        return Ok(envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            format!(
+                "The executable path {} must be absolute.",
+                executable.display()
+            ),
+        ));
+    }
+    let row = crate::runtime::discover(
+        &state.store,
+        &name,
+        request.executable.as_deref(),
+        &state.search_path,
+    )?;
+    Ok(Json(row).into_response())
+}
+
+async fn runtime_retry(
+    State(state): State<Arc<ApiState>>,
+    Path(name): Path<String>,
+) -> Result<Response, DeskError> {
+    if !crate::runtime::known(&name) {
+        return Ok(unknown_runtime(&name));
+    }
+    let row = crate::runtime::retry(&state.store, &name, &state.search_path)?;
+    Ok(Json(row).into_response())
+}
+
+fn unknown_runtime(name: &str) -> Response {
+    envelope(
+        StatusCode::NOT_FOUND,
+        "RUNTIME_NOT_FOUND",
+        format!("No runtime is named {name:?}; MarketRig knows codex and claude."),
+    )
 }
 
 async fn retry(
@@ -548,6 +700,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         feed_base,
     ));
     let state = ApiState {
+        search_path: String::new(),
         store: store.clone(),
         desks_home: desks_home.clone(),
         daemon_uuid: DAEMON_UUID.to_string(),
@@ -679,9 +832,13 @@ async fn envelope_stability() {
     assert_eq!(status, 200);
     assert_eq!(json(&body)["desks"], serde_json::json!([alpha]));
 
+    // The single read adds the desk's native-session pointers (R3 §7); the
+    // listing does not.
     let (status, body) = call_get(url(&format!("/desks/{alpha_id}")), ok);
     assert_eq!(status, 200);
-    assert_eq!(json(&body), alpha);
+    let mut with_pointers = alpha.clone();
+    with_pointers["native_sessions"] = serde_json::json!({});
+    assert_eq!(json(&body), with_pointers);
 
     // A planted file obstructs the workspace: creation answers 201 with the
     // FAILED desk (the row exists), and retry recovers it on the same identity.

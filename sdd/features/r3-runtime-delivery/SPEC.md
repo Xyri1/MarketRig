@@ -11,7 +11,7 @@
 
 ## 2. Runtime discovery (R3-1)
 
-`runtimes` starts with two `UNDISCOVERED` rows. Discovery is one function `discover(runtime, explicit: Option<PathBuf>) -> Outcome`, run by startup step 6a (after desks complete, before binding) for every `UNDISCOVERED` row, and by `POST /runtimes/{runtime}/discover` and `/retry`.
+`runtimes` starts with two `UNDISCOVERED` rows. Discovery is one function `discover(runtime, explicit: Option<PathBuf>) -> Outcome`, run by startup step 6a (after desks complete, before binding) for every `UNDISCOVERED` row, and by `POST /runtimes/{runtime}/discover` and `/retry`. Startup step 6a is skipped under `MARKETRIG_TEST_DATA_ROOT` (root §17): the gate registers its own stand-in explicitly and must never see the operator's real installations.
 
 Resolution without an explicit path:
 
@@ -160,7 +160,7 @@ Scenarios:
 | `POST /runtimes/{r}/discover` | `{"executable"?: path}` | `200 {row}` whichever state results |
 | `POST /runtimes/{r}/retry` | — | `200 {row}` |
 
-`POST /desks` gains optional `"runtime"` (default `codex`); `GET /desks/{d}` reports `selected_runtime` and `native_sessions`. `exit` and `switch` wait up to 5 s for the process row to close before answering; a process that survives termination that long answers `502 RUNTIME_ERROR` with the row still open and the shutdown continuing. Quit closes every open row `QUIT`.
+`POST /desks` gains optional `"runtime"` (default `codex`); an unknown value is `400 VALIDATION`. `GET /desks/{d}` reports `selected_runtime` and `native_sessions` (an object keyed by runtime, `{}` when there is no pointer). A `{runtime}` segment naming neither runtime is `404 RUNTIME_NOT_FOUND`. `exit` and `switch` wait up to 5 s for the process row to close before answering; a process that survives termination that long answers `502 RUNTIME_ERROR` with the row still open and the shutdown continuing. Quit closes every open row `QUIT`.
 
 Scenarios:
 
@@ -210,6 +210,8 @@ CREATE INDEX prompts_queue ON prompts (desk_id, created_at_ns) WHERE state = 'QU
 
 -- operational_events rebuilt with the R3 kinds (R3-7)
 ```
+
+Migration 4's `prompts` rebuild carries every row: migration 3's only `state` was `QUEUED`, which is the new vocabulary's `QUEUED` unchanged, and the attempt columns arrive `NULL`.
 
 Recovery step `sessions` (registered after `executions`): open `agent_processes` of another `daemon_uuid` → `ended_at_ns = now`, `exit_reason = 'DAEMON_LOST'`, one `SESSION_EXITED` each; prompts with `attempted_at_ns NOT NULL AND state = 'QUEUED'` → `FAILED HANDOFF_UNKNOWN`; both lists in the recovery event (`sessions_lost`, `prompts_unknown`). Launch directories under `runtime/launch/` are removed at startup regardless.
 

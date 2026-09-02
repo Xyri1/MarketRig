@@ -933,7 +933,7 @@ fn result_prompt_payload() {
     store
         .unit(|tx| {
             tx.execute(
-                "INSERT INTO desks VALUES ('d1','alpha','READY','/desks/alpha',1,2,NULL,NULL)",
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('d1','alpha','READY','/desks/alpha',1,2,NULL,NULL)",
                 [],
             )?;
             tx.execute(

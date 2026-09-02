@@ -6,7 +6,9 @@ pub mod exec;
 pub mod feed;
 pub mod log;
 pub mod node;
+pub mod runtime;
 pub mod schedule;
+pub mod session;
 pub mod store;
 pub mod trade;
 pub mod trigger;
@@ -88,6 +90,7 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             quit: quit_tx,
             registry: registry.clone(),
             scheduler_wake: scheduler_wake.clone(),
+            search_path: runtime::search_path(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(

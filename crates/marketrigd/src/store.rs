@@ -120,6 +120,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/001_r0.sql"),
     include_str!("store/002_r1.sql"),
     include_str!("store/003_r2.sql"),
+    include_str!("store/004_r3.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -310,7 +311,10 @@ fn migrations_apply_and_stamp() {
             })
             .unwrap()
     };
-    assert_eq!(pragmas(&store), (3, "wal".to_string(), 1));
+    assert_eq!(
+        pragmas(&store),
+        (MIGRATIONS.len() as i64, "wal".to_string(), 1)
+    );
 
     let tables = store
         .call(|c| {
@@ -325,17 +329,20 @@ fn migrations_apply_and_stamp() {
     assert_eq!(
         tables,
         [
+            "agent_processes",
             "book_snapshots",
             "code_snapshots",
             "desks",
             "executions",
             "fills",
             "firings",
+            "native_sessions",
             "operational_events",
             "order_events",
             "position_cycles",
             "position_events",
             "prompts",
+            "runtimes",
             "trading_actions",
             "triggers",
         ]
@@ -357,7 +364,10 @@ fn migrations_apply_and_stamp() {
     // Reopening an up-to-date database applies nothing and keeps the stamp.
     drop(store);
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
-    assert_eq!(pragmas(&store), (3, "wal".to_string(), 1));
+    assert_eq!(
+        pragmas(&store),
+        (MIGRATIONS.len() as i64, "wal".to_string(), 1)
+    );
 }
 
 #[cfg(test)]
@@ -399,8 +409,8 @@ fn trading_migration_applies() {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(MIGRATIONS[0]).unwrap();
         conn.execute_batch(
-            "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
-             INSERT INTO desks VALUES ('019a','beta','CREATING','/desks/beta',1000,NULL,NULL,NULL);
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
+             INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('019a','beta','CREATING','/desks/beta',1000,NULL,NULL,NULL);
              INSERT INTO operational_events VALUES ('01a0','RECOVERY',NULL,1500,'{\"a\":1}');",
         )
         .unwrap();
@@ -482,7 +492,7 @@ fn trigger_migration_applies() {
         store
             .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
             .unwrap(),
-        3
+        MIGRATIONS.len() as i64
     );
     for name in ["code_snapshots", "triggers", "firings", "executions"] {
         let strict = store
@@ -519,7 +529,7 @@ fn trigger_migration_applies() {
     store
         .unit(|tx| {
             tx.execute(
-                "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1,2,NULL,NULL)",
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('0199','alpha','READY','/desks/alpha',1,2,NULL,NULL)",
                 [],
             )?;
             for (id, deleted) in [("t1", "9"), ("t2", "NULL")] {
@@ -533,7 +543,7 @@ fn trigger_migration_applies() {
                 )?;
             }
             tx.execute(
-                "INSERT INTO prompts VALUES ('p1','0199','TRIGGER_RESULT','QUEUED','{}',1)",
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) VALUES ('p1','0199','TRIGGER_RESULT','QUEUED','{}',1)",
                 [],
             )?;
             tx.execute(
@@ -564,7 +574,7 @@ fn trigger_migration_applies() {
         conn.execute_batch(MIGRATIONS[0]).unwrap();
         conn.execute_batch(MIGRATIONS[1]).unwrap();
         conn.execute_batch(
-            "INSERT INTO desks VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('0199','alpha','READY','/desks/alpha',1000,2000,NULL,NULL);
              INSERT INTO prompts VALUES ('p0','0199','EVALUATION','QUEUED','{\"a\":1}',1100);
              INSERT INTO trading_actions VALUES \
                ('0199','buy-1','a0','SUBMIT','SESSION','{\"q\":1}','{\"o\":2}',1200);
@@ -579,7 +589,7 @@ fn trigger_migration_applies() {
         store
             .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
             .unwrap(),
-        3
+        MIGRATIONS.len() as i64
     );
     let prompt: (String, String, String) = store
         .call(|c| {
@@ -656,19 +666,19 @@ fn desk_row_checks() {
 
     // CREATING: no ready_at_ns, no failure.
     insert(
-        "INSERT INTO desks VALUES \
+        "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES \
          ('0199','alpha','CREATING','/desks/alpha',1000,NULL,NULL,NULL)",
     )
     .expect("valid CREATING row");
     // READY carries ready_at_ns.
     insert(
-        "INSERT INTO desks VALUES \
+        "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES \
          ('019a','beta','READY','/desks/beta',1000,2000,NULL,NULL)",
     )
     .expect("valid READY row");
     // FAILED carries a failure code and no ready_at_ns.
     insert(
-        "INSERT INTO desks VALUES \
+        "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES \
          ('019b','gamma','FAILED','/desks/gamma',1000,NULL,'BOOTSTRAP_FAILED','Path is a file.')",
     )
     .expect("valid FAILED row");
@@ -676,27 +686,27 @@ fn desk_row_checks() {
     for (label, sql) in [
         (
             "READY without ready_at_ns",
-            "INSERT INTO desks VALUES ('019c','d1','READY','/p',1000,NULL,NULL,NULL)",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('019c','d1','READY','/p',1000,NULL,NULL,NULL)",
         ),
         (
             "CREATING with ready_at_ns",
-            "INSERT INTO desks VALUES ('019d','d2','CREATING','/p',1000,2000,NULL,NULL)",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('019d','d2','CREATING','/p',1000,2000,NULL,NULL)",
         ),
         (
             "FAILED without failure_code",
-            "INSERT INTO desks VALUES ('019e','d3','FAILED','/p',1000,NULL,NULL,'why')",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('019e','d3','FAILED','/p',1000,NULL,NULL,'why')",
         ),
         (
             "FAILED with ready_at_ns",
-            "INSERT INTO desks VALUES ('019f','d4','FAILED','/p',1000,2000,'X','why')",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('019f','d4','FAILED','/p',1000,2000,'X','why')",
         ),
         (
             "unknown state",
-            "INSERT INTO desks VALUES ('01a0','d5','RUNNING','/p',1000,NULL,NULL,NULL)",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('01a0','d5','RUNNING','/p',1000,NULL,NULL,NULL)",
         ),
         (
             "non-integer created_at_ns",
-            "INSERT INTO desks VALUES ('01a1','d6','CREATING','/p','soon',NULL,NULL,NULL)",
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, failure_code, failure_message) VALUES ('01a1','d6','CREATING','/p','soon',NULL,NULL,NULL)",
         ),
     ] {
         assert!(insert(sql).is_err(), "{label} must be rejected");
@@ -710,4 +720,187 @@ fn desk_row_checks() {
         })
         .unwrap();
     assert_eq!(names, ["alpha", "beta", "gamma"]);
+}
+
+// ---------------------------------------------------------------------------
+// store::session_migration_applies (R3 feature SPEC §10 check 7)
+// ---------------------------------------------------------------------------
+
+/// Migration 4 (R3 feature SPEC §8): a fresh database carries the runtime,
+/// pointer, and process schema, and a migration-3 database upgrades in place
+/// with every prompt row intact.
+#[cfg(test)]
+#[test]
+fn session_migration_applies() {
+    let (_dir, store) = open_temp();
+    for name in ["runtimes", "native_sessions", "agent_processes"] {
+        let strict = store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap_or_else(|e| panic!("{name} must exist: {e}"));
+        assert_eq!(strict, 1, "{name} must be STRICT");
+    }
+    // Both runtimes start UNDISCOVERED (§8).
+    let seeded: Vec<(String, String)> = store
+        .call(|c| {
+            c.prepare("SELECT runtime, state FROM runtimes ORDER BY runtime")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(
+        seeded,
+        [
+            ("claude".to_string(), "UNDISCOVERED".to_string()),
+            ("codex".to_string(), "UNDISCOVERED".to_string()),
+        ]
+    );
+    drop(store);
+
+    // A migration-3 database upgrades in place: every prompt row survives, the
+    // QUEUED state carries over unchanged, and the attempt columns arrive NULL.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             INSERT INTO prompts VALUES ('p0','0199','EVALUATION','QUEUED','{\"a\":1}',1100);
+             INSERT INTO prompts VALUES ('p1','0199','TRIGGER_RESULT','QUEUED','{\"b\":2}',1200);
+             INSERT INTO operational_events VALUES ('e0','TRIGGER_MISSED','0199',1300,'{}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 3i64).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        MIGRATIONS.len() as i64
+    );
+    #[allow(clippy::type_complexity)]
+    let prompts: Vec<(String, String, String, String, Option<i64>, Option<String>)> = store
+        .call(|c| {
+            c.prepare(
+                "SELECT id, kind, state, payload, attempted_at_ns, failure_code FROM prompts \
+                 ORDER BY id",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect()
+        })
+        .unwrap();
+    assert_eq!(
+        prompts,
+        [
+            (
+                "p0".to_string(),
+                "EVALUATION".to_string(),
+                "QUEUED".to_string(),
+                "{\"a\":1}".to_string(),
+                None,
+                None
+            ),
+            (
+                "p1".to_string(),
+                "TRIGGER_RESULT".to_string(),
+                "QUEUED".to_string(),
+                "{\"b\":2}".to_string(),
+                None,
+                None
+            ),
+        ]
+    );
+    // The existing desks keep the default runtime, and the R2 event survives.
+    let carried: (String, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT selected_runtime FROM desks), (SELECT kind FROM operational_events)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(carried, ("codex".to_string(), "TRIGGER_MISSED".to_string()));
+
+    // The rebuilt vocabularies accept the R3 words and still refuse the rest.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns, \
+                 resolved_at_ns, runtime) \
+                 VALUES ('p2','0199','ORIENTATION','DELIVERED','{}',1400,1500,'claude')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO operational_events VALUES ('e1','PROMPT_DELIVERED','0199',1500,'{}')",
+                [],
+            )
+        })
+        .expect("the R3 vocabularies");
+    for (label, sql) in [
+        (
+            "DELIVERED without resolved_at_ns",
+            "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+             VALUES ('p3','0199','ORIENTATION','DELIVERED','{}',1)",
+        ),
+        (
+            "FAILED without failure_code",
+            "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns, \
+             resolved_at_ns) VALUES ('p4','0199','DISCLOSURE','FAILED','{}',1,2)",
+        ),
+        (
+            "an unknown event kind",
+            "INSERT INTO operational_events VALUES ('e2','SESSION_WOBBLED','0199',1,'{}')",
+        ),
+        (
+            "an ended process without a reason",
+            "INSERT INTO agent_processes (id, desk_id, runtime, pid, daemon_uuid, \
+             started_at_ns, ended_at_ns) VALUES ('a1','0199','codex',1,'d',1,2)",
+        ),
+    ] {
+        assert!(
+            store.unit(move |tx| tx.execute(sql, [])).is_err(),
+            "{label} must be rejected"
+        );
+    }
+
+    // Only one process per desk may be open at a time.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO agent_processes (id, desk_id, runtime, pid, daemon_uuid, \
+                 started_at_ns) VALUES ('a2','0199','codex',1,'d',1)",
+                [],
+            )
+        })
+        .expect("one open process");
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO agent_processes (id, desk_id, runtime, pid, daemon_uuid, \
+                 started_at_ns) VALUES ('a3','0199','claude',2,'d',2)",
+                [],
+            ))
+            .is_err(),
+        "a second open process on the same desk must be rejected"
+    );
 }

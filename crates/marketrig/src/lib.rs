@@ -22,6 +22,9 @@ struct Cli {
     /// Emit the daemon's JSON resource verbatim.
     #[arg(long)]
     json: bool,
+    /// Desk UUID, for the commands the daemon itself launches (R3 §5.2).
+    #[arg(long, global = true)]
+    desk: Option<String>,
     #[command(subcommand)]
     group: Group,
 }
@@ -52,6 +55,49 @@ enum Group {
         #[command(subcommand)]
         command: PromptCommand,
     },
+    /// Session ingress the runtime itself invokes (R3 feature SPEC §5.2).
+    // Never a session lifecycle control: those are REST and desktop actions
+    // (root §13.2, per D69).
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Post one Claude Code hook object, read from standard input, to the
+    /// daemon. Always exits 0 and prints nothing.
+    Hook,
+}
+
+/// The hook body cap (R3 feature SPEC §5.2); anything larger is dropped.
+const HOOK_LIMIT: usize = 64 * 1024;
+
+/// `marketrig --desk <id> session hook`: read standard input to EOF, post it
+/// unchanged, and exit 0 whatever happens — a hook must never fail the turn
+/// that ran it (R3 feature SPEC §5.2).
+fn session_hook(desk: Option<&str>) -> i32 {
+    use std::io::Read as _;
+    let Some(desk) = desk else {
+        usage("session hook needs --desk <desk-id>");
+    };
+    let mut body = Vec::new();
+    // One byte past the cap is enough to know it is over.
+    if std::io::stdin()
+        .take(HOOK_LIMIT as u64 + 1)
+        .read_to_end(&mut body)
+        .is_err()
+        || body.len() > HOOK_LIMIT
+    {
+        return 0;
+    }
+    if let Ok(body) = String::from_utf8(body)
+        && let Ok(endpoint) = Endpoint::discover()
+    {
+        let _ = endpoint.post_json_text(&format!("/desks/{desk}/session/hook"), body);
+    }
+    0
 }
 
 #[derive(Clone, ValueEnum)]
@@ -223,6 +269,12 @@ struct CodeArgs {
 /// own), 3 no usable daemon.
 pub fn run() -> i32 {
     let cli = Cli::parse();
+    if let Group::Session {
+        command: SessionCommand::Hook,
+    } = cli.group
+    {
+        return session_hook(cli.desk.as_deref());
+    }
     match dispatch(&cli.group) {
         Ok(body) => {
             emit(cli.json, &body);
@@ -316,6 +368,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 }
             }
         }
+        Group::Session { .. } => unreachable!("handled before discovery"),
         Group::Prompt { command } => {
             let (PromptCommand::List { desk } | PromptCommand::Show { desk, .. }) = command;
             let desk = resolve(&endpoint, "/desks", "desk", desk)?;

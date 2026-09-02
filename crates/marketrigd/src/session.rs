@@ -1,0 +1,556 @@
+//! Native-session pointers, managed-process rows, and the hook ingress.
+//!
+//! Contract: `sdd/features/r3-runtime-delivery/SPEC.md` §5.2, §6.2, §7, §8
+//! (per R3-6, R3-7), root `sdd/SPEC.md` §6.2 and §15. The adapters own the
+//! processes; this module owns their rows.
+
+use rusqlite::{OptionalExtension, Transaction, params};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
+use uuid::Uuid;
+
+use crate::desk::{self, DeskError};
+use crate::store::{Store, StoreError, now_ns};
+
+/// One `agent_processes` row as `GET /desks/{d}/session` reports it (§7).
+#[derive(Debug, Clone, Serialize)]
+pub struct Process {
+    pub id: String,
+    pub runtime: String,
+    pub native_session_id: Option<String>,
+    pub pid: i64,
+    pub started_at_ns: i64,
+    pub ready_at_ns: Option<i64>,
+}
+
+const SELECT: &str =
+    "SELECT id, runtime, native_session_id, pid, started_at_ns, ready_at_ns FROM agent_processes";
+
+fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Process> {
+    Ok(Process {
+        id: row.get(0)?,
+        runtime: row.get(1)?,
+        native_session_id: row.get(2)?,
+        pid: row.get(3)?,
+        started_at_ns: row.get(4)?,
+        ready_at_ns: row.get(5)?,
+    })
+}
+
+/// The desk's open process, or `None` (§7). The partial unique index makes
+/// "open" single by construction.
+pub fn live_process(store: &Store, desk_id: &str) -> Result<Option<Process>, StoreError> {
+    let desk_id = desk_id.to_string();
+    store.call(move |c| {
+        c.query_row(
+            &format!("{SELECT} WHERE desk_id = ?1 AND ended_at_ns IS NULL"),
+            [desk_id],
+            read,
+        )
+        .optional()
+    })
+}
+
+/// The desk's pointers as `{runtime: native_session_id}` (`GET /desks/{d}`, §7).
+pub fn pointers(store: &Store, desk_id: &str) -> Result<Value, StoreError> {
+    let desk_id = desk_id.to_string();
+    let pairs: Vec<(String, String)> = store.call(move |c| {
+        c.prepare(
+            "SELECT runtime, native_session_id FROM native_sessions WHERE desk_id = ?1 \
+             ORDER BY runtime",
+        )?
+        .query_map([desk_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect()
+    })?;
+    Ok(Value::Object(
+        pairs
+            .into_iter()
+            .map(|(runtime, id)| (runtime, Value::String(id)))
+            .collect::<Map<_, _>>(),
+    ))
+}
+
+/// Opens the process row and appends `SESSION_STARTED` in one unit (§6.1).
+pub fn open_process(
+    store: &Store,
+    desk_id: &str,
+    runtime: &str,
+    native_session_id: Option<&str>,
+    pid: u32,
+    daemon_uuid: &str,
+    mode: &str,
+) -> Result<Process, StoreError> {
+    let process = Process {
+        id: Uuid::now_v7().to_string(),
+        runtime: runtime.to_string(),
+        native_session_id: native_session_id.map(str::to_string),
+        pid: i64::from(pid),
+        started_at_ns: now_ns(),
+        ready_at_ns: None,
+    };
+    let row = process.clone();
+    let desk_id = desk_id.to_string();
+    let mode = mode.to_string();
+    let daemon_uuid = daemon_uuid.to_string();
+    store.unit(move |tx| {
+        tx.execute(
+            "INSERT INTO agent_processes (id, desk_id, runtime, native_session_id, pid, \
+             daemon_uuid, started_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.id,
+                desk_id,
+                row.runtime,
+                row.native_session_id,
+                row.pid,
+                daemon_uuid,
+                row.started_at_ns
+            ],
+        )?;
+        desk::append_event(
+            tx,
+            "SESSION_STARTED",
+            Some(&desk_id),
+            row.started_at_ns,
+            json!({
+                "runtime": row.runtime,
+                "mode": mode,
+                "native_session_id": row.native_session_id,
+            }),
+        )
+    })?;
+    Ok(process)
+}
+
+/// Readiness: `ready_at_ns` plus one `SESSION_READY` (§6.2). A closed row is
+/// left alone and no event is appended.
+pub fn mark_ready(store: &Store, process_id: &str) -> Result<(), StoreError> {
+    let process_id = process_id.to_string();
+    store.unit(move |tx| {
+        let desk_id: Option<String> = tx
+            .query_row(
+                "SELECT desk_id FROM agent_processes WHERE id = ?1 AND ended_at_ns IS NULL \
+                 AND ready_at_ns IS NULL",
+                [&process_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(desk_id) = desk_id else {
+            return Ok(());
+        };
+        let at_ns = now_ns();
+        tx.execute(
+            "UPDATE agent_processes SET ready_at_ns = ?2 WHERE id = ?1",
+            params![process_id, at_ns],
+        )?;
+        desk::append_event(tx, "SESSION_READY", Some(&desk_id), at_ns, json!({}))
+    })
+}
+
+/// Closes the row and appends `SESSION_EXITED` in the same unit (per R3-6).
+/// Closing an already-closed row is a no-op.
+pub fn close_process(
+    store: &Store,
+    process_id: &str,
+    reason: &str,
+    code: Option<i32>,
+) -> Result<(), StoreError> {
+    let process_id = process_id.to_string();
+    let reason = reason.to_string();
+    store.unit(move |tx| {
+        let desk_id: Option<String> = tx
+            .query_row(
+                "SELECT desk_id FROM agent_processes WHERE id = ?1 AND ended_at_ns IS NULL",
+                [&process_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(desk_id) = desk_id else {
+            return Ok(());
+        };
+        let at_ns = now_ns();
+        tx.execute(
+            "UPDATE agent_processes SET ended_at_ns = ?2, exit_reason = ?3, exit_code = ?4 \
+             WHERE id = ?1",
+            params![process_id, at_ns, reason, code],
+        )?;
+        desk::append_event(
+            tx,
+            "SESSION_EXITED",
+            Some(&desk_id),
+            at_ns,
+            json!({ "reason": reason, "code": code }),
+        )
+    })
+}
+
+/// Moves the desk's pointer for one runtime and appends
+/// `SESSION_POINTER_CHANGED {from, to, cause}` (§5.2, §6.2). `to` of `None`
+/// clears it — the unresumable path.
+pub fn repoint(
+    store: &Store,
+    desk_id: &str,
+    runtime: &str,
+    to: Option<&str>,
+    cause: &str,
+) -> Result<(), StoreError> {
+    let desk_id = desk_id.to_string();
+    let runtime = runtime.to_string();
+    let to = to.map(str::to_string);
+    let cause = cause.to_string();
+    store.unit(move |tx| {
+        let from: Option<String> = tx
+            .query_row(
+                "SELECT native_session_id FROM native_sessions WHERE desk_id = ?1 AND runtime = ?2",
+                params![desk_id, runtime],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if from.as_deref() == to.as_deref() {
+            return Ok(());
+        }
+        let at_ns = now_ns();
+        match &to {
+            Some(id) => tx.execute(
+                "INSERT INTO native_sessions (desk_id, runtime, native_session_id, updated_at_ns) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT (desk_id, runtime) DO UPDATE SET \
+                 native_session_id = excluded.native_session_id, \
+                 updated_at_ns = excluded.updated_at_ns",
+                params![desk_id, runtime, id, at_ns],
+            )?,
+            None => tx.execute(
+                "DELETE FROM native_sessions WHERE desk_id = ?1 AND runtime = ?2",
+                params![desk_id, runtime],
+            )?,
+        };
+        desk::append_event(
+            tx,
+            "SESSION_POINTER_CHANGED",
+            Some(&desk_id),
+            at_ns,
+            json!({ "runtime": runtime, "from": from, "to": to, "cause": cause }),
+        )
+    })
+}
+
+/// Recovery's `sessions` step (§8), registered after `executions`: a crashed
+/// daemon's open processes are `DAEMON_LOST`, and every prompt it had begun
+/// handing off is `HANDOFF_UNKNOWN`. Returns `(sessions_lost, prompts_unknown)`
+/// for the `RECOVERY` payload.
+pub fn recovery_step(
+    tx: &Transaction<'_>,
+    daemon_uuid: &str,
+    now_ns: i64,
+) -> rusqlite::Result<(Vec<Value>, Vec<Value>)> {
+    let lost: Vec<(String, String, String, Option<String>)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, desk_id, runtime, native_session_id FROM agent_processes \
+             WHERE ended_at_ns IS NULL AND daemon_uuid <> ?1 ORDER BY started_at_ns, id",
+        )?;
+        stmt.query_map(params![daemon_uuid], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut sessions_lost = Vec::new();
+    for (id, desk_id, runtime, native_session_id) in lost {
+        tx.execute(
+            "UPDATE agent_processes SET ended_at_ns = ?2, exit_reason = 'DAEMON_LOST' \
+             WHERE id = ?1",
+            params![id, now_ns],
+        )?;
+        desk::append_event(
+            tx,
+            "SESSION_EXITED",
+            Some(&desk_id),
+            now_ns,
+            json!({ "reason": "DAEMON_LOST", "code": Value::Null }),
+        )?;
+        sessions_lost.push(json!({
+            "process_id": id,
+            "desk_id": desk_id,
+            "runtime": runtime,
+            "native_session_id": native_session_id,
+        }));
+    }
+
+    let attempted: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, desk_id, kind FROM prompts \
+             WHERE state = 'QUEUED' AND attempted_at_ns IS NOT NULL ORDER BY created_at_ns, id",
+        )?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut prompts_unknown = Vec::new();
+    for (id, desk_id, kind) in attempted {
+        tx.execute(
+            "UPDATE prompts SET state = 'FAILED', resolved_at_ns = ?2, \
+             failure_code = 'HANDOFF_UNKNOWN' WHERE id = ?1",
+            params![id, now_ns],
+        )?;
+        desk::append_event(
+            tx,
+            "PROMPT_FAILED",
+            Some(&desk_id),
+            now_ns,
+            json!({ "prompt_id": id, "kind": kind, "failure_code": "HANDOFF_UNKNOWN" }),
+        )?;
+        prompts_unknown.push(json!({
+            "prompt_id": id,
+            "desk_id": desk_id,
+            "kind": kind,
+            "failure_code": "HANDOFF_UNKNOWN",
+        }));
+    }
+    Ok((sessions_lost, prompts_unknown))
+}
+
+// ---------------------------------------------------------------------------
+// Hook ingress (§5.2)
+// ---------------------------------------------------------------------------
+
+/// What the hook route answers with. Everything well-formed is `202`; only an
+/// unparseable body is a refusal the CLI still swallows.
+pub enum Hook {
+    Accepted,
+    Unparseable,
+}
+
+/// Records one Claude Code hook object against the desk (§5.2). The desk must
+/// exist; every other outcome is a row or nothing.
+pub fn hook(store: &Store, desk_id: &str, body: &str) -> Result<Hook, DeskError> {
+    let desk = desk::get(store, desk_id)?;
+    let Some(event) = serde_json::from_str::<Value>(body)
+        .ok()
+        .filter(Value::is_object)
+    else {
+        return Ok(Hook::Unparseable);
+    };
+    let name = event["hook_event_name"].as_str().unwrap_or_default();
+    let session_id = event["session_id"].as_str();
+    let source = event["source"].as_str();
+    // Hooks arrive from the runtime the desk is on; the pointer is that
+    // runtime's (§5.2 is Claude's, but the column is per runtime).
+    let runtime = desk.selected_runtime.clone();
+
+    // `clear` is the one transition that moves the pointer instead of being
+    // judged against it.
+    if name == "SessionStart" && source == Some("clear") {
+        if let Some(id) = session_id {
+            repoint(store, &desk.id, &runtime, Some(id), "clear")?;
+        }
+        return Ok(Hook::Accepted);
+    }
+
+    let pointer: Option<String> = {
+        let pointers = pointers(store, &desk.id)?;
+        pointers[&runtime].as_str().map(str::to_string)
+    };
+    if session_id.is_some() && session_id != pointer.as_deref() {
+        attention(
+            store,
+            &desk.id,
+            json!({ "kind": "foreign_session", "session_id": session_id }),
+        )?;
+        return Ok(Hook::Accepted);
+    }
+
+    match name {
+        // Pointer confirmation only; readiness is the adapter's (§5.3).
+        "SessionStart" if matches!(source, Some("startup") | Some("resume")) => {}
+        "SessionStart" => attention(
+            store,
+            &desk.id,
+            json!({ "kind": "session_start", "source": source }),
+        )?,
+        "Notification" => attention(
+            store,
+            &desk.id,
+            json!({
+                "kind": event["notification_type"].as_str(),
+                "title": event["title"].as_str(),
+            }),
+        )?,
+        "Stop" => {
+            let at_ns = now_ns();
+            let desk_id = desk.id.clone();
+            store.unit(move |tx| {
+                desk::append_event(tx, "SESSION_TURN_ENDED", Some(&desk_id), at_ns, json!({}))
+            })?;
+        }
+        _ => {}
+    }
+    Ok(Hook::Accepted)
+}
+
+fn attention(store: &Store, desk_id: &str, payload: Value) -> Result<(), StoreError> {
+    let at_ns = now_ns();
+    let desk_id = desk_id.to_string();
+    store
+        .unit(move |tx| desk::append_event(tx, "SESSION_ATTENTION", Some(&desk_id), at_ns, payload))
+}
+
+// ---------------------------------------------------------------------------
+// session::recovery (feature SPEC §10 check 7)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[test]
+fn recovery_closes_lost_sessions_and_prompts() {
+    let (_dir, store) = crate::store::open_temp();
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES ('d1','alpha','READY','/desks/alpha',1,2)",
+                [],
+            )?;
+            // One process of a dead daemon, one of ours.
+            tx.execute(
+                "INSERT INTO agent_processes (id, desk_id, runtime, native_session_id, pid, \
+                 daemon_uuid, started_at_ns) VALUES ('p1','d1','codex','th-1',10,'dead',5)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO agent_processes (id, desk_id, runtime, pid, daemon_uuid, \
+                 started_at_ns, ended_at_ns, exit_reason) \
+                 VALUES ('p0','d1','codex',9,'dead',3,4,'EXITED')",
+                [],
+            )?;
+            // One prompt mid-attempt, one merely queued.
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns, \
+                 attempted_at_ns) VALUES ('q1','d1','TRIGGER_RESULT','QUEUED','{}',6,7)",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+                 VALUES ('q2','d1','EVALUATION','QUEUED','{}',8)",
+                [],
+            )
+        })
+        .unwrap();
+
+    let (sessions_lost, prompts_unknown) =
+        store.unit(|tx| recovery_step(tx, "alive", 100)).unwrap();
+    assert_eq!(sessions_lost.len(), 1);
+    assert_eq!(sessions_lost[0]["process_id"], "p1");
+    assert_eq!(sessions_lost[0]["native_session_id"], "th-1");
+    assert_eq!(prompts_unknown.len(), 1);
+    assert_eq!(prompts_unknown[0]["prompt_id"], "q1");
+    assert_eq!(prompts_unknown[0]["failure_code"], "HANDOFF_UNKNOWN");
+
+    let rows: Vec<(String, Option<i64>, Option<String>)> = store
+        .call(|c| {
+            c.prepare("SELECT id, ended_at_ns, exit_reason FROM agent_processes ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("p0".to_string(), Some(4), Some("EXITED".to_string())),
+            ("p1".to_string(), Some(100), Some("DAEMON_LOST".to_string())),
+        ]
+    );
+    let prompts: Vec<(String, String, Option<String>)> = store
+        .call(|c| {
+            c.prepare("SELECT id, state, failure_code FROM prompts ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(
+        prompts,
+        [
+            (
+                "q1".to_string(),
+                "FAILED".to_string(),
+                Some("HANDOFF_UNKNOWN".to_string())
+            ),
+            ("q2".to_string(), "QUEUED".to_string(), None),
+        ]
+    );
+
+    // A second recovery finds nothing left to settle.
+    let (again, and) = store.unit(|tx| recovery_step(tx, "alive", 200)).unwrap();
+    assert!(again.is_empty() && and.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// session::hook_ingress (feature SPEC §5.2)
+// ---------------------------------------------------------------------------
+
+/// The mappings the ingress owns on its own: the `clear` repoint, the foreign
+/// session, `Stop`, and an unparseable body. The rest of check 4 — the launch
+/// files and the channel — belongs to the Claude adapter.
+#[cfg(test)]
+#[test]
+fn hook_ingress_records_the_documented_rows() {
+    let (_dir, store) = crate::store::open_temp();
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns, \
+                 selected_runtime) VALUES ('d1','alpha','READY','/desks/alpha',1,2,'claude')",
+                [],
+            )
+        })
+        .unwrap();
+    let events = || -> Vec<(String, String)> {
+        store
+            .call(|c| {
+                c.prepare(
+                    "SELECT kind, payload FROM operational_events ORDER BY occurred_at_ns, id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect()
+            })
+            .unwrap()
+    };
+    let post = |body: &str| hook(&store, "d1", body).unwrap();
+
+    // An unparseable body — and a JSON scalar — is refused; nothing is recorded.
+    assert!(matches!(post("not json"), Hook::Unparseable));
+    assert!(matches!(post("[1]"), Hook::Unparseable));
+    assert!(events().is_empty());
+
+    // No pointer yet, so a startup hook is foreign.
+    assert!(matches!(
+        post(r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s-1"}"#),
+        Hook::Accepted
+    ));
+    assert_eq!(events()[0].0, "SESSION_ATTENTION");
+    assert!(events()[0].1.contains("foreign_session"));
+
+    // `clear` moves the pointer whatever it was.
+    post(r#"{"hook_event_name":"SessionStart","source":"clear","session_id":"s-2"}"#);
+    assert_eq!(pointers(&store, "d1").unwrap(), json!({ "claude": "s-2" }));
+    let changed = events().pop().unwrap();
+    assert_eq!(changed.0, "SESSION_POINTER_CHANGED");
+    assert!(changed.1.contains(r#""cause":"clear""#));
+
+    // With the pointer in place the documented per-event rows land.
+    post(r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s-2"}"#);
+    assert_eq!(events().last().unwrap().0, "SESSION_POINTER_CHANGED");
+    post(r#"{"hook_event_name":"Stop","session_id":"s-2"}"#);
+    assert_eq!(events().last().unwrap().0, "SESSION_TURN_ENDED");
+    post(
+        r#"{"hook_event_name":"Notification","session_id":"s-2","notification_type":"permission",
+            "title":"Approve?","message":"never stored"}"#,
+    );
+    let notification = events().pop().unwrap();
+    assert_eq!(notification.0, "SESSION_ATTENTION");
+    assert!(notification.1.contains(r#""kind":"permission""#));
+    assert!(notification.1.contains(r#""title":"Approve?""#));
+    assert!(
+        !notification.1.contains("never stored"),
+        "the message is not stored"
+    );
+
+    // An unknown event is accepted and recorded nowhere.
+    let before = events().len();
+    post(r#"{"hook_event_name":"PreToolUse","session_id":"s-2"}"#);
+    assert_eq!(events().len(), before);
+}

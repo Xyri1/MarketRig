@@ -1413,7 +1413,7 @@ fn cycle_and_prompt_atomic() {
     let failed = store.unit(move |tx| {
         insert_cycle(tx, &one, &poisoned)?;
         tx.execute(
-            "INSERT INTO prompts VALUES ('p-0', ?1, 'NOT_A_KIND', 'QUEUED', '{}', 1)",
+            "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) VALUES ('p-0', ?1, 'NOT_A_KIND', 'QUEUED', '{}', 1)",
             [one.as_str()],
         )
     });

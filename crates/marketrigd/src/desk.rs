@@ -20,7 +20,7 @@ const SHIM: &str = "@AGENTS.md\n";
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
 
 const SELECT: &str = "SELECT id, name, state, workspace_path, created_at_ns, \
-                      ready_at_ns, failure_code, failure_message FROM desks";
+                      ready_at_ns, failure_code, failure_message, selected_runtime FROM desks";
 
 /// Accepts the §7.1 grammar: 1–40 characters, lowercase `a–z`, `0–9`, and
 /// single interior hyphens.
@@ -97,6 +97,8 @@ pub struct Desk {
     pub state: String,
     pub workspace_path: String,
     pub created_at_ns: i64,
+    /// `codex` | `claude`, the runtime this desk activates on (R3 §7).
+    pub selected_runtime: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready_at_ns: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,6 +110,10 @@ pub struct Desk {
     pub workspace_status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_status_reason: Option<String>,
+    /// The desk's native-session pointers, filled by `GET /desks/{id}` only
+    /// (R3 feature SPEC §7); never stored on this row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_sessions: Option<Value>,
 }
 
 /// The R0 `AGENTS.md` seed (§7.6). Agent-owned from the moment it is written.
@@ -135,7 +141,12 @@ fn bootstrap(workspace: &Path, name: &str) -> io::Result<()> {
 }
 
 /// Creates a desk synchronously (§7.2): the returned row is `READY` or `FAILED`.
-pub fn create(store: &Store, desks_home: &Path, name: &str) -> Result<Desk, DeskError> {
+pub fn create(
+    store: &Store,
+    desks_home: &Path,
+    name: &str,
+    selected_runtime: &str,
+) -> Result<Desk, DeskError> {
     if !valid_name(name) {
         return Err(DeskError::NameInvalid(name.to_string()));
     }
@@ -155,11 +166,13 @@ pub fn create(store: &Store, desks_home: &Path, name: &str) -> Result<Desk, Desk
         state: "CREATING".to_string(),
         workspace_path,
         created_at_ns: now_ns(),
+        selected_runtime: selected_runtime.to_string(),
         ready_at_ns: None,
         failure_code: None,
         failure_message: None,
         workspace_status: None,
         workspace_status_reason: None,
+        native_sessions: None,
     };
 
     // Step 1: the row and its event commit before the workspace is touched.
@@ -167,9 +180,15 @@ pub fn create(store: &Store, desks_home: &Path, name: &str) -> Result<Desk, Desk
     store
         .unit(move |tx| {
             tx.execute(
-                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns) \
-                 VALUES (?1, ?2, 'CREATING', ?3, ?4)",
-                params![row.id, row.name, row.workspace_path, row.created_at_ns],
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, \
+                 selected_runtime) VALUES (?1, ?2, 'CREATING', ?3, ?4, ?5)",
+                params![
+                    row.id,
+                    row.name,
+                    row.workspace_path,
+                    row.created_at_ns,
+                    row.selected_runtime
+                ],
             )?;
             append_event(
                 tx,
@@ -352,8 +371,10 @@ fn read_row(r: &Row<'_>) -> rusqlite::Result<Desk> {
         ready_at_ns: r.get(5)?,
         failure_code: r.get(6)?,
         failure_message: r.get(7)?,
+        selected_runtime: r.get(8)?,
         workspace_status: None,
         workspace_status_reason: None,
+        native_sessions: None,
     })
 }
 
@@ -520,7 +541,7 @@ fn interrupted_creating_completes() {
 fn create_retry_and_reads() {
     let (_dir, store, desks_home) = scratch();
 
-    let alpha = create(&store, &desks_home, "alpha").unwrap();
+    let alpha = create(&store, &desks_home, "alpha", "codex").unwrap();
     assert_eq!(alpha.state, "READY");
     assert_eq!(alpha.workspace_status, Some("OK"));
     assert_eq!(
@@ -534,11 +555,15 @@ fn create_retry_and_reads() {
 
     // Refusals.
     assert_eq!(
-        create(&store, &desks_home, "alpha").unwrap_err().code(),
+        create(&store, &desks_home, "alpha", "codex")
+            .unwrap_err()
+            .code(),
         "DESK_NAME_TAKEN"
     );
     assert_eq!(
-        create(&store, &desks_home, "Bad--Name").unwrap_err().code(),
+        create(&store, &desks_home, "Bad--Name", "codex")
+            .unwrap_err()
+            .code(),
         "DESK_NAME_INVALID"
     );
     assert_eq!(
@@ -552,7 +577,7 @@ fn create_retry_and_reads() {
 
     // Obstructed workspace fails, then retries to READY on the same identity.
     fs::write(desks_home.join("beta"), "not a directory").unwrap();
-    let beta = create(&store, &desks_home, "beta").unwrap();
+    let beta = create(&store, &desks_home, "beta", "codex").unwrap();
     assert_eq!(beta.state, "FAILED");
     assert!(beta.failure_code.is_some() && beta.failure_message.is_some());
     fs::remove_file(desks_home.join("beta")).unwrap();

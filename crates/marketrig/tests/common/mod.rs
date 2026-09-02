@@ -5,6 +5,10 @@
 //! declares `mod common;` compiles it in, which is how integration tests share
 //! code.
 
+// Each test binary compiles the whole module in but uses only the helpers it
+// needs; the unused rest is not dead code.
+#![allow(dead_code)]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -109,4 +113,26 @@ pub fn marketrig(root: &Path, args: &[&str]) -> Output {
 
 pub fn code(output: &Output) -> i32 {
     output.status.code().expect("exit code")
+}
+
+/// Runs the real binary with `input` on standard input — the hook ingress is
+/// the one command that reads it (R3 feature SPEC §5.2).
+pub fn marketrig_stdin(root: &Path, args: &[&str], input: &[u8]) -> Output {
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_marketrig"))
+        .args(args)
+        .env("MARKETRIG_TEST_DATA_ROOT", root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run marketrig");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let written = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&written);
+    });
+    let output = child.wait_with_output().expect("wait marketrig");
+    let _ = writer.join();
+    output
 }

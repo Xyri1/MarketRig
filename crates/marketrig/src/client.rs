@@ -131,6 +131,16 @@ impl Endpoint {
         finish(self.authorize(self.agent.delete(self.uri(path))).call())
     }
 
+    /// Posts an already-serialized JSON body unchanged — the hook ingress
+    /// forwards the runtime's own bytes (R3 feature SPEC §5.2).
+    pub fn post_json_text(&self, path: &str, body: String) -> Result<String, Fault> {
+        finish(
+            self.authorize(self.agent.post(self.uri(path)))
+                .header("Content-Type", "application/json")
+                .send(body),
+        )
+    }
+
     fn uri(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }

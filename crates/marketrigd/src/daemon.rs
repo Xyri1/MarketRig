@@ -133,6 +133,12 @@ pub fn children_path(roots: &Roots) -> PathBuf {
     roots.runtime().join(CHILDREN)
 }
 
+/// Per-desk Claude Code launch files (R3 feature SPEC §5.1), removed wholesale
+/// at every startup.
+pub fn launch_dir(roots: &Roots) -> PathBuf {
+    roots.runtime().join("launch")
+}
+
 /// Startup steps 1–8 (§4.1), in order.
 pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
     // 1. roots are already resolved; create what is missing.
@@ -160,6 +166,20 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
 
     // 6. finish every desk a crash left CREATING (§7.3).
     desk::complete_interrupted(&store)?;
+
+    // 6a. discover every UNDISCOVERED runtime before the listener binds (R3
+    //     feature SPEC §2), and drop the previous run's launch files, which
+    //     name processes that no longer exist (R3 feature SPEC §8). Discovery
+    //     is skipped under the test data root: the acceptance gate discovers
+    //     its own stand-in explicitly and must not see this machine's real
+    //     runtimes (root §17).
+    match fs::remove_dir_all(launch_dir(&roots)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
+    if std::env::var_os(crate::store::TEST_DATA_ROOT_ENV).is_none() {
+        crate::runtime::discover_undiscovered(&store)?;
+    }
 
     // 7. bind and mint the per-start bearer.
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -229,6 +249,7 @@ pub(crate) fn recover(
             .flatten();
         let at_ns = now_ns();
         let executions_lost = crate::exec::recovery_step(tx, &uuid, at_ns)?;
+        let (sessions_lost, prompts_unknown) = crate::session::recovery_step(tx, &uuid, at_ns)?;
         desk::append_event(
             tx,
             "RECOVERY",
@@ -239,6 +260,8 @@ pub(crate) fn recover(
                 "daemon_uuid": uuid,
                 "children": children,
                 "executions_lost": executions_lost,
+                "sessions_lost": sessions_lost,
+                "prompts_unknown": prompts_unknown,
             }),
         )
     })
