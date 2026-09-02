@@ -7,7 +7,7 @@
 - `crates/marketrigd/src/runtime.rs` (discovery, the `runtimes` rows), `terminal.rs` (R3-2), `codex.rs` (R3-3), `claude.rs` (R3-4), `dispatch.rs` (R3-5), `session.rs` (R3-6 routes and the `agent_processes` unit helpers); `store/004_r3.sql`.
 - `crates/marketrig-mcp` gains the `--channel` mode (R3-4); `crates/marketrig` gains `session hook` (root §13.2).
 - `crates/marketrig-acceptance/src/bin/runtime-standin.rs` (R3-8).
-- New pins at plan time: `portable-pty =0.9.0`; axum's `ws` feature and the `tokio-tungstenite` line it resolves, used both by the daemon's two sockets and by the app-server client. No other crate.
+- New pins at plan time: `portable-pty =0.9.0`; axum's `ws` feature and the `tokio-tungstenite` line it resolves, used both by the daemon's two sockets and by the app-server client; the already-in-graph `libc` (unix target) and `windows` (windows target) named as marketrigd dependencies for the terminal manager's process-tree termination. No other crate.
 
 ## 2. Runtime discovery (R3-1)
 
@@ -38,12 +38,12 @@ resize(desk_id, generation, cols, rows) -> coalesced; stale generation ignored
 shutdown(desk_id) -> stop input, drain ≤ 2 s, terminate tree (R2 primitive), join reader
 ```
 
-`GET /desks/{desk_id}/terminal` (bearer as every route; the `Sec-WebSocket-Protocol` header is not used) answers `404 DESK_NOT_FOUND`, `409 NO_LIVE_SESSION` when no terminal exists, else upgrades. Frames: binary = bytes; text = `{"resize":{"cols":n,"rows":n}}` from the client, `{"exited":{"reason":…,"code":…}}` from the server followed by close `1000`. The ring is replayed as one binary frame before live bytes. The terminal manager owns no process record: `agent_processes` rows are the adapters' (R3-6).
+`GET /desks/{desk_id}/terminal` (bearer as every route; the `Sec-WebSocket-Protocol` header is not used) answers `404 DESK_NOT_FOUND`, `409 NO_LIVE_SESSION` when no terminal exists, and `400 VALIDATION` when the request is not a WebSocket upgrade — all three before any attachment is taken, so a request that never upgrades cannot supersede a live one — else upgrades. Frames: binary = bytes; text = `{"resize":{"cols":n,"rows":n}}` from the client, `{"exited":{"reason":…,"code":…}}` from the server followed by close `1000`. The ring is replayed as one binary frame before live bytes. The terminal manager owns no process record: `agent_processes` rows are the adapters' (R3-6).
 
 Scenarios:
 
 - **Superseded attachment.** Two attachments; the first receives close `4001`; input on the first is dropped; the second sees the ring then live bytes.
-- **Slow consumer.** A client that never reads does not block the child: the sender drops the attachment after its 1 MiB send buffer fills and the ring keeps the newest 256 KiB.
+- **Slow consumer.** A client that never reads does not block the child: the sender drops the attachment after its 1 MiB send buffer fills (the socket is then closed `4001`, as for a supersede) and the ring keeps the newest 256 KiB.
 - **Exit frame.** The child exiting sends `exited` with `reason: "EXITED"` and the code; MarketRig's Exit sends `reason: "INTERRUPTED"`.
 
 ## 4. Codex adapter (R3-3)

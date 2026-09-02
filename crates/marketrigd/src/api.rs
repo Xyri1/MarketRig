@@ -39,6 +39,8 @@ pub struct ApiState {
     /// The `PATH` runtime discovery searches, captured once at daemon start
     /// (R3 feature SPEC §2).
     pub search_path: String,
+    /// The one terminal manager both adapters spawn through (R3 feature SPEC §3).
+    pub terminals: Arc<crate::terminal::Manager>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -80,6 +82,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
         .route("/desks/{desk_id}/session", get(session))
+        .route("/desks/{desk_id}/terminal", get(terminal))
         .route("/desks/{desk_id}/session/hook", post(session_hook))
         .route("/runtimes", get(runtimes))
         .route("/runtimes/{runtime}/discover", post(runtime_discover))
@@ -308,6 +311,126 @@ async fn session_hook(
             "The hook body must be a JSON object.".to_string(),
         ),
     })
+}
+
+/// `GET /desks/{desk_id}/terminal` (R3 feature SPEC §3): the attachment socket.
+/// The bearer is the same header every route takes — checked by `authorize`
+/// before the upgrade — and `Sec-WebSocket-Protocol` is not used.
+async fn terminal(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+    request: Request,
+) -> Result<Response, DeskError> {
+    use axum::extract::FromRequestParts;
+    desk::get(&state.store, &desk_id)?;
+    // Answered before the attachment is taken, so a request that never upgrades
+    // cannot supersede a live one (§3).
+    if state.terminals.size(&desk_id).is_none() {
+        return Ok(envelope(
+            StatusCode::CONFLICT,
+            "NO_LIVE_SESSION",
+            format!("Desk {desk_id:?} has no live terminal."),
+        ));
+    }
+    // The upgrade is extracted by hand rather than in the signature so that the
+    // two answers above still cross as the one envelope (root §4.3) instead of
+    // the framework's own rejection.
+    let (mut parts, _) = request.into_parts();
+    let Ok(upgrade) =
+        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+    else {
+        return Ok(envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION",
+            "This route serves a WebSocket upgrade.".to_string(),
+        ));
+    };
+    let Some(attachment) = state.terminals.attach(&desk_id) else {
+        return Ok(envelope(
+            StatusCode::CONFLICT,
+            "NO_LIVE_SESSION",
+            format!("Desk {desk_id:?} has no live terminal."),
+        ));
+    };
+    Ok(upgrade.on_upgrade(move |socket| attached(socket, state, desk_id, attachment)))
+}
+
+/// One attachment's life: the ring as one binary frame, then live bytes out and
+/// input and resizes in, until the child exits (`1000`), a newer attachment
+/// supersedes this one (`4001`), or either side goes away.
+async fn attached(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<ApiState>,
+    desk_id: String,
+    mut attachment: crate::terminal::Attachment,
+) {
+    use crate::terminal::Frame;
+    use axum::extract::ws::{CloseFrame, Message};
+
+    let generation = attachment.generation;
+    if !attachment.replay.is_empty() {
+        let replay = std::mem::take(&mut attachment.replay);
+        if socket.send(Message::Binary(replay.into())).await.is_err() {
+            return;
+        }
+    }
+    loop {
+        tokio::select! {
+            frame = attachment.frames.recv() => match frame {
+                Some(Frame::Bytes(bytes)) => {
+                    let len = bytes.len();
+                    let sent = socket.send(Message::Binary(bytes.into())).await;
+                    attachment.consumed(len);
+                    if sent.is_err() {
+                        return;
+                    }
+                }
+                Some(Frame::Exited { reason, code }) => {
+                    let exited = serde_json::json!({"exited": {"reason": reason, "code": code}});
+                    let _ = socket.send(Message::Text(exited.to_string().into())).await;
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 1000,
+                            reason: "exited".into(),
+                        })))
+                        .await;
+                    return;
+                }
+                // Superseded, or dropped as a slow consumer: the newer
+                // attachment owns the terminal now.
+                _ => {
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 4001,
+                            reason: "superseded".into(),
+                        })))
+                        .await;
+                    return;
+                }
+            },
+            client = socket.recv() => match client {
+                Some(Ok(Message::Binary(bytes))) => {
+                    state.terminals.write(&desk_id, generation, bytes.into())
+                }
+                Some(Ok(Message::Text(text))) => {
+                    if let Some((cols, rows)) = parse_resize(&text) {
+                        state.terminals.resize(&desk_id, generation, cols, rows);
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(_)) | None => return,
+            },
+        }
+    }
+}
+
+/// `{"resize":{"cols":n,"rows":n}}`; anything else is ignored.
+fn parse_resize(text: &str) -> Option<(u16, u16)> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let resize = value.get("resize")?;
+    let cols = u16::try_from(resize.get("cols")?.as_u64()?).ok()?;
+    let rows = u16::try_from(resize.get("rows")?.as_u64()?).ok()?;
+    Some((cols, rows))
 }
 
 async fn runtimes(
@@ -701,6 +824,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     ));
     let state = ApiState {
         search_path: String::new(),
+        terminals: crate::terminal::Manager::new().0,
         store: store.clone(),
         desks_home: desks_home.clone(),
         daemon_uuid: DAEMON_UUID.to_string(),
@@ -2108,5 +2232,37 @@ async fn trigger_codes() {
         call_delete(url(&format!("/desks/{alpha}/triggers/t-beta")), ok),
         404,
         "TRIGGER_NOT_FOUND",
+    );
+}
+
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_route_answers_before_any_upgrade() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let ok = Some(CREDENTIAL);
+    expect_envelope(
+        call_get(
+            format!("{base}/desks/{}/terminal", uuid::Uuid::now_v7()),
+            ok,
+        ),
+        404,
+        "DESK_NOT_FOUND",
+    );
+    let created = call_post(
+        format!("{base}/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"terminal-desk"}"#)),
+    );
+    let desk_id = json(&created.1)["id"].as_str().unwrap().to_string();
+    expect_envelope(
+        call_get(format!("{base}/desks/{desk_id}/terminal"), ok),
+        409,
+        "NO_LIVE_SESSION",
+    );
+    expect_envelope(
+        call_get(format!("{base}/desks/{desk_id}/terminal"), None),
+        401,
+        "UNAUTHORIZED",
     );
 }

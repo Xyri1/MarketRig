@@ -1676,6 +1676,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "getrandom 0.4.3",
+ "libc",
  "nautilus-common",
  "nautilus-core",
  "nautilus-data",
@@ -1701,6 +1702,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "uuid",
+ "windows",
 ]
 
 [[package]]

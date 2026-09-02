@@ -35,6 +35,17 @@ nautilus-execution = { version = "=0.62.0", default-features = false }
 nautilus-live = { version = "=0.62.0", default-features = false, features = ["node"] }
 nautilus-model = { version = "=0.62.0", default-features = false }
 nautilus-sandbox = { version = "=0.62.0", default-features = false }
+# The terminal manager terminates a `portable-pty` child's tree by pid on Unix
+# (`killpg` on the session `portable-pty`'s `setsid` created) and by Job Object
+# on Windows, the same mechanics `exec::spawn` wraps for children MarketRig
+# spawns itself (R3-2, slice 004 §2). Both are already in the graph.
+libc = "=0.2.189"
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 # The PTY pair behind the terminal manager (per D31, R3-2); ConPTY on Windows.
 portable-pty = { version = "=0.9.0", default-features = false }
 # The one spawn-and-terminate primitive for every managed child (per D73, R2-3):

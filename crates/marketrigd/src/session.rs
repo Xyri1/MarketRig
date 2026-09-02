@@ -554,3 +554,77 @@ fn hook_ingress_records_the_documented_rows() {
     post(r#"{"hook_event_name":"PreToolUse","session_id":"s-2"}"#);
     assert_eq!(events().len(), before);
 }
+
+// ---------------------------------------------------------------------------
+// The adapter seam (§4, §5, §6) — one trait per runtime behind one dispatcher.
+// ---------------------------------------------------------------------------
+
+/// What one delivery attempt came to (§6.2). `Waiting` is not a failure: the
+/// gate is closed (a turn is active, or a channel has not connected yet) and
+/// the prompt stays `QUEUED` for the next pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliverOutcome {
+    Delivered,
+    /// `DELIVERY_REFUSED` with the runtime's own message.
+    Refused(String),
+    HandoffUnknown,
+    ChannelUnavailable,
+    Waiting,
+}
+
+/// What an adapter tells the dispatcher out of band, over the one `mpsc` the
+/// dispatcher (C27) drains. Everything here is evidence; the dispatcher writes
+/// the rows.
+#[derive(Debug, Clone)]
+pub enum AdapterEvent {
+    /// The session is live and the delivery gate is open (§6.2).
+    Ready { desk_id: String },
+    /// `native_sessions[desk, runtime]` learned or changed (§4.2, §5.1).
+    PointerDiscovered {
+        desk_id: String,
+        native_session_id: String,
+    },
+    /// `SESSION_ATTENTION {kind, …}` (§4.1, §5.2).
+    Attention {
+        desk_id: String,
+        kind: String,
+        detail: Value,
+    },
+    /// The process ended; `reason` is an `agent_processes.exit_reason`.
+    Exited {
+        desk_id: String,
+        reason: &'static str,
+        code: Option<i64>,
+    },
+}
+
+/// The channel every adapter reports on, held by the dispatcher.
+pub type AdapterEvents = tokio::sync::mpsc::UnboundedSender<AdapterEvent>;
+
+/// One started session, ready for the `agent_processes` insert (§6.1).
+#[derive(Debug, Clone)]
+pub struct Activation {
+    pub pid: u32,
+    /// Known at spawn for Claude, discovered later for Codex.
+    pub native_session_id: Option<String>,
+}
+
+/// One runtime's mechanics (§4, §5). The dispatcher owns activation policy,
+/// the FIFO, the rows, and the renderings; an adapter owns only the runtime.
+#[async_trait::async_trait]
+pub trait Adapter: Send + Sync {
+    /// Starts a session for the desk: `resume` carries the pointer for a resume
+    /// and is `None` for a new session. `Err` is the activation failure detail.
+    async fn spawn(&self, desk_id: &str, resume: Option<&str>) -> Result<Activation, String>;
+
+    /// Hands one rendered prompt (§6.3) to the live session.
+    async fn deliver(&self, desk_id: &str, text: &str) -> DeliverOutcome;
+
+    /// Interrupts the active turn; `Ok` carries the turn id (§4.3), `Err` a
+    /// failure code from §7's answers (`NO_ACTIVE_TURN`, `INTERRUPT_UNSUPPORTED`,
+    /// `RUNTIME_ERROR`) with its message.
+    async fn interrupt(&self, desk_id: &str) -> Result<String, (&'static str, String)>;
+
+    /// Ends the session's process tree; the `Exited` event follows.
+    async fn exit(&self, desk_id: &str);
+}

@@ -10,6 +10,7 @@ pub mod runtime;
 pub mod schedule;
 pub mod session;
 pub mod store;
+pub mod terminal;
 pub mod trade;
 pub mod trigger;
 
@@ -81,6 +82,9 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
         // on mutations and acceptances, and both stop on the shutdown watch.
         let scheduler_wake = Arc::new(tokio::sync::Notify::new());
         let exec_wake = Arc::new(tokio::sync::Notify::new());
+        // The terminal manager both adapters spawn through (R3 feature SPEC §3);
+        // `_terminal_exits` is the dispatcher's stream, wired with C27.
+        let (terminals, _terminal_exits) = terminal::Manager::new();
         let router = api::router(api::ApiState {
             store: startup.store.clone(),
             desks_home: startup.roots.desks.clone(),
@@ -91,6 +95,7 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
             registry: registry.clone(),
             scheduler_wake: scheduler_wake.clone(),
             search_path: runtime::search_path(),
+            terminals: terminals.clone(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -124,6 +129,12 @@ fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::i
         // and recorded `QUIT` (R2 feature SPEC §4.4).
         let _ = tokio::time::timeout_at(deadline, executor).await;
         let _ = tokio::time::timeout_at(deadline, scheduler).await;
+        // Terminals first, then the desks' trading nodes (§4.2).
+        let _ = tokio::time::timeout_at(
+            deadline,
+            tokio::task::spawn_blocking(move || terminals.shutdown_all()),
+        )
+        .await;
         let _ = tokio::time::timeout_at(
             deadline,
             tokio::task::spawn_blocking(move || registry.stop_all()),
