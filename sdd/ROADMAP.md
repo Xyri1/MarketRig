@@ -71,7 +71,7 @@ a desk buys and sells one equity on a real market quote
    the typed tools
 ```
 
-**Produced** by the gate's G13, G15, and G17 on both platforms — a USD round trip whose closing fill commits the cycle and its queued evaluation in one transaction, a Hong Kong round trip closing in HKD with commissions at the HK rate, and a restart after which a resting order stands under its original client order identifier — and by the attended E1 and E2 on 2026-09-02 across the four cells: a real Codex CLI session and a real Claude Code session each read the desk's quote resource twice, then submitted and cancelled a resting paper order through the typed tools, the harness verifying by the daemon's own rows (macOS bundles `experiment-codex-1788316954` and `experiment-claude-1788317581`).
+**Produced** by the gate's G13, G15, and G17 on both platforms — a USD round trip whose closing fill commits the cycle and its queued evaluation in one transaction, a Hong Kong round trip closing in HKD with commissions at the HK rate, and a restart after which a resting order stands under its original client order identifier — and by the attended E1 and E2 on 2026-09-02 across the four cells: a real Codex CLI session and a real Claude Code session each read the desk's quote resource twice, then submitted and cancelled a resting paper order through the typed tools, the harness verifying by the daemon's own rows (macOS bundles `experiment-codex-1788316954` and `experiment-claude-1788317581`; Windows bundles `experiment-codex-1788357048` and `experiment-claude-1788356517`).
 
 **Why here:** stocks lead the trading ladder (per D76), the trading plane is the product's reason to exist and the one thing the spikes proved outright, and running both real runtimes against the MCP surface this early settles the surface-split risk (per D4) before four other milestones depend on it.
 
@@ -79,7 +79,7 @@ Dependencies: Milestone R0.
 
 ## Milestone R2 — Scheduled triggers
 
-**Delivered 2026-09-02** — designed in [`features/r2-scheduled-triggers/`](features/r2-scheduled-triggers/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/003-r2-scheduled-triggers.md`](slices/003-r2-scheduled-triggers.md). Its eighteen module checks, the gate's G21–G26, and the static checks are green on macOS and Windows CI (run 33607212054); E3 stays operator-attended per cell.
+**Delivered 2026-09-02** — designed in [`features/r2-scheduled-triggers/`](features/r2-scheduled-triggers/PRD.md) (PRD, DECISIONS, SPEC) and implemented in [`slices/003-r2-scheduled-triggers.md`](slices/003-r2-scheduled-triggers.md). Its eighteen module checks, the gate's G21–G26, and the static checks are green on macOS and Windows CI (run 33607212054); E3 attended on the Windows cells on 2026-09-02, the macOS cells pending.
 
 This milestone realizes the choices recorded per D34, D35, D37, D40, and D41, and settles their mechanics as D79.
 
@@ -105,7 +105,7 @@ a scheduled trigger with approved code fires while no agent process is alive
 -> a restart mid-flight loses neither the firing nor the result
 ```
 
-**Produced** by the gate's G22, G25, and G26 on both platforms (macOS bundle `gate-1788336248`) — an `order` trigger firing with no session alive and placing one attributed, idempotent paper action through the real adapter, its result prompt queued before anything is delivered; a one-off and a minutely rule missed across a `POST /quit` becoming one `TRIGGER_MISSED` each and never a firing; and a hard kill mid-execution after which recovery lists the execution under `executions_lost`, completes it `DAEMON_LOST`, and leaves the firing and its prompt intact.
+**Produced** by the gate's G22, G25, and G26 on both platforms (macOS bundle `gate-1788336248`) — an `order` trigger firing with no session alive and placing one attributed, idempotent paper action through the real adapter, its result prompt queued before anything is delivered; a one-off and a minutely rule missed across a `POST /quit` becoming one `TRIGGER_MISSED` each and never a firing; and a hard kill mid-execution after which recovery lists the execution under `executions_lost`, completes it `DAEMON_LOST`, and leaves the firing and its prompt intact — and by the attended E3 on the Windows cells on 2026-09-02: a real Codex CLI session and a real Claude Code session each wrote a one-line script and defined a one-off trigger through the CLI, and the daemon fired it with no session alive, ran the code, and recorded one market buy attributed to the firing (Windows bundles `experiment-e3-codex-1788357245` and `experiment-e3-claude-1788356751`).
 
 **Why here:** later work is the half of the loop R1 cannot produce, and it needs something worth scheduling but not a live session — a trigger fires whether or not a desk has one.
 
