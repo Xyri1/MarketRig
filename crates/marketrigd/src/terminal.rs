@@ -209,9 +209,6 @@ impl Manager {
         let interrupting = Arc::new(AtomicBool::new(false));
         let reader_thread = {
             let sink = sink.clone();
-            let interrupting = interrupting.clone();
-            let exits = self.exits.clone();
-            let desk_id = desk_id.to_string();
             std::thread::spawn(move || {
                 let mut buf = [0u8; READ_CHUNK];
                 loop {
@@ -220,7 +217,23 @@ impl Manager {
                         Ok(n) => sink.lock().expect("sink").push(&buf[..n]),
                     }
                 }
+            })
+        };
+        // The exit is the child's, not the reader's: on Unix the reader ends
+        // at EOF right after the exit, so it is joined first and the last
+        // bytes land before the frame; on Windows ConPTY's reader ends only
+        // when the master closes (the `Terminal` drop), so it is left behind.
+        let exit_thread = {
+            let sink = sink.clone();
+            let interrupting = interrupting.clone();
+            let exits = self.exits.clone();
+            let desk_id = desk_id.to_string();
+            std::thread::spawn(move || {
                 let code = child.wait().ok().map(|s| i64::from(s.exit_code()));
+                #[cfg(unix)]
+                let _ = reader_thread.join();
+                #[cfg(not(unix))]
+                drop(reader_thread);
                 let reason = if interrupting.load(Ordering::SeqCst) {
                     "INTERRUPTED"
                 } else {
@@ -245,7 +258,7 @@ impl Manager {
                 size: Mutex::new(size),
                 input: Mutex::new(Some(input_tx)),
                 sink,
-                reader: Mutex::new(Some(reader_thread)),
+                reader: Mutex::new(Some(exit_thread)),
                 interrupting,
                 pid,
                 #[cfg(windows)]
@@ -326,8 +339,8 @@ impl Manager {
     }
 
     /// Stops input, drains for at most 2 s, terminates the contained process
-    /// tree, and joins the reader (§3). Blocking; the async paths hop through
-    /// `spawn_blocking`.
+    /// tree, and joins the exit thread (§3). Blocking; the async paths hop
+    /// through `spawn_blocking`.
     pub fn shutdown(&self, desk_id: &str) {
         let Some(terminal) = self.terminals.lock().expect("terminals").remove(desk_id) else {
             return;

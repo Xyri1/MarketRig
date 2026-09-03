@@ -796,6 +796,25 @@ pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
         if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
             env.push((key, value));
         }
+        // Windows has no usable process without these: Winsock needs
+        // `SYSTEMROOT`, the shell shims need `COMSPEC` and `PATHEXT`, and the
+        // runtimes' own state lives under the profile directories (§4.2).
+        #[cfg(windows)]
+        if matches!(
+            key.to_ascii_uppercase().as_str(),
+            "SYSTEMROOT"
+                | "COMSPEC"
+                | "PATHEXT"
+                | "USERPROFILE"
+                | "HOMEDRIVE"
+                | "HOMEPATH"
+                | "APPDATA"
+                | "LOCALAPPDATA"
+                | "TEMP"
+                | "TMP"
+        ) {
+            env.push((key, value));
+        }
     }
     env
 }
