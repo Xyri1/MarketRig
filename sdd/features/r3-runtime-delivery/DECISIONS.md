@@ -75,3 +75,13 @@ On 2026-09-03, before the adapter was written, the launch and readiness question
 **Rationale:** The real CLIs cannot run unattended — authentication, trust dialogs, and a model behind every turn — and the gate must be deterministic on both platforms (per D75). A stand-in at the protocol boundary is the same move as the stand-in feed and `trigger-code`, and it makes the adapters' wire contract executable evidence rather than prose.
 
 **Contract:** root [SPEC §17](../../SPEC.md#17-verification); this feature's [SPEC](SPEC.md) §9.
+
+### R3-9 — The terminal manager answers ConPTY's cursor-position query itself when nobody is attached
+
+**Decision:** The terminal manager's reader answers the cursor-position query `ESC[6n` with `ESC[1;1R` itself whenever no attachment is live, and drops the query from the reconnect ring; with an attachment live the bytes pass through untouched and the viewer's terminal answers, as on macOS. That reply is the only byte the daemon ever interprets or synthesises on a terminal — the one exception to root §6.5's raw-byte pumping — and it is not presentation, so D30 still leaves presentation wholly to ghostty-web. The query is unavoidable: `portable-pty =0.9.0` opens every ConPTY with `PSEUDOCONSOLE_INHERIT_CURSOR` (hardcoded in its `src/win/psuedocon.rs`), so conhost writes `ESC[6n` to the master at spawn and holds the child's console initialisation — before `main` — until the host answers with a cursor position report; the real TUIs (Codex, Claude Code) ask the same question later.
+
+**Rationale:** R3's "trigger fires, nobody home" activation ([SPEC](SPEC.md) §6.1) launches a runtime with no viewer attached, so nothing would ever answer: observed 2026-09-03, every Windows launch with nobody attached sat in an executive wait forever — in the gate's G28 and reproduced outside the daemon — and readiness never came. Readiness with nobody home is a daemon obligation, and the viewer cannot serve a launch it is not attached to, so the daemon is the only party that can answer. The alternative, a `[patch.crates-io]` fork of `portable-pty` without the flag, is a fork to maintain and would not help if a runtime's own TUI blocks on the same query with nobody home.
+
+`ponytail:` the 4-byte query is assumed to arrive inside one read, because conhost writes it whole; a small carry buffer across reads is the upgrade if a split is ever observed. And drop the reply entirely once `portable-pty` lets callers omit `PSEUDOCONSOLE_INHERIT_CURSOR`, provided the real TUIs are shown not to block on the query with nobody attached.
+
+**Contract:** root [SPEC §6.5](../../SPEC.md#65-terminal-manager), extended at the R3 merge-back; this feature's [SPEC](SPEC.md) §3.

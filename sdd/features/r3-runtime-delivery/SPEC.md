@@ -1,6 +1,6 @@
 # R3 — Runtime adapters and delivery: Feature SPEC
 
-*Decision basis: per D3, D24, D25, D27, D28, D31, D32, D36, D63, D69, D70, D71 and this feature's R3-1 … R3-8.* This document refines root `sdd/SPEC.md` §4.4, §6, §7, §11, §13.1, §15, and §17. Where it names a runtime flag or protocol method, the fact was verified on 2026-09-02 against Codex CLI 0.152.1 and Claude Code 2.1.258.
+*Decision basis: per D3, D24, D25, D27, D28, D31, D32, D36, D63, D69, D70, D71 and this feature's R3-1 … R3-9.* This document refines root `sdd/SPEC.md` §4.4, §6, §7, §11, §13.1, §15, and §17. Where it names a runtime flag or protocol method, the fact was verified on 2026-09-02 against Codex CLI 0.152.1 and Claude Code 2.1.258.
 
 ## 1. Workspace additions
 
@@ -30,6 +30,8 @@ Scenarios:
 
 ## 3. Terminal manager (R3-2)
 
+*Decision basis: per D30, D31 and this feature's R3-2 and R3-9.*
+
 ```text
 spawn(desk_id, command, cwd, env, size) -> Terminal { generation: 0, ring: 256 KiB }
 attach(desk_id) -> generation n+1; previous attachment closed 4001
@@ -39,7 +41,9 @@ shutdown(desk_id) -> stop input, drain ≤ 2 s, terminate tree (R2 primitive), j
 // the exit is the child's wait, never the reader's EOF: ConPTY's reader ends only when the master closes
 ```
 
-ConPTY (`portable-pty =0.9.0` opens every pseudo console with `PSEUDOCONSOLE_INHERIT_CURSOR`) writes the cursor-position query `ESC[6n` to the master at spawn and holds the child's console initialisation — before `main` — until the host answers with a cursor position report; the real TUIs ask the same question later. The reader answers `ESC[1;1R` itself whenever no attachment is live and drops the query from the ring; with an attachment live the bytes pass through and the viewer's terminal answers, as on macOS. Observed 2026-09-03: without the reply every Windows launch with nobody attached sat in an executive wait forever, and readiness never came.
+The send-buffer accounting adds before it queues and subtracts on a failed queue, so the attached reader's drain can never run ahead of the add and wrap the counter; and the sink lock tolerates poisoning, so one panic under it cannot take every terminal down for the daemon's life (both observed 2026-09-03 in the attended Windows E4: an overflow panic under a fast viewer poisoned the lock, the exit thread then panicked before reporting the exit, and the switch's five-second wait ran out).
+
+ConPTY (`portable-pty =0.9.0` opens every pseudo console with `PSEUDOCONSOLE_INHERIT_CURSOR`, hardcoded in its `src/win/psuedocon.rs`) writes the cursor-position query `ESC[6n` to the master at spawn and holds the child's console initialisation — before `main` — until the host answers with a cursor position report; the real TUIs ask the same question later. The reader answers `ESC[1;1R` itself whenever no attachment is live and drops the query from the ring; with an attachment live the bytes pass through untouched and the viewer's terminal answers, as on macOS. That reply is the one exception to raw-byte pumping — the only byte the daemon interprets or synthesises (per R3-9).
 
 `GET /desks/{desk_id}/terminal` (bearer as every route; the `Sec-WebSocket-Protocol` header is not used) answers `404 DESK_NOT_FOUND`, `409 NO_LIVE_SESSION` when no terminal exists, and `400 VALIDATION` when the request is not a WebSocket upgrade — all three before any attachment is taken, so a request that never upgrades cannot supersede a live one — else upgrades. Frames: binary = bytes; text = `{"resize":{"cols":n,"rows":n}}` from the client, `{"exited":{"reason":…,"code":…}}` from the server followed by close `1000`. The ring is replayed as one binary frame before live bytes. The terminal manager owns no process record: `agent_processes` rows are the adapters' (R3-6).
 

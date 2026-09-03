@@ -102,11 +102,16 @@ impl Sink {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
+        // Account before queuing: the attached reader subtracts as it drains,
+        // and a frame drained before its own add would wrap the counter (seen
+        // as an overflow panic under a fast viewer on a real TUI).
+        let after = self.buffered.fetch_add(cost, Ordering::Relaxed) + cost;
         if sender.send(frame).is_err() {
+            self.buffered.fetch_sub(cost, Ordering::Relaxed);
             self.sender = None;
             return;
         }
-        if self.buffered.fetch_add(cost, Ordering::Relaxed) + cost > SEND_BUFFER {
+        if after > SEND_BUFFER {
             // §3: a client that never reads must not block the child.
             self.sender = None;
         }
@@ -215,7 +220,8 @@ impl Manager {
             // initialisation until it is answered; the real TUIs ask too. An
             // attached viewer's terminal answers, as it does for the operator.
             // With nobody attached the daemon answers and keeps the query out
-            // of the ring, or a viewer attaching later would answer it again.
+            // of the ring, or a viewer attaching later would answer it again
+            // (R3-9: the one exception to raw-byte pumping).
             let cursor_reply = input_tx.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; READ_CHUNK];
@@ -223,7 +229,9 @@ impl Manager {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let mut sink = sink.lock().expect("sink");
+                            let mut sink = sink
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             if sink.sender.is_none() {
                                 // ponytail: the 4-byte query is assumed to land
                                 // inside one read (conhost writes it whole); a
@@ -273,7 +281,7 @@ impl Manager {
                     "EXITED"
                 };
                 sink.lock()
-                    .expect("sink")
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .send(Frame::Exited { reason, code }, 0);
                 let _ = exits.send(TerminalExit {
                     desk_id,
@@ -313,7 +321,10 @@ impl Manager {
     /// its input stops counting, and this one gets the ring then live bytes.
     pub fn attach(&self, desk_id: &str) -> Option<Attachment> {
         let terminal = self.get(desk_id)?;
-        let mut sink = terminal.sink.lock().expect("sink");
+        let mut sink = terminal
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         sink.send(Frame::Superseded, 0);
         sink.sender = None;
         sink.generation += 1;
@@ -331,7 +342,11 @@ impl Manager {
 
     fn current(&self, desk_id: &str, generation: u64) -> Option<Arc<Terminal>> {
         let terminal = self.get(desk_id)?;
-        let live = terminal.sink.lock().expect("sink").generation;
+        let live = terminal
+            .sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation;
         (live == generation).then_some(terminal)
     }
 

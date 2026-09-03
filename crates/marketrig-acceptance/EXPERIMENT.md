@@ -112,7 +112,7 @@ E4 is the R3 scenario, and it inverts the other two: **you register nothing and 
 4. **Two things that look like faults and are not.** A Claude `--resume` only succeeds once the earlier session completed a turn, so let a `SESSION_TURN_ENDED` land before ending one. And a Codex thread lives inside one app-server lifetime: restart the daemon and the resume fails, the dispatcher repoints the desk `unresumable` and starts a new session — correct behaviour, recorded as evidence.
 5. **The switch.** The harness then discovers the other runtime, switches the desk to it, and asserts the desk's pointers and history did not move. If the other runtime is not installed, that leg is recorded `INCONCLUSIVE` and the cell is still complete.
 
-Nothing to clean up afterwards: the launch files live under the bundle's `data\runtime\launch\` and the daemon deletes them when the process row closes. Your own Codex or Claude configuration was never touched.
+If a Windows console is left echoing every keypress as `;1;0;1_[`-style key reports after a cell (win32-input-mode left on by a cell that ended abnormally), run `[Console]::Write("`e[?9001l")` in it or open a new tab. Nothing else to clean up afterwards: the launch files live under the bundle's `data\runtime\launch\` and the daemon deletes them when the process row closes. Your own Codex or Claude configuration was never touched.
 
 ## 7. Read the result
 

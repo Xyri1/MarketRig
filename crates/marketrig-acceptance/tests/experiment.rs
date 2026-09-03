@@ -980,6 +980,18 @@ mod console {
             if let Some(relay) = self.relay.take() {
                 let _ = relay.join();
             }
+            // ConPTY switched the hosting terminal into win32-input-mode
+            // (`ESC[?9001h`, relayed with the session's own output) and the
+            // dead session never switches it back, so this console does, or
+            // every later keypress in the operator's window is echoed as a
+            // key report. Harmless elsewhere; a terminal that never saw the
+            // mode ignores the reset.
+            {
+                use std::io::Write as _;
+                let mut out = std::io::stdout();
+                let _ = out.write_all(b"\x1b[?9001l");
+                let _ = out.flush();
+            }
             self.saved.restore();
             println!("\r");
         }
