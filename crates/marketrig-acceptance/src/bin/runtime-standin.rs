@@ -594,7 +594,22 @@ async fn claude(args: &[String], script: Script) {
         eprintln!("runtime-standin: mcp.json registers no channel server");
         std::process::exit(1);
     };
-    let mut child = stdio_client(&command, &args, &env);
+    let mut child = stdio_client(&command, &args, &env, false);
+    // Claude Code attaches a channel only after its own `initialized`, a beat
+    // after `initialize` answers, and silently drops anything pushed in
+    // between (§9.1). The stand-in reproduces that gap, so a bridge that
+    // connects before `initialized` loses the first delivery here too.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut dropped = 0u64;
+    while let Ok(line) = child.lines.try_recv() {
+        if line.contains("notifications/claude/channel") {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        say(&format!("DROPPED_BEFORE_INITIALIZED {dropped}"));
+    }
+    child.initialized();
     let mut seen = 0u64;
     while let Some(frame) = child.next() {
         if frame["method"] != "notifications/claude/channel" {
@@ -692,7 +707,9 @@ fn run_hook(settings: Option<&str>, event: &str, input: Value) {
 /// child is killed when the reader is dropped.
 struct StdioClient {
     child: std::process::Child,
-    reader: BufReader<std::process::ChildStdout>,
+    /// The child's output lines, read by a thread so the gap before
+    /// `initialized` can be drained without blocking on the next one.
+    lines: std::sync::mpsc::Receiver<String>,
     next: i64,
 }
 
@@ -707,14 +724,15 @@ impl StdioClient {
     /// The next frame, or `None` when the child's output ends.
     fn next(&mut self) -> Option<Value> {
         loop {
-            let mut line = String::new();
-            if self.reader.read_line(&mut line).ok()? == 0 {
-                return None;
-            }
+            let line = self.lines.recv().ok()?;
             if let Ok(frame) = serde_json::from_str::<Value>(&line) {
                 return Some(frame);
             }
         }
+    }
+
+    fn initialized(&mut self) {
+        self.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
     }
 
     fn call(&mut self, method: &str, params: Value) -> Option<Value> {
@@ -738,8 +756,14 @@ impl Drop for StdioClient {
 }
 
 /// Spawns the server and completes MCP `initialize` — advertising nothing,
-/// because the stand-in offers no client capability at all.
-fn stdio_client(command: &str, args: &[String], env: &[(String, String)]) -> StdioClient {
+/// because the stand-in offers no client capability at all. `initialized`
+/// follows at once unless the caller wants the gap Claude Code leaves.
+fn stdio_client(
+    command: &str,
+    args: &[String],
+    env: &[(String, String)],
+    initialized: bool,
+) -> StdioClient {
     let mut child = std::process::Command::new(command);
     child
         .args(args)
@@ -754,9 +778,17 @@ fn stdio_client(command: &str, args: &[String], env: &[(String, String)]) -> Std
         std::process::exit(1);
     });
     let stdout = child.stdout.take().expect("a piped stdout");
+    let (tx, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut client = StdioClient {
         child,
-        reader: BufReader::new(stdout),
+        lines,
         next: 1,
     };
     client.call(
@@ -764,13 +796,15 @@ fn stdio_client(command: &str, args: &[String], env: &[(String, String)]) -> Std
         json!({"protocolVersion": "2025-06-18", "capabilities": {},
                "clientInfo": {"name": "runtime-standin", "version": "99.0.0"}}),
     );
-    client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    if initialized {
+        client.initialized();
+    }
     client
 }
 
 /// Reads one resource through the registered adapter and echoes it (§9.1).
 fn mcp_read(command: &str, args: &[String], env: &[(String, String)], uri: &str) {
-    let mut client = stdio_client(command, args, env);
+    let mut client = stdio_client(command, args, env, true);
     let answer = client.call("resources/read", json!({"uri": uri}));
     match answer.as_ref().and_then(|frame| {
         frame["result"]["contents"][0]["text"]

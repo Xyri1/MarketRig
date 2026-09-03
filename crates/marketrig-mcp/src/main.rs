@@ -17,7 +17,7 @@ use rmcp::model::{
     ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
     ServerInfo, Tool,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt};
 
 #[derive(Parser)]
@@ -282,10 +282,19 @@ impl ServerHandler for Adapter {
 // ---------------------------------------------------------------------------
 
 /// The bridge's own server: no tools, no resources, one experimental
-/// capability, and a sentence saying what arrives on it.
-struct Bridge;
+/// capability, and a sentence saying what arrives on it. `initialized` is the
+/// cue to open the socket: Claude Code attaches a channel only after its own
+/// `notifications/initialized`, and silently drops anything pushed earlier.
+#[derive(Default)]
+struct Bridge {
+    initialized: Arc<tokio::sync::Notify>,
+}
 
 impl ServerHandler for Bridge {
+    async fn on_initialized(&self, _context: NotificationContext<RoleServer>) {
+        self.initialized.notify_one();
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut capabilities = ServerCapabilities::default();
         capabilities.experimental = Some(
@@ -324,7 +333,11 @@ fn bridge(adapter: Adapter) -> ExitCode {
         Err(error) => return fail("INTERNAL", &format!("Cannot start a runtime: {error}."), 1),
     };
     runtime.block_on(async move {
-        let service = match Bridge.serve(rmcp::transport::stdio()).await {
+        let initialized = Arc::new(tokio::sync::Notify::new());
+        let bridge = Bridge {
+            initialized: initialized.clone(),
+        };
+        let service = match bridge.serve(rmcp::transport::stdio()).await {
             Ok(service) => service,
             Err(error) => {
                 return fail(
@@ -335,12 +348,15 @@ fn bridge(adapter: Adapter) -> ExitCode {
             }
         };
         let peer = service.peer().clone();
-        let socket = tokio::spawn(forward(
-            adapter.endpoint.base().replacen("http://", "ws://", 1)
-                + &format!("/desks/{}/channel", adapter.desk_id),
-            format!("Bearer {}", adapter.endpoint.credential()),
-            peer,
-        ));
+        let url = adapter.endpoint.base().replacen("http://", "ws://", 1)
+            + &format!("/desks/{}/channel", adapter.desk_id);
+        let bearer = format!("Bearer {}", adapter.endpoint.credential());
+        // The connection is the session's readiness (§5.3), so it waits for
+        // `initialized`: a frame delivered before that never reaches the session.
+        let socket = tokio::spawn(async move {
+            initialized.notified().await;
+            forward(url, bearer, peer).await;
+        });
         // Either end going away ends the bridge (§5.3).
         tokio::select! {
             _ = socket => {}
@@ -388,7 +404,7 @@ mod tests {
 
     #[test]
     fn the_bridge_declares_the_channel_and_nothing_else() {
-        let info = Bridge.get_info();
+        let info = Bridge::default().get_info();
         assert_eq!(
             info.capabilities.experimental.as_ref().map(|e| e.len()),
             Some(1)
