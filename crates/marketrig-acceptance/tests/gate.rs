@@ -3428,9 +3428,17 @@ fn gate() {
         "no stand-in process to survive the kill",
         || !alive(app_server) && !alive(session_pid),
     );
-    assert_eq!(
-        pointer(&g, &zeta_id, "codex").as_deref(),
-        Some(zeta_thread.as_str()),
+    // The pointer outlives the process (§8): either it is still the lost
+    // thread, or the successor has already tried to resume it, found the
+    // thread gone with its app-server (a Codex thread lives inside one
+    // app-server lifetime), repointed the desk `unresumable` from exactly
+    // that thread, and started anew (§6.2) — the slower platform gets there
+    // before this read does.
+    let repointed = payloads(&g, &zeta_id, "SESSION_POINTER_CHANGED")
+        .iter()
+        .any(|p| p["cause"] == "unresumable" && p["from"] == zeta_thread.as_str());
+    assert!(
+        pointer(&g, &zeta_id, "codex").as_deref() == Some(zeta_thread.as_str()) || repointed,
         "the pointer outlives the process (§8)"
     );
     // The lost session is gone from the successor either way: its dispatcher
@@ -3463,7 +3471,7 @@ fn gate() {
     g.note(
         "G32",
         "a hard kill with a prompt mid-attempt left recovery naming the lost session and the uncertain prompt, no stand-in alive, the pointer intact, and the lost session gone from the successor",
-        json!({ "recovery": recovery, "process": process_id, "prompt": attempted, "relaunched": relaunched }),
+        json!({ "recovery": recovery, "process": process_id, "prompt": attempted, "relaunched": relaunched, "repointed": repointed }),
     );
 
     let evidence = g.out.display().to_string();
