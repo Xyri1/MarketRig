@@ -895,7 +895,17 @@ mod tests {
         let workspace = roots.desks.join("alpha");
         std::fs::create_dir_all(&workspace).unwrap();
         let store = Store::open(&roots.database()).unwrap();
-        let executable = if cfg!(windows) { "cmd" } else { "/bin/echo" };
+        // Absolute on both platforms, because the fixture hands the terminal
+        // an empty search path, and quick to exit whatever the arguments,
+        // because a child that lingers costs shutdown its 2 s drain before
+        // the kill (`cmd.exe` would sit at a prompt; `whoami.exe` rejects
+        // the arguments and leaves at once).
+        let executable = if cfg!(windows) {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            format!(r"{root}\System32\whoami.exe")
+        } else {
+            "/bin/echo".to_string()
+        };
         let workspace_sql = workspace.display().to_string().replace('\'', "''");
         store
             .unit(move |tx| {
