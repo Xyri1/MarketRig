@@ -229,7 +229,7 @@ fn capture_path() -> String {
     ] {
         let mut command = Command::new("reg.exe");
         command.args(["query", key, "/v", name]);
-        if let Some((true, out)) = run(command) {
+        if let Some((true, out, _)) = run(command) {
             // `    Path    REG_EXPAND_SZ    C:\a;C:\b`
             if let Some(value) = out
                 .lines()
