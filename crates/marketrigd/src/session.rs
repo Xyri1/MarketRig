@@ -786,6 +786,32 @@ pub trait Adapter: Send + Sync {
 /// §4.2's launch environment, shared by both adapters: the captured login
 /// `PATH`, `TERM`, the desk id, and the daemon's `HOME` and locale. Secrets are
 /// each adapter's own to add.
+/// Windows has no usable process without its extra variables: Winsock needs
+/// `SYSTEMROOT`, the shell shims need `COMSPEC` and `PATHEXT`, and the
+/// runtimes' own state lives under the profile directories (§4.2).
+fn keep_env(key: &str) -> bool {
+    if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(
+        key.to_ascii_uppercase().as_str(),
+        "SYSTEMROOT"
+            | "COMSPEC"
+            | "PATHEXT"
+            | "USERPROFILE"
+            | "HOMEDRIVE"
+            | "HOMEPATH"
+            | "APPDATA"
+            | "LOCALAPPDATA"
+            | "TEMP"
+            | "TMP"
+    ) {
+        return true;
+    }
+    false
+}
+
 pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
     let mut env = vec![
         ("PATH".to_string(), search_path.to_string()),
@@ -793,26 +819,7 @@ pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
         ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
     ];
     for (key, value) in std::env::vars() {
-        if key == "HOME" || key == "LANG" || key.starts_with("LC_") {
-            env.push((key, value));
-        }
-        // Windows has no usable process without these: Winsock needs
-        // `SYSTEMROOT`, the shell shims need `COMSPEC` and `PATHEXT`, and the
-        // runtimes' own state lives under the profile directories (§4.2).
-        #[cfg(windows)]
-        if matches!(
-            key.to_ascii_uppercase().as_str(),
-            "SYSTEMROOT"
-                | "COMSPEC"
-                | "PATHEXT"
-                | "USERPROFILE"
-                | "HOMEDRIVE"
-                | "HOMEPATH"
-                | "APPDATA"
-                | "LOCALAPPDATA"
-                | "TEMP"
-                | "TMP"
-        ) {
+        if keep_env(&key) {
             env.push((key, value));
         }
     }
