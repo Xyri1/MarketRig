@@ -85,9 +85,11 @@ impl From<io::Error> for DaemonError {
 pub struct Startup {
     pub roots: Roots,
     pub store: Store,
-    /// Bound on `127.0.0.1:0` and still blocking; the async glue sets
-    /// `set_nonblocking(true)` before handing it to tokio.
-    pub listener: TcpListener,
+    /// Bound on `127.0.0.1:0` and still blocking; the async glue takes it,
+    /// sets `set_nonblocking(true)`, and hands it to tokio. Taken, never
+    /// cloned: on Windows `try_clone` answers an inheritable socket, and every
+    /// child would then keep a dead daemon's port completing handshakes.
+    pub listener: Option<TcpListener>,
     pub port: u16,
     pub daemon_uuid: String,
     /// The per-start bearer, 32 CSPRNG bytes as 64 lowercase hex characters.
@@ -208,7 +210,7 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
     Ok(Startup {
         roots,
         store,
-        listener,
+        listener: Some(listener),
         port,
         daemon_uuid,
         credential,
@@ -484,7 +486,13 @@ fn endpoint_write_atomic() {
     assert_eq!(published.port, startup.port);
     assert_eq!(
         published.port,
-        startup.listener.local_addr().unwrap().port()
+        startup
+            .listener
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     );
     assert_eq!(published.credential, startup.credential);
     assert_eq!(published.credential.len(), 64);

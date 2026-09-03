@@ -245,6 +245,11 @@ pub struct Harness {
     /// explicit path and scripts through [`Harness::script`].
     pub standin: PathBuf,
     observations: File,
+    /// The last daemon this harness stopped or killed. A hard kill leaves its
+    /// `endpoint.json` behind, and on Windows an orphan holding an inherited
+    /// listener keeps its port half-open, so the pointer is skipped until the
+    /// successor rewrites it rather than probed.
+    stale: Option<String>,
     step: u32,
     daemons: u32,
     agent: ureq::Agent,
@@ -282,6 +287,7 @@ impl Harness {
         eprintln!("acceptance evidence: {}", out.display());
         Harness {
             observations: File::create(out.join("observations.jsonl")).expect("observations"),
+            stale: None,
             out,
             daemond,
             cli,
@@ -471,8 +477,21 @@ impl Harness {
 
     /// R0 feature SPEC §5.2: authenticated health plus daemon-UUID equality.
     pub fn verify(&self, endpoint: &Endpoint) -> bool {
-        match self.request("GET", endpoint.port, "/health", &endpoint.credential, None) {
-            Some((200, body)) => parse(&body)["daemon_uuid"] == endpoint.daemon_uuid.as_str(),
+        // Its own short budget: a half-open port must cost 2 s, not the
+        // agent's 30 s, or every wait around a kill is spent on it.
+        let sent = self
+            .agent
+            .get(format!("http://127.0.0.1:{}/health", endpoint.port).as_str())
+            .config()
+            .timeout_global(Some(Duration::from_secs(2)))
+            .build()
+            .header("Authorization", format!("Bearer {}", endpoint.credential))
+            .call();
+        match sent {
+            Ok(mut response) if response.status() == 200 => {
+                let body = response.body_mut().read_to_string().unwrap_or_default();
+                parse(&body)["daemon_uuid"] == endpoint.daemon_uuid.as_str()
+            }
             _ => false,
         }
     }
@@ -497,6 +516,7 @@ impl Harness {
                 );
             }
             if let Some(endpoint) = self.read_endpoint()
+                && self.stale.as_deref() != Some(endpoint.daemon_uuid.as_str())
                 && self.verify(&endpoint)
             {
                 break endpoint;
@@ -537,6 +557,7 @@ impl Harness {
         assert_eq!(parse(&body), json!({}));
         // §4.2 bounds shutdown at 5 seconds; the slack is process teardown.
         let exit = await_exit(&mut daemon.child, Duration::from_secs(8));
+        self.stale = Some(endpoint.daemon_uuid.clone());
         assert_eq!(exit.code(), Some(0), "clean shutdown exits 0");
         assert!(
             !self.endpoint_path().exists(),
@@ -553,6 +574,7 @@ impl Harness {
         let endpoint = daemon.endpoint.clone();
         daemon.child.kill().expect("kill marketrigd");
         let exit = await_exit(&mut daemon.child, Duration::from_secs(5));
+        self.stale = Some(endpoint.daemon_uuid.clone());
         self.note(
             scenario,
             "daemon hard-killed",

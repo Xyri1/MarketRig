@@ -3433,20 +3433,37 @@ fn gate() {
         Some(zeta_thread.as_str()),
         "the pointer outlives the process (§8)"
     );
-    let (status, no_session) = g.api(
+    // The lost session is gone from the successor either way: its dispatcher
+    // may already have resumed the thread for the still-queued result (§8, a
+    // race the slower platform wins), in which case the live process is a new
+    // row, never the lost one; otherwise the terminal route has nobody.
+    let (status, session) = g.api(
         "G32",
         &endpoint,
         "GET",
-        &format!("/desks/{zeta_id}/terminal"),
+        &format!("/desks/{zeta_id}/session"),
         None,
     );
-    assert_eq!(status, 409, "{no_session}");
-    assert_eq!(no_session["code"], "NO_LIVE_SESSION");
+    assert_eq!(status, 200, "{session}");
+    let relaunched = session["process"].is_object();
+    if relaunched {
+        assert_ne!(session["process"]["id"], process_id, "{session}");
+    } else {
+        let (status, no_session) = g.api(
+            "G32",
+            &endpoint,
+            "GET",
+            &format!("/desks/{zeta_id}/terminal"),
+            None,
+        );
+        assert_eq!(status, 409, "{no_session}");
+        assert_eq!(no_session["code"], "NO_LIVE_SESSION");
+    }
     g.stop("G32", daemon14);
     g.note(
         "G32",
-        "a hard kill with a prompt mid-attempt left recovery naming the lost session and the uncertain prompt, no stand-in alive, the pointer intact, and the terminal route answering NO_LIVE_SESSION",
-        json!({ "recovery": recovery, "process": process_id, "prompt": attempted }),
+        "a hard kill with a prompt mid-attempt left recovery naming the lost session and the uncertain prompt, no stand-in alive, the pointer intact, and the lost session gone from the successor",
+        json!({ "recovery": recovery, "process": process_id, "prompt": attempted, "relaunched": relaunched }),
     );
 
     let evidence = g.out.display().to_string();

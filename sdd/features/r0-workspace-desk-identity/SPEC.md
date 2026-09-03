@@ -77,7 +77,7 @@ The `RECOVERY` payload names `previous_daemon_uuid` (the newest earlier `RECOVER
 4. mint the daemon UUID — recovery's own event names it (§3.3)
 5. recovery transaction (§4.3)
 6. complete every interrupted CREATING desk (§7.3)
-7. bind 127.0.0.1:0, mint the per-start bearer credential
+7. bind 127.0.0.1:0, mint the per-start bearer credential (the listener is moved into the async runtime, never `try_clone`d: on Windows the duplicate is inheritable and children keep a dead daemon's port alive)
 8. write runtime/endpoint.json atomically (§5.1) — the daemon is now discoverable
 ```
 

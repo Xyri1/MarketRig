@@ -40,6 +40,25 @@ const STDERR_CAP: usize = 256 * 1024;
 /// §4.5 words and nothing wider.
 pub struct Contained {
     child: Box<dyn ChildWrapper>,
+    /// MarketRig's own kill-on-close Job Object around the child, `0` when it
+    /// could not be assigned. `process-wrap` 9.1.0 never sets
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (its spawn takes the wrapper map
+    /// out before `JobObject` looks for `KillOnDrop`), so a daemon that dies
+    /// without dropping would leave the tree alive; closing this handle —
+    /// which process death does — is what ends it.
+    #[cfg(windows)]
+    job: usize,
+}
+
+#[cfg(windows)]
+impl Drop for Contained {
+    fn drop(&mut self) {
+        if self.job != 0 {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(handle(self.job));
+            }
+        }
+    }
 }
 
 /// Spawns `command` inside a fresh group. The caller has already set the stdio,
@@ -53,9 +72,67 @@ pub fn spawn(command: Command) -> io::Result<Contained> {
     wrap.wrap(ProcessSession);
     #[cfg(windows)]
     wrap.wrap(JobObject);
+    let child = wrap.spawn()?;
+    #[cfg(windows)]
+    let job = child.id().map(contain).unwrap_or(0);
     Ok(Contained {
-        child: wrap.spawn()?,
+        child,
+        #[cfg(windows)]
+        job,
     })
+}
+
+#[cfg(windows)]
+pub(crate) fn handle(raw: usize) -> windows::Win32::Foundation::HANDLE {
+    windows::Win32::Foundation::HANDLE(raw as *mut core::ffi::c_void)
+}
+
+/// Puts the freshly spawned child in its own kill-on-close Job Object and
+/// answers the job handle, or `0` when it could not be assigned — in which case
+/// shutdown falls back to terminating the leader alone.
+#[cfg(windows)]
+pub(crate) fn contain(pid: u32) -> usize {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) else {
+            return 0;
+        };
+        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
+            Ok(job) => job,
+            Err(_) => {
+                let _ = CloseHandle(process);
+                return 0;
+            }
+        };
+        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
+                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let contained = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_ok()
+            && AssignProcessToJobObject(job, process).is_ok();
+        let _ = CloseHandle(process);
+        if contained {
+            job.0 as usize
+        } else {
+            let _ = CloseHandle(job);
+            0
+        }
+    }
 }
 
 impl Contained {

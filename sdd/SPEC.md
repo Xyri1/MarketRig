@@ -268,7 +268,7 @@ Every `marketrigd` start follows one fixed order, so a daemon a client can reach
 4. mint the per-start daemon UUID, which the recovery event itself names
 5. run the recovery transaction (§15)
 6. complete every interrupted CREATING desk (§5.2)
-7. bind 127.0.0.1 on an operating-system-assigned port and mint the bearer credential
+7. bind 127.0.0.1 on an operating-system-assigned port and mint the bearer credential; the listener is handed to the async runtime as is, never duplicated, because on Windows a duplicated socket is inheritable and every child would keep a dead daemon's port completing handshakes
 8. write runtime/endpoint.json atomically — the daemon is now discoverable
 ```
 
@@ -508,7 +508,7 @@ Trigger code:
 - receives no automatic execution retry;
 - may call the desk-scoped `marketrig` CLI and the desk's MCP surface, including paper actions.
 
-`marketrigd` launches trigger code directly without a command shell. macOS uses a dedicated POSIX session and process group; Windows uses a kill-on-close Job Object through one maintained, exactly pinned Windows API binding (selection at plan time). Timeout or cancellation terminates the managed group and its ordinary descendants. One internal containment primitive implements this spawn-and-terminate contract for every managed child MarketRig owns, so both platforms have exactly one process-tree lifecycle path (per D41, D73).
+`marketrigd` launches trigger code directly without a command shell. macOS uses a dedicated POSIX session and process group; Windows uses a kill-on-close Job Object through one maintained, exactly pinned Windows API binding (selection at plan time); the kill-on-close limit is set by MarketRig itself, because the pinned wrapper crate does not (R2 feature SPEC §4.5). Timeout or cancellation terminates the managed group and its ordinary descendants. One internal containment primitive implements this spawn-and-terminate contract for every managed child MarketRig owns, so both platforms have exactly one process-tree lifecycle path (per D41, D73).
 
 MarketRig promises ordinary descendant cleanup, not an adversarial sandbox. Code that deliberately escapes macOS process-group containment violates the trigger execution contract and is outside the MVP guarantee.
 

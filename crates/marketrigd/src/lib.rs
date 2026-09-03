@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// The daemon entry point: §4.1 startup, serve the §6 routes, §4.2 shutdown.
 pub fn run() -> ExitCode {
-    let startup = match start() {
+    let mut startup = match start() {
         Ok(s) => s,
         Err((code, message)) => {
             eprintln!("error: {code}: {message}");
@@ -33,7 +33,7 @@ pub fn run() -> ExitCode {
     // The feed's seam variables are read once here and passed down, like the data
     // roots (R1 feature SPEC §10.1).
     let feed_base = feed::feed_base_from_env();
-    match serve(&startup, feed_base) {
+    match serve(&mut startup, feed_base) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("serve failed: {e}");
@@ -59,8 +59,11 @@ fn start() -> Result<daemon::Startup, (&'static str, String)> {
     })
 }
 
-fn serve(startup: &daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::io::Result<()> {
-    let std_listener = startup.listener.try_clone()?;
+fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::io::Result<()> {
+    let std_listener = startup
+        .listener
+        .take()
+        .ok_or_else(|| std::io::Error::other("the listener was already taken"))?;
     std_listener.set_nonblocking(true)?;
     let registry = Arc::new(node::Registry::new(
         startup.store.clone(),

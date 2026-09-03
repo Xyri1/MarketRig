@@ -187,7 +187,7 @@ impl Manager {
         // tree, on Windows the job has to be assigned here so that everything
         // the session starts later is inside it (slice 004 §2).
         #[cfg(windows)]
-        let job = contain(pid);
+        let job = crate::exec::contain(pid);
         let mut reader = pair.master.try_clone_reader()?;
         let mut writer = pair.master.take_writer()?;
 
@@ -209,12 +209,45 @@ impl Manager {
         let interrupting = Arc::new(AtomicBool::new(false));
         let reader_thread = {
             let sink = sink.clone();
+            // ConPTY is created with `PSEUDOCONSOLE_INHERIT_CURSOR` (fixed in
+            // portable-pty 0.9.0), so conhost asks the hosting terminal for the
+            // cursor position at spawn and holds the child's console
+            // initialisation until it is answered; the real TUIs ask too. An
+            // attached viewer's terminal answers, as it does for the operator.
+            // With nobody attached the daemon answers and keeps the query out
+            // of the ring, or a viewer attaching later would answer it again.
+            let cursor_reply = input_tx.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; READ_CHUNK];
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => sink.lock().expect("sink").push(&buf[..n]),
+                        Ok(n) => {
+                            let mut sink = sink.lock().expect("sink");
+                            if sink.sender.is_none() {
+                                // ponytail: the 4-byte query is assumed to land
+                                // inside one read (conhost writes it whole); a
+                                // small carry buffer across reads is the upgrade.
+                                let mut kept = Vec::with_capacity(n);
+                                let mut asked = false;
+                                let mut i = 0;
+                                while i < n {
+                                    if buf[i..n].starts_with(b"\x1b[6n") {
+                                        asked = true;
+                                        let _ = cursor_reply.try_send(b"\x1b[1;1R".to_vec());
+                                        i += 4;
+                                    } else {
+                                        kept.push(buf[i]);
+                                        i += 1;
+                                    }
+                                }
+                                if asked {
+                                    sink.push(&kept);
+                                    continue;
+                                }
+                            }
+                            sink.push(&buf[..n]);
+                        }
                     }
                 }
             })
@@ -426,66 +459,13 @@ impl Terminal {
         use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
         unsafe {
             if self.job != 0 {
-                let _ = CloseHandle(handle(self.job));
+                let _ = CloseHandle(crate::exec::handle(self.job));
                 return;
             }
             if let Ok(process) = OpenProcess(PROCESS_TERMINATE, false, self.pid) {
                 let _ = TerminateProcess(process, 1);
                 let _ = CloseHandle(process);
             }
-        }
-    }
-}
-
-#[cfg(windows)]
-fn handle(raw: usize) -> windows::Win32::Foundation::HANDLE {
-    windows::Win32::Foundation::HANDLE(raw as *mut core::ffi::c_void)
-}
-
-/// Puts the freshly spawned child in its own kill-on-close Job Object and
-/// answers the job handle, or `0` when it could not be assigned — in which case
-/// shutdown falls back to terminating the leader alone.
-#[cfg(windows)]
-fn contain(pid: u32) -> usize {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
-    };
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
-    unsafe {
-        let Ok(process) = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid) else {
-            return 0;
-        };
-        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
-            Ok(job) => job,
-            Err(_) => {
-                let _ = CloseHandle(process);
-                return 0;
-            }
-        };
-        let limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-            BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
-                LimitFlags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let contained = SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            (&raw const limits).cast(),
-            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-        .is_ok()
-            && AssignProcessToJobObject(job, process).is_ok();
-        let _ = CloseHandle(process);
-        if contained {
-            job.0 as usize
-        } else {
-            let _ = CloseHandle(job);
-            0
         }
     }
 }
