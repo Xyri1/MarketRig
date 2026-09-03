@@ -677,17 +677,24 @@ fn run_hook(settings: Option<&str>, event: &str, input: Value) {
             let Some(command) = hook["command"].as_str() else {
                 continue;
             };
-            let (shell, flag) = if cfg!(windows) {
-                ("cmd", "/C")
-            } else {
-                ("/bin/sh", "-c")
+            // The platform shell, handed the command line as one string. On
+            // Windows `arg` would quote it and escape its inner quotes, and
+            // `cmd /C` strips only the outer pair, so a redirection target
+            // like `>> "C:\…\hooks.jsonl"` arrives as `\"C:\…\"` and fails.
+            #[cfg(windows)]
+            let mut shell = {
+                use std::os::windows::process::CommandExt as _;
+                let mut shell = std::process::Command::new("cmd");
+                shell.raw_arg(format!("/C {command}"));
+                shell
             };
-            let Ok(mut child) = std::process::Command::new(shell)
-                .arg(flag)
-                .arg(command)
-                .stdin(Stdio::piped())
-                .spawn()
-            else {
+            #[cfg(not(windows))]
+            let mut shell = {
+                let mut shell = std::process::Command::new("/bin/sh");
+                shell.arg("-c").arg(command);
+                shell
+            };
+            let Ok(mut child) = shell.stdin(Stdio::piped()).spawn() else {
                 continue;
             };
             if let Some(stdin) = child.stdin.as_mut() {
