@@ -483,7 +483,9 @@ impl Drop for Manager {
     }
 }
 
-#[cfg(test)]
+// The PTY checks script a Unix shell; the Windows paths are compiled here and
+// exercised by the acceptance gate on CI's `windows-latest`.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
