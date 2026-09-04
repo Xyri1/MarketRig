@@ -657,8 +657,8 @@ fn ledger_has(session_id: &str) -> bool {
 }
 
 /// Runs every command the settings file lists for `event`, handing it the hook
-/// input object on standard input (§5.2). The command is one line, so the
-/// platform shell runs it.
+/// input object on standard input (§5.2): exec form when `args` is present,
+/// otherwise the one-line command under the platform shell, as Claude does.
 fn run_hook(settings: Option<&str>, event: &str, input: Value) {
     let Some(settings) = settings else {
         return;
@@ -677,6 +677,20 @@ fn run_hook(settings: Option<&str>, event: &str, input: Value) {
             let Some(command) = hook["command"].as_str() else {
                 continue;
             };
+            // Exec form (R3 §4.2): `args` present means the executable is
+            // spawned directly with that argument vector and no shell.
+            if let Some(args) = hook["args"].as_array() {
+                let mut exec = std::process::Command::new(command);
+                exec.args(args.iter().filter_map(Value::as_str));
+                if let Ok(mut child) = exec.stdin(Stdio::piped()).spawn() {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        let _ = stdin.write_all(input.to_string().as_bytes());
+                    }
+                    drop(child.stdin.take());
+                    let _ = child.wait();
+                }
+                continue;
+            }
             // The platform shell, handed the command line as one string. On
             // Windows `arg` would quote it and escape its inner quotes, and
             // `cmd /C` strips only the outer pair, so a redirection target
