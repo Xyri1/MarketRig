@@ -4285,9 +4285,11 @@ async fn ws_send(
 /// A child that outlives the check and dies on its own if anything leaks it.
 #[cfg(test)]
 fn idle_terminal() -> crate::terminal::Spawn {
+    // The manager clears the child's environment (no PATH), and every real
+    // adapter passes an absolute executable, so the shell is named by path too.
     let argv = if cfg!(windows) {
         vec![
-            "cmd.exe".to_string(),
+            std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()),
             "/c".to_string(),
             "ping -n 31 127.0.0.1 >NUL".to_string(),
         ]
