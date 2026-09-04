@@ -26,6 +26,8 @@ One invocation per cell now runs **four** scenarios back to back — E1 or E2, E
   $env:MARKETRIG_EXPERIMENT_MEMORY_EMBEDDING_MODEL = "text-embedding-3-small"
   ```
 
+  On macOS, `source crates/marketrig-acceptance/experiment-env.sh codex|claude` does all of the above: it builds the venv under `~/.hindsight` once (`HINDSIGHT_VENV` overrides), checks the marker, prompts for the key without echoing it, and exports the six variables including `MARKETRIG_EXPERIMENT`; set a `MARKETRIG_EXPERIMENT_MEMORY_*` variable first to override its default.
+
   Any OpenAI-compatible base URL works; the key reaches the credential store and the child's environment and nothing else — it is never printed, never in the bundle, never in a log. Leave all five unset and E5 skips with one `INCONCLUSIVE` line naming what was missing.
 - Nothing else. Do **not** set `MARKETRIG_TEST_DATA_ROOT`, `MARKETRIG_TEST_NO_TRADING`, or `MARKETRIG_TEST_QUOTE_URL` yourself: the harness relocates the root into the bundle and clears both feed seams so the daemon polls real Yahoo.
 - Pick the time. Before asking you to do anything, the harness waits up to 60 seconds for one `LIVE` observation from Yahoo, so at least one catalog market must be in session (feature SPEC §2.2, Monday–Friday, no holiday calendar):
