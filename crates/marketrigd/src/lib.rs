@@ -67,6 +67,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
     let memory = Arc::new(memory::Memory::new(
         startup.store.clone(),
         startup.roots.clone(),
+        startup.daemon_uuid.clone(),
     )?);
     if !memory.seam {
         memory::set_platform_store();

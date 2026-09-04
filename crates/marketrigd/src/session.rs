@@ -812,16 +812,23 @@ fn keep_env(key: &str) -> bool {
     false
 }
 
-pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
+/// §4.2's platform half, with no desk in it: the memory child composes its own
+/// variables on top of exactly this set (R4 feature SPEC §2.2).
+pub fn platform_env(search_path: &str) -> Vec<(String, String)> {
     let mut env = vec![
         ("PATH".to_string(), search_path.to_string()),
         ("TERM".to_string(), "xterm-256color".to_string()),
-        ("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()),
     ];
     for (key, value) in std::env::vars() {
         if keep_env(&key) {
             env.push((key, value));
         }
     }
+    env
+}
+
+pub fn base_env(search_path: &str, desk_id: &str) -> Vec<(String, String)> {
+    let mut env = platform_env(search_path);
+    env.push(("MARKETRIG_DESK_ID".to_string(), desk_id.to_string()));
     env
 }

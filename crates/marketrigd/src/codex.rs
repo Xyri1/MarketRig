@@ -535,7 +535,7 @@ fn port_of(url: &str) -> u16 {
 
 /// The port the app-server is told to listen on: bound, taken, released. A
 /// bind race surfaces as the connect deadline (slice §2).
-fn free_port() -> Result<u16, String> {
+pub(crate) fn free_port() -> Result<u16, String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     listener
         .local_addr()

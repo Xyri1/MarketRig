@@ -160,6 +160,13 @@ impl Contained {
         self.child.wait().await
     }
 
+    /// Whether the leader has already exited, without waiting. The memory
+    /// child's supervisor polls this so the handle can stay where a stop
+    /// reaches it (R4 feature SPEC §2.3).
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
     /// Kills the whole group (or ends the job) and reaps it. A termination
     /// failure is a log line, never a caller's problem: the run is over either
     /// way and its outcome is already decided.

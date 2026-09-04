@@ -5,21 +5,24 @@
 //! R4-1), §3 (the provider, per R4-2), §4 (banks and operations, per R4-3),
 //! root `sdd/SPEC.md` §16.
 //!
-//! The child's launch, readiness, and loss are C30's; the desk-scoped routes
-//! and the Hindsight request mappings are C31's. This module owns the two
-//! installation rows, the discovery probe, the credential seam, and the
-//! provider routes, and holds the seam every other memory chunk builds on.
+//! The desk-scoped routes and the Hindsight request mappings are C31's. This
+//! module owns the two installation rows, the discovery probe, the credential
+//! seam, the provider routes, and the child's launch, readiness, and loss.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
+use tokio::sync::Mutex;
 
 use crate::desk::append_event;
 use crate::store::{Roots, Store, StoreError, now_ns};
@@ -61,6 +64,27 @@ pub enum LiveState {
 /// The one 4 KiB tail the daemon keeps of the child's standard output (§2.2).
 const TAIL: usize = 4096;
 
+/// The readiness deadline (§2.2): measured headroom over the 12.6 s cold start
+/// Spike H timed, not a guess. A [`Memory`] field so a check can shorten it.
+const READY_DEADLINE: Duration = Duration::from_secs(120);
+
+/// The `/health` poll and each attempt's own bound (§2.2).
+const HEALTH_POLL: Duration = Duration::from_millis(500);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How often the supervisor looks for the child's exit, and how long a caller
+/// that arrived during `STARTING` sleeps between looks (§2.2, §2.3).
+const WATCH_POLL: Duration = Duration::from_millis(250);
+
+/// The child's `HOME`, under the data root (§2.2): pg0 puts its PostgreSQL
+/// instance there, so the daemon owns it rather than the user's home.
+const HINDSIGHT_HOME: &str = "hindsight";
+
+/// What a caller is told when the start it waited for ended (§2.3, §4.3). The
+/// child's own last line is in `MEMORY_LOST` and, on the second loss, the row.
+const LOST_MESSAGE: &str = "The memory child stopped before it could answer.";
+const SLOW_MESSAGE: &str = "The memory child did not become ready in time.";
+
 /// Everything about the live child, behind one mutex (slice §2): operations are
 /// seconds long and one per installation, so there is no finer lock.
 #[derive(Default)]
@@ -76,6 +100,9 @@ pub struct Live {
     pub output_tail: Vec<u8>,
     /// Losses since the last readiness; the second one is `CHILD_FAILED` (§2.3).
     pub losses_since_ready: u8,
+    /// Bumped by every start and every stop, so a supervisor whose child is
+    /// already gone cannot report a loss against the one that replaced it.
+    pub generation: u64,
 }
 
 impl Live {
@@ -104,11 +131,18 @@ pub struct Memory {
     /// (the child is on loopback), never following a redirect. Timeouts are per
     /// request, since §3 and §4.3 bound them differently.
     pub http: reqwest::Client,
-    pub live: tokio::sync::Mutex<Live>,
+    /// This daemon's uuid, for the `children.json` record of every start (§2.2).
+    pub daemon_uuid: String,
+    /// [`READY_DEADLINE`] in a daemon; a check shortens it rather than waiting
+    /// out two minutes for the loss path.
+    pub ready_deadline: Duration,
+    /// Shared with each start's supervisor task, which outlives the call that
+    /// started the child.
+    pub live: Arc<Mutex<Live>>,
 }
 
 impl Memory {
-    pub fn new(store: Store, roots: Roots) -> io::Result<Memory> {
+    pub fn new(store: Store, roots: Roots, daemon_uuid: String) -> io::Result<Memory> {
         Ok(Memory {
             store,
             roots,
@@ -118,7 +152,9 @@ impl Memory {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(io::Error::other)?,
-            live: tokio::sync::Mutex::new(Live::default()),
+            daemon_uuid,
+            ready_deadline: READY_DEADLINE,
+            live: Arc::new(Mutex::new(Live::default())),
         })
     }
 }
@@ -444,9 +480,20 @@ impl Memory {
     /// with no key in it, both come back unchanged.
     pub fn redact(&self, message: &str) -> String {
         match self.load_key() {
-            Ok(Some(key)) if !key.is_empty() => message.replace(&key, REDACTED),
+            Ok(Some(key)) => redact_key(&key, message),
             _ => message.to_string(),
         }
+    }
+}
+
+/// [`Memory::redact`] against a key already in hand — the child's supervisor
+/// holds the key its own child was launched with, so a provider change under it
+/// cannot leave the child's last line unredacted.
+fn redact_key(key: &str, message: &str) -> String {
+    if key.is_empty() {
+        message.to_string()
+    } else {
+        message.replace(key, REDACTED)
     }
 }
 
@@ -675,6 +722,461 @@ impl Memory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The child's lifecycle (§2.2, §2.3)
+// ---------------------------------------------------------------------------
+
+/// Everything one start needs, read before the live state is claimed so that a
+/// row or a provider that forbids the start costs no process at all.
+struct Launch {
+    executable: PathBuf,
+    port: u16,
+    /// Minted per start, held in memory only (§2.2).
+    bearer: String,
+    /// The provider key this child is launched with, kept for redaction (§4.3).
+    key: String,
+    env: Vec<(String, String)>,
+}
+
+/// 32 random bytes as hex — the child's `HINDSIGHT_API_TENANT_API_KEY` (§2.2).
+fn mint_bearer() -> Result<String, MemoryError> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|e| MemoryError::Error(e.to_string()))?;
+    Ok(bytes.iter().fold(String::new(), |mut hex, byte| {
+        use fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    }))
+}
+
+/// The variables the child's own `HOME` replaces, whatever case the daemon's
+/// environment spells them in.
+fn redirected(key: &str) -> bool {
+    ["HOME", "USERPROFILE", "LOCALAPPDATA"]
+        .iter()
+        .any(|name| key.eq_ignore_ascii_case(name))
+}
+
+/// The last non-empty line of the child's tail, lossily decoded and never
+/// parsed further — the banner carries ANSI escapes even off a terminal (§2.2).
+fn last_line(tail: &[u8]) -> String {
+    String::from_utf8_lossy(tail)
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+impl Memory {
+    /// §2.2's environment and nothing else of the daemon's own: the R3 §4.2
+    /// platform set with the child's `HOME` in place of the daemon's, plus
+    /// every `HINDSIGHT_API_*` variable.
+    fn child_env(
+        &self,
+        home: &Path,
+        port: u16,
+        bearer: &str,
+    ) -> Result<Vec<(String, String)>, MemoryError> {
+        let home = home.to_string_lossy().into_owned();
+        let mut env: Vec<(String, String)> =
+            crate::session::platform_env(&crate::runtime::search_path())
+                .into_iter()
+                .filter(|(key, _)| !redirected(key))
+                .collect();
+        #[cfg(windows)]
+        {
+            env.push(("USERPROFILE".to_string(), home.clone()));
+            env.push(("LOCALAPPDATA".to_string(), home.clone()));
+        }
+        env.push(("HOME".to_string(), home));
+        env.extend([
+            ("HINDSIGHT_API_HOST".to_string(), "127.0.0.1".to_string()),
+            ("HINDSIGHT_API_PORT".to_string(), port.to_string()),
+            ("HINDSIGHT_API_WORKERS".to_string(), "1".to_string()),
+            ("HINDSIGHT_API_LOG_LEVEL".to_string(), "warning".to_string()),
+            (
+                "HINDSIGHT_API_DATABASE_URL".to_string(),
+                "pg0://marketrig".to_string(),
+            ),
+            (
+                "HINDSIGHT_API_TENANT_EXTENSION".to_string(),
+                "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension".to_string(),
+            ),
+            (
+                "HINDSIGHT_API_TENANT_API_KEY".to_string(),
+                bearer.to_string(),
+            ),
+            ("HINDSIGHT_API_MCP_ENABLED".to_string(), "false".to_string()),
+            (
+                "HINDSIGHT_API_OTEL_TRACES_ENABLED".to_string(),
+                "false".to_string(),
+            ),
+            (
+                "HINDSIGHT_API_RERANKER_PROVIDER".to_string(),
+                "rrf".to_string(),
+            ),
+        ]);
+        env.extend(self.provider_env()?);
+        Ok(env)
+    }
+
+    /// The rows decide before anything is spawned (§2.3).
+    fn plan(&self) -> Result<Launch, MemoryError> {
+        let row = child_row(&self.store)?;
+        match row.state.as_str() {
+            "AVAILABLE" => {}
+            "UNAVAILABLE" => {
+                return Err(MemoryError::Unavailable(
+                    row.failure_message
+                        .unwrap_or_else(|| "The memory child is unavailable.".to_string()),
+                ));
+            }
+            _ => return Err(MemoryError::Unconfigured),
+        }
+        let Some(executable) = row.executable_path else {
+            return Err(MemoryError::Unconfigured);
+        };
+        let home = self.roots.data.join(HINDSIGHT_HOME);
+        fs::create_dir_all(&home).map_err(|e| MemoryError::Error(e.to_string()))?;
+        let port = crate::codex::free_port().map_err(MemoryError::Error)?;
+        let bearer = mint_bearer()?;
+        let env = self.child_env(&home, port, &bearer)?;
+        Ok(Launch {
+            executable: PathBuf::from(executable),
+            port,
+            bearer,
+            key: self.load_key()?.unwrap_or_default(),
+            env,
+        })
+    }
+
+    /// §2.2: start the child if none is live, wait for `/health`, and answer the
+    /// port and the per-start bearer. A start already in flight is the one to
+    /// wait for; the caller's own timeout (§4.3) bounds that wait from outside,
+    /// this deadline bounds only the start itself.
+    pub async fn ensure_ready(&self) -> Result<(u16, String), MemoryError> {
+        let deadline = tokio::time::Instant::now() + self.ready_deadline;
+        loop {
+            let state = {
+                let live = self.live.lock().await;
+                if live.state == LiveState::Ready {
+                    return Ok((
+                        live.port.unwrap_or_default(),
+                        live.bearer.clone().unwrap_or_default(),
+                    ));
+                }
+                live.state
+            };
+            if state == LiveState::Starting {
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(MemoryError::Unavailable(SLOW_MESSAGE.to_string()));
+                }
+                tokio::time::sleep(WATCH_POLL).await;
+                continue;
+            }
+
+            // `NOT_STARTED` or `LOST`: this caller starts it, once.
+            let launch = self.plan()?;
+            let generation = {
+                let mut live = self.live.lock().await;
+                if matches!(live.state, LiveState::Starting | LiveState::Ready) {
+                    continue; // another caller claimed the start first
+                }
+                live.generation += 1;
+                live.state = LiveState::Starting;
+                live.port = Some(launch.port);
+                live.bearer = Some(launch.bearer.clone());
+                live.output_tail.clear();
+                live.generation
+            };
+            return self.start(launch, generation, deadline).await;
+        }
+    }
+
+    /// Spawns the claimed start, records it, and hands the child to its
+    /// supervisor before polling `/health` (§2.2).
+    async fn start(
+        &self,
+        launch: Launch,
+        generation: u64,
+        deadline: tokio::time::Instant,
+    ) -> Result<(u16, String), MemoryError> {
+        let mut command = tokio::process::Command::new(&launch.executable);
+        command
+            // The data root carries no `.env` for the launcher's dotenv loader.
+            .current_dir(&self.roots.data)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            // Spike H: the launcher logs to standard output and leaves standard
+            // error empty, so there is nothing here worth a pipe and a task.
+            .stderr(Stdio::null());
+        command.env_clear();
+        for (key, value) in &launch.env {
+            command.env(key, value);
+        }
+        let mut child = match crate::exec::spawn(command) {
+            Ok(child) => child,
+            Err(e) => {
+                let mut live = self.live.lock().await;
+                if live.generation == generation {
+                    *live = Live {
+                        generation,
+                        ..Live::default()
+                    };
+                }
+                return Err(MemoryError::Unavailable(format!(
+                    "The memory child could not be started: {e}"
+                )));
+            }
+        };
+        let pid = child.id().unwrap_or_default();
+        let stdout = child.take_stdout();
+        let mut live = self.live.lock().await;
+        // A stop that landed while the spawn was in flight ends this start
+        // before it is recorded or supervised, so nothing is orphaned (§2.3).
+        if live.generation != generation {
+            drop(live);
+            child.terminate().await;
+            return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
+        }
+        live.pid = Some(pid);
+        live.child = Some(child);
+        drop(live);
+        crate::daemon::record_child(
+            &self.roots,
+            crate::daemon::ChildRecord {
+                pid,
+                kind: "memory".to_string(),
+                args: vec![launch.executable.to_string_lossy().into_owned()],
+                daemon_uuid: self.daemon_uuid.clone(),
+                launched_at_ns: now_ns(),
+            },
+        );
+        tokio::spawn(supervise(
+            Supervisor {
+                store: self.store.clone(),
+                roots: self.roots.clone(),
+                live: self.live.clone(),
+                key: launch.key.clone(),
+                generation,
+            },
+            stdout,
+        ));
+        self.await_ready(launch, generation, deadline).await
+    }
+
+    /// `GET /health` until `200`, the deadline, or the child's end (§2.2).
+    async fn await_ready(
+        &self,
+        launch: Launch,
+        generation: u64,
+        deadline: tokio::time::Instant,
+    ) -> Result<(u16, String), MemoryError> {
+        let health = format!("http://127.0.0.1:{}/health", launch.port);
+        loop {
+            {
+                let live = self.live.lock().await;
+                if live.generation != generation || live.state != LiveState::Starting {
+                    return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
+                }
+            }
+            let answered = matches!(
+                self.http.get(&health).timeout(HEALTH_TIMEOUT).send().await,
+                Ok(response) if response.status() == reqwest::StatusCode::OK
+            );
+            if answered {
+                let pid = {
+                    let mut live = self.live.lock().await;
+                    if live.generation != generation || live.state != LiveState::Starting {
+                        return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
+                    }
+                    live.state = LiveState::Ready;
+                    live.losses_since_ready = 0;
+                    live.pid.unwrap_or_default()
+                };
+                let at_ns = now_ns();
+                self.store.unit(move |tx| {
+                    append_event(tx, "MEMORY_STARTED", None, at_ns, json!({ "pid": pid }))
+                })?;
+                return Ok((launch.port, launch.bearer));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                lose(
+                    &self.store,
+                    &self.roots,
+                    &self.live,
+                    generation,
+                    &launch.key,
+                    None,
+                )
+                .await;
+                return Err(MemoryError::Unavailable(SLOW_MESSAGE.to_string()));
+            }
+            tokio::time::sleep(HEALTH_POLL).await;
+        }
+    }
+
+    /// §2.3: stop a live child. A provider change and Quit both call it; ending
+    /// the generation is what keeps the supervisor from calling this a loss.
+    pub async fn stop_child(&self) {
+        let (child, pid) = {
+            let mut live = self.live.lock().await;
+            if live.state == LiveState::NotStarted && live.child.is_none() {
+                return;
+            }
+            let generation = live.generation + 1;
+            let losses_since_ready = live.losses_since_ready;
+            let child = live.child.take();
+            let pid = live.pid;
+            *live = Live {
+                generation,
+                losses_since_ready,
+                ..Live::default()
+            };
+            (child, pid)
+        };
+        if let Some(mut child) = child {
+            child.terminate().await;
+        }
+        if let Some(pid) = pid {
+            crate::daemon::forget_child(&self.roots, pid);
+        }
+    }
+}
+
+/// Everything one start's supervisor needs; it outlives the call that started
+/// the child, so it carries clones rather than a borrow of [`Memory`].
+struct Supervisor {
+    store: Store,
+    roots: Roots,
+    live: Arc<Mutex<Live>>,
+    key: String,
+    generation: u64,
+}
+
+/// One task per start: the child's standard output into the tail, and the
+/// child's exit into a loss (§2.2, §2.3).
+///
+/// ponytail: a quarter-second poll for the exit rather than an owned `wait()`,
+/// so the handle can stay in [`Live`] where [`Memory::stop_child`] reaches it
+/// without a second channel. Give the child its own watch channel the day a
+/// quarter second of loss latency matters.
+async fn supervise(context: Supervisor, stdout: Option<tokio::process::ChildStdout>) {
+    let mut stdout = stdout;
+    let mut buffer = [0u8; 1024];
+    loop {
+        if let Some(reader) = stdout.as_mut() {
+            match tokio::time::timeout(WATCH_POLL, reader.read(&mut buffer)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => stdout = None,
+                Ok(Ok(read)) => {
+                    let mut live = context.live.lock().await;
+                    if live.generation != context.generation {
+                        return;
+                    }
+                    live.push_output(&buffer[..read]);
+                    continue;
+                }
+                Err(_elapsed) => {}
+            }
+        } else {
+            tokio::time::sleep(WATCH_POLL).await;
+        }
+        let exit_code = {
+            let mut live = context.live.lock().await;
+            if live.generation != context.generation {
+                return;
+            }
+            match live.child.as_mut().map(crate::exec::Contained::try_wait) {
+                Some(Ok(Some(status))) => status.code().map(i64::from),
+                Some(Ok(None)) => continue,
+                // A wait that fails is still an ended attempt; a taken handle
+                // means the stop already happened.
+                Some(Err(_)) => None,
+                None => return,
+            }
+        };
+        lose(
+            &context.store,
+            &context.roots,
+            &context.live,
+            context.generation,
+            &context.key,
+            exit_code,
+        )
+        .await;
+        return;
+    }
+}
+
+/// §2.3: the attempt is over. The tree is terminated, the record dropped,
+/// `MEMORY_LOST` appended, and a second loss with no readiness between makes
+/// the row `UNAVAILABLE CHILD_FAILED`.
+async fn lose(
+    store: &Store,
+    roots: &Roots,
+    live: &Arc<Mutex<Live>>,
+    generation: u64,
+    key: &str,
+    exit_code: Option<i64>,
+) {
+    let (child, pid, last, failed) = {
+        let mut live = live.lock().await;
+        if live.generation != generation
+            || !matches!(live.state, LiveState::Starting | LiveState::Ready)
+        {
+            return;
+        }
+        let pid = live.pid.unwrap_or_default();
+        let last = redact_key(key, &last_line(&live.output_tail));
+        let losses = live.losses_since_ready.saturating_add(1);
+        let child = live.child.take();
+        let output_tail = std::mem::take(&mut live.output_tail);
+        *live = Live {
+            state: LiveState::Lost,
+            output_tail,
+            losses_since_ready: losses,
+            generation,
+            ..Live::default()
+        };
+        (child, pid, last, losses >= 2)
+    };
+    if let Some(mut child) = child {
+        child.terminate().await;
+    }
+    crate::daemon::forget_child(roots, pid);
+
+    let at_ns = now_ns();
+    let recorded = store.unit(move |tx| {
+        append_event(
+            tx,
+            "MEMORY_LOST",
+            None,
+            at_ns,
+            json!({ "pid": pid, "exit_code": exit_code, "output_tail_last_line": &last }),
+        )?;
+        if failed {
+            tx.execute(
+                "UPDATE memory_child SET state = 'UNAVAILABLE', failure_code = 'CHILD_FAILED', \
+                 failure_message = ?1 WHERE id = 1",
+                params![last],
+            )?;
+            append_event(
+                tx,
+                "MEMORY_UNAVAILABLE",
+                None,
+                at_ns,
+                json!({ "failure_code": "CHILD_FAILED", "failure_message": &last }),
+            )?;
+        }
+        Ok(())
+    });
+    if let Err(e) = recorded {
+        tracing::error!(error = %e, "recording the memory child's loss failed");
+    }
+}
+
 /// The first line of a message the daemon reports (§4.3).
 fn first_line(message: &str) -> String {
     message
@@ -695,23 +1197,14 @@ pub fn bank(desk_id: &str) -> String {
     format!("desk-{}", desk_id.replace('-', ""))
 }
 
-/// The stubbed half of the seam: C30 fills the child's lifecycle and C31 the
-/// three Hindsight calls. Answering `MEMORY_UNCONFIGURED` is what a daemon that
-/// cannot start a child would answer anyway.
+/// The stubbed half of the seam: C31 fills the three Hindsight calls.
+/// Answering `MEMORY_UNCONFIGURED` is what a daemon that cannot start a child
+/// would answer anyway.
 fn pending<T>() -> Result<T, MemoryError> {
     Err(MemoryError::Unconfigured)
 }
 
 impl Memory {
-    /// C30 (§2.2): start the child if none is live, wait for `/health`, and
-    /// answer the port and the per-start bearer.
-    pub async fn ensure_ready(&self) -> Result<(u16, String), MemoryError> {
-        pending()
-    }
-
-    /// C30 (§2.3): stop a live child. A provider change and Quit both call it.
-    pub async fn stop_child(&self) {}
-
     /// C31 (§4.2): `POST /v1/default/banks/<bank>/memories`.
     pub async fn retain(&self, bank: &str, body: Value) -> Result<Value, MemoryError> {
         let _ = (bank, body);
@@ -748,7 +1241,9 @@ pub(crate) fn seam_memory(store: Store, roots: Roots) -> Memory {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap(),
-        live: tokio::sync::Mutex::new(Live::default()),
+        daemon_uuid: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+        ready_deadline: READY_DEADLINE,
+        live: Arc::new(Mutex::new(Live::default())),
     }
 }
 
@@ -1265,4 +1760,402 @@ async fn provider_env_and_pending_operations() {
     live.push_output(b"tail");
     assert_eq!(live.output_tail.len(), TAIL);
     assert!(live.output_tail.ends_with(b"tail"));
+}
+
+// ---------------------------------------------------------------------------
+// memory::child (feature SPEC §8 check 2)
+// ---------------------------------------------------------------------------
+
+/// The fake `hindsight-api`'s env dump, written into the child's own `HOME` so
+/// the check reads it back and sees `HOME` was redirected at the same time.
+#[cfg(test)]
+const FAKE_ENV: &str = "env.json";
+
+/// The last line the fake prints before exiting, so `MEMORY_LOST` has something
+/// exact to carry (§2.3).
+#[cfg(test)]
+const FAKE_LAST_LINE: &str = "hindsight-api stopping";
+
+/// The in-process fake `hindsight-api` (§8 check 2). This is a test only when a
+/// launcher re-executes this binary as the memory child: a plain suite run has
+/// no `HINDSIGHT_API_PORT` on its environment and it returns at once.
+#[cfg(test)]
+#[test]
+fn fake_hindsight_main() {
+    let Ok(port) = std::env::var("HINDSIGHT_API_PORT") else {
+        return;
+    };
+    let host = std::env::var("HINDSIGHT_API_HOST").expect("HINDSIGHT_API_HOST");
+    let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+    let dump: BTreeMap<String, String> = std::env::vars().collect();
+    fs::write(home.join(FAKE_ENV), serde_json::to_vec(&dump).unwrap()).unwrap();
+
+    // The two knobs the launcher script sets for itself, so the environment the
+    // daemon composed stays exactly §2.2's.
+    let ms = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+    let healthy_after = Duration::from_millis(ms("MARKETRIG_FAKE_HEALTH_AFTER_MS").unwrap_or(0));
+    let exit_after = ms("MARKETRIG_FAKE_EXIT_AFTER_MS");
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async move {
+            if let Some(after) = exit_after {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(after)).await;
+                    println!("{FAKE_LAST_LINE}");
+                    let _ = io::stdout().flush();
+                    // Straight out, so the harness's own summary is not the
+                    // last line of the tail.
+                    std::process::exit(1);
+                });
+            }
+            let started = tokio::time::Instant::now();
+            let app = axum::Router::new().route(
+                "/health",
+                axum::routing::get(move || async move {
+                    if started.elapsed() < healthy_after {
+                        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "starting")
+                    } else {
+                        (axum::http::StatusCode::OK, "{\"status\":\"healthy\"}")
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
+                .await
+                .unwrap();
+            println!("hindsight-api listening on {host}:{port}");
+            let _ = io::stdout().flush();
+            let _ = axum::serve(listener, app).await;
+        });
+}
+
+/// A launcher that answers the `--help` probe the way the real one does and
+/// otherwise re-executes this test binary as [`fake_hindsight_main`].
+#[cfg(test)]
+fn fake_launcher(
+    dir: &Path,
+    name: &str,
+    health_after_ms: u64,
+    exit_after_ms: Option<u64>,
+) -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let exe = exe.display().to_string();
+    let exit = exit_after_ms.map(|ms| ms.to_string()).unwrap_or_default();
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{name}.cmd"));
+        fs::write(
+            &path,
+            format!(
+                "@echo off\r\n\
+                 if \"%~1\"==\"--help\" (\r\n\
+                 echo --port INTEGER [env var: HINDSIGHT_API_PORT]\r\n\
+                 exit /b 0\r\n\
+                 )\r\n\
+                 set MARKETRIG_FAKE_HEALTH_AFTER_MS={health_after_ms}\r\n\
+                 set MARKETRIG_FAKE_EXIT_AFTER_MS={exit}\r\n\
+                 \"{exe}\" \"memory::fake_hindsight_main\" --exact --nocapture\r\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = \"--help\" ]; then\n\
+                 echo '--port INTEGER [env var: HINDSIGHT_API_PORT]'\n\
+                 echo 'sentence-transformers is not installed' >&2\n\
+                 exit 0\n\
+                 fi\n\
+                 MARKETRIG_FAKE_HEALTH_AFTER_MS={health_after_ms} \
+                 MARKETRIG_FAKE_EXIT_AFTER_MS={exit} \
+                 exec '{exe}' 'memory::fake_hindsight_main' --exact --nocapture\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+}
+
+/// An `AVAILABLE` child row naming `launcher` and a complete provider.
+#[cfg(test)]
+async fn configured(memory: &Memory, launcher: &Path) {
+    discover(&memory.store, launcher).unwrap();
+    memory
+        .put_provider(request(
+            "http://127.0.0.1:9/v1",
+            Some(FAKE_KEY),
+            "llm-1",
+            "emb-1",
+        ))
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+async fn wait_for(memory: &Memory, state: LiveState) {
+    for _ in 0..100 {
+        if memory.live.lock().await.state == state {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the memory child never reached {state:?}");
+}
+
+#[cfg(test)]
+fn children(memory: &Memory) -> Vec<Value> {
+    let raw = match fs::read(crate::daemon::children_path(&memory.roots)) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_slice::<Value>(&raw).unwrap()["children"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The composed environment, readiness, the per-start bearer, the record, and
+/// the two ways a live child stops (§2.2, §2.3).
+#[cfg(test)]
+#[tokio::test]
+async fn child_launch_environment_and_stop() {
+    let (_dir, mut memory) = scratch();
+    memory.ready_deadline = Duration::from_secs(20);
+    let bin = tempfile::tempdir().unwrap();
+    configured(
+        &memory,
+        &fake_launcher(bin.path(), "hindsight-api", 0, None),
+    )
+    .await;
+
+    // Two operations arriving together share one start (§2.2).
+    let (first, second) = tokio::join!(memory.ensure_ready(), memory.ensure_ready());
+    let (port, bearer) = first.unwrap();
+    assert_eq!(second.unwrap(), (port, bearer.clone()));
+    assert_eq!(bearer.len(), 64, "32 random bytes as hex");
+    let child = memory.child().await.unwrap();
+    assert_eq!(child.live, LiveState::Ready);
+    assert!(child.pid.is_some_and(|pid| pid > 0));
+
+    // §2.2's environment, variable for variable.
+    let home = memory.roots.data.join(HINDSIGHT_HOME);
+    let read_env = || -> BTreeMap<String, String> {
+        serde_json::from_slice(&fs::read(home.join(FAKE_ENV)).unwrap()).unwrap()
+    };
+    let env = read_env();
+    for (key, value) in [
+        ("HINDSIGHT_API_HOST", "127.0.0.1"),
+        ("HINDSIGHT_API_PORT", &port.to_string()),
+        ("HINDSIGHT_API_WORKERS", "1"),
+        ("HINDSIGHT_API_LOG_LEVEL", "warning"),
+        ("HINDSIGHT_API_DATABASE_URL", "pg0://marketrig"),
+        (
+            "HINDSIGHT_API_TENANT_EXTENSION",
+            "hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension",
+        ),
+        ("HINDSIGHT_API_TENANT_API_KEY", &bearer),
+        ("HINDSIGHT_API_MCP_ENABLED", "false"),
+        ("HINDSIGHT_API_OTEL_TRACES_ENABLED", "false"),
+        ("HINDSIGHT_API_RERANKER_PROVIDER", "rrf"),
+        ("HINDSIGHT_API_LLM_PROVIDER", "openai"),
+        ("HINDSIGHT_API_LLM_BASE_URL", "http://127.0.0.1:9/v1"),
+        ("HINDSIGHT_API_LLM_API_KEY", FAKE_KEY),
+        ("HINDSIGHT_API_LLM_MODEL", "llm-1"),
+        ("HINDSIGHT_API_EMBEDDINGS_PROVIDER", "openai"),
+        (
+            "HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL",
+            "http://127.0.0.1:9/v1",
+        ),
+        ("HINDSIGHT_API_EMBEDDINGS_OPENAI_API_KEY", FAKE_KEY),
+        ("HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL", "emb-1"),
+        ("HOME", home.to_str().unwrap()),
+    ] {
+        assert_eq!(env.get(key).map(String::as_str), Some(value), "{key}");
+    }
+    assert!(env.contains_key("PATH"));
+    // Nothing of the daemon's own rides along: what this process carries and
+    // §2.2 does not name is absent from the child's.
+    for canary in ["CARGO_MANIFEST_DIR", "CARGO_PKG_NAME", "RUSTUP_HOME"] {
+        if std::env::var_os(canary).is_some() {
+            assert!(!env.contains_key(canary), "{canary} leaked into the child");
+        }
+    }
+    assert!(!env.contains_key("MARKETRIG_DESK_ID"));
+
+    // The record lives as long as the child does (§2.2, per D73).
+    let recorded = children(&memory);
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0]["kind"], "memory");
+    assert_eq!(recorded[0]["pid"].as_u64(), child.pid.map(u64::from));
+
+    // A provider change stops the live child so the next start carries the new
+    // environment (§2.3), and mints a fresh bearer on a fresh port (§2.2).
+    memory
+        .put_provider(request("http://127.0.0.1:9/v1", None, "llm-2", "emb-1"))
+        .await
+        .unwrap();
+    assert_eq!(memory.child().await.unwrap().live, LiveState::NotStarted);
+    assert!(children(&memory).is_empty());
+
+    let (next_port, next_bearer) = memory.ensure_ready().await.unwrap();
+    assert_ne!(next_bearer, bearer, "the bearer is per start");
+    assert_ne!(next_port, port);
+    let env = read_env();
+    assert_eq!(
+        env.get("HINDSIGHT_API_TENANT_API_KEY").map(String::as_str),
+        Some(next_bearer.as_str())
+    );
+    assert_eq!(
+        env.get("HINDSIGHT_API_LLM_MODEL").map(String::as_str),
+        Some("llm-2")
+    );
+
+    memory.stop_child().await;
+    assert_eq!(memory.child().await.unwrap().live, LiveState::NotStarted);
+    assert!(children(&memory).is_empty());
+
+    // Two starts, no loss, and no secret in any event.
+    let seen = events(&memory.store);
+    let started: Vec<_> = seen
+        .iter()
+        .filter(|(kind, _)| kind == "MEMORY_STARTED")
+        .collect();
+    assert_eq!(
+        started.len(),
+        2,
+        "one start each, and none for a live child"
+    );
+    assert!(
+        started
+            .iter()
+            .all(|(_, p)| p["pid"].as_u64().is_some_and(|pid| pid > 0))
+    );
+    assert!(!seen.iter().any(|(kind, _)| kind == "MEMORY_LOST"));
+    let payloads = serde_json::to_string(&seen).unwrap();
+    assert!(!payloads.contains(&bearer) && !payloads.contains(&next_bearer));
+    assert!(!payloads.contains(FAKE_KEY));
+    // The bearer is held in memory only: no row of the database file carries it.
+    for entry in fs::read_dir(&memory.roots.data).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.to_string_lossy().contains("marketrig.sqlite3") {
+            continue;
+        }
+        let bytes = fs::read(&path).unwrap();
+        for secret in [&bearer, &next_bearer] {
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "the bearer must never reach {}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// A child that never answers `/health` is lost at the deadline, not left
+/// running (§2.2, §2.3).
+#[cfg(test)]
+#[tokio::test]
+async fn readiness_deadline_is_a_loss() {
+    let (_dir, mut memory) = scratch();
+    memory.ready_deadline = Duration::from_millis(900);
+    let bin = tempfile::tempdir().unwrap();
+    configured(&memory, &fake_launcher(bin.path(), "slow", 60_000, None)).await;
+
+    let err = memory.ensure_ready().await.unwrap_err();
+    assert_eq!(err.code(), "MEMORY_UNAVAILABLE");
+    assert_eq!(memory.child().await.unwrap().live, LiveState::Lost);
+    assert!(children(&memory).is_empty());
+
+    let seen = events(&memory.store);
+    assert!(!seen.iter().any(|(kind, _)| kind == "MEMORY_STARTED"));
+    let (_, lost) = seen
+        .iter()
+        .find(|(kind, _)| kind == "MEMORY_LOST")
+        .expect("MEMORY_LOST");
+    assert!(lost["pid"].as_u64().is_some_and(|pid| pid > 0));
+    assert!(lost["exit_code"].is_null(), "the deadline killed it");
+    assert!(lost["output_tail_last_line"].is_string());
+    // One loss is never the row's failure (§2.3).
+    assert_eq!(child_row(&memory.store).unwrap().state, "AVAILABLE");
+}
+
+/// Loss, the one restart, `UNAVAILABLE CHILD_FAILED`, and retry (§2.3).
+#[cfg(test)]
+#[tokio::test]
+async fn loss_then_one_restart_then_child_failed() {
+    let (_dir, mut memory) = scratch();
+    memory.ready_deadline = Duration::from_secs(20);
+    let bin = tempfile::tempdir().unwrap();
+    // Long enough to answer `/health` on the poll after the first (§2.2), then
+    // exit under the daemon.
+    let dying = fake_launcher(bin.path(), "dying", 0, Some(2_000));
+    let healthy = fake_launcher(bin.path(), "healthy", 0, None);
+    let doomed = fake_launcher(bin.path(), "doomed", 60_000, Some(0));
+    configured(&memory, &dying).await;
+
+    // Ready, then the child exits under it.
+    memory.ensure_ready().await.unwrap();
+    let pid = memory.child().await.unwrap().pid.unwrap();
+    wait_for(&memory, LiveState::Lost).await;
+    let (_, lost) = events(&memory.store)
+        .into_iter()
+        .find(|(kind, _)| kind == "MEMORY_LOST")
+        .expect("MEMORY_LOST");
+    assert_eq!(lost["pid"].as_u64(), Some(u64::from(pid)));
+    assert_eq!(lost["exit_code"].as_i64(), Some(1));
+    assert_eq!(lost["output_tail_last_line"], FAKE_LAST_LINE);
+    assert!(children(&memory).is_empty());
+    assert_eq!(child_row(&memory.store).unwrap().state, "AVAILABLE");
+
+    // The next operation starts it again, and a readiness clears the count.
+    discover(&memory.store, &healthy).unwrap();
+    memory.ensure_ready().await.unwrap();
+    assert_eq!(memory.live.lock().await.losses_since_ready, 0);
+    memory.stop_child().await;
+
+    // Two losses with no readiness between: the row carries the child's own
+    // last line and every operation answers MEMORY_UNAVAILABLE (§2.3).
+    discover(&memory.store, &doomed).unwrap();
+    memory.ready_deadline = Duration::from_secs(5);
+    assert_eq!(
+        memory.ensure_ready().await.unwrap_err().code(),
+        "MEMORY_UNAVAILABLE"
+    );
+    assert_eq!(child_row(&memory.store).unwrap().state, "AVAILABLE");
+    assert_eq!(
+        memory.ensure_ready().await.unwrap_err().code(),
+        "MEMORY_UNAVAILABLE"
+    );
+    let row = child_row(&memory.store).unwrap();
+    assert_eq!(
+        (row.state.as_str(), row.failure_code.as_deref()),
+        ("UNAVAILABLE", Some("CHILD_FAILED"))
+    );
+    assert_eq!(row.failure_message.as_deref(), Some(FAKE_LAST_LINE));
+    assert!(
+        events(&memory.store)
+            .iter()
+            .any(|(kind, _)| kind == "MEMORY_UNAVAILABLE")
+    );
+    // The row now answers before anything is spawned.
+    let err = memory.ensure_ready().await.unwrap_err();
+    assert_eq!(err.code(), "MEMORY_UNAVAILABLE");
+    assert_eq!(err.to_string(), FAKE_LAST_LINE);
+
+    // Retry clears CHILD_FAILED, re-validates, and starts the count again.
+    memory.retry().await.unwrap();
+    let row = child_row(&memory.store).unwrap();
+    assert_eq!(row.state, "AVAILABLE");
+    assert!(row.failure_code.is_none() && row.failure_message.is_none());
+    assert_eq!(memory.live.lock().await.losses_since_ready, 0);
 }

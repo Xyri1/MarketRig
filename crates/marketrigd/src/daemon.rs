@@ -319,6 +319,26 @@ pub fn record_child(roots: &Roots, record: ChildRecord) {
     }
 }
 
+/// Drops one recorded child: its process is gone, or this daemon just stopped
+/// it, so no successor should try to reap the pid (R4 feature SPEC §2.3). A
+/// missing or unreadable file is nothing to forget.
+pub fn forget_child(roots: &Roots, pid: u32) {
+    let path = children_path(roots);
+    let Some(mut file) = fs::read(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<ChildrenFile>(&raw).ok())
+    else {
+        return;
+    };
+    file.children.retain(|child| child.pid != pid);
+    let written = serde_json::to_vec(&file)
+        .map_err(io::Error::other)
+        .and_then(|raw| fs::write(&path, raw));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, "forgetting a managed child failed");
+    }
+}
+
 /// Recovery's first step (§4.4, per D73): resolve a crashed daemon's recorded
 /// children and report each outcome for the `RECOVERY` payload. A missing file
 /// yields no outcomes. The file itself is removed by [`start`] only after the
