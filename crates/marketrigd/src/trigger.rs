@@ -224,11 +224,7 @@ impl Snapshot {
         now_ns: i64,
     ) -> rusqlite::Result<(String, String)> {
         let pending = policy::read(tx)?.trigger_code_policy == policy::REQUIRE_APPROVAL;
-        let approval = if pending {
-            policy::PENDING
-        } else {
-            policy::ALWAYS_ALLOW
-        };
+        let (approval, decided_at_ns) = policy::stamp(pending, now_ns);
         let id = Uuid::now_v7().to_string();
         tx.execute(
             "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
@@ -243,7 +239,7 @@ impl Snapshot {
                 self.timeout_secs,
                 fingerprint(&self.source, &self.suffix, &self.argv, self.timeout_secs),
                 approval,
-                (!pending).then_some(now_ns),
+                decided_at_ns,
                 now_ns,
             ],
         )?;
@@ -266,11 +262,12 @@ impl Snapshot {
 
 /// The one place the projection rule lives: a trigger has a next occurrence
 /// only while it is enabled, undeleted, and its code snapshot — when it has one
-/// — is decided in its favour. `candidate` is R2's scan (§2), run only when the
-/// rule allows it, so an undecided trigger costs nothing. Every site that
-/// computes a projection goes through here: create, patch (enable and disable
-/// among them), the decision below, and the scheduler's advance. Delete writes
-/// its `NULL` directly, which is this rule with nothing left to ask.
+/// — is decided in its favour. `candidate` is R2's scan (§2), taken lazily so a
+/// site that already holds the scan's answer passes it and one that does not is
+/// spared running it. Every site that computes a projection goes through here:
+/// create, patch (enable and disable among them), the decision below, and the
+/// scheduler's advance. Delete writes its `NULL` directly, which is this rule
+/// with nothing left to ask.
 pub fn projection(
     enabled: bool,
     approval: Option<&str>,
@@ -308,10 +305,7 @@ pub fn decide(
         if approval != policy::PENDING {
             return Ok(Err(DecideError::AlreadyDecided { approval }));
         }
-        let decided = match decision {
-            Decision::Approve => "APPROVED",
-            Decision::Deny => "DENIED",
-        };
+        let decided = decision.decided();
         tx.execute(
             "UPDATE code_snapshots SET approval = ?3, decided_at_ns = ?4 \
              WHERE desk_id = ?1 AND id = ?2",

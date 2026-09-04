@@ -285,9 +285,12 @@ pub fn submit(
     // leaves no action behind, so the same `action_id` stays retryable (§4.3).
     // Under `REQUIRE_APPROVAL` the node is neither started nor consulted (R5
     // §3.3), so the policy is read first here; `begin` reads it again inside
-    // its own unit and that read is the one that decides the row. The two can
-    // disagree only if a `PUT` lands between them, and then the row is ungated
-    // with no node yet — which is why the node is ensured again below.
+    // its own unit and that read is the one that decides the row. The two
+    // disagree only if a `PUT` lands between them, either way harmlessly: a
+    // flip to `ALWAYS_ALLOW` leaves the row ungated with no node yet, which is
+    // why the node is ensured again below; a flip to `REQUIRE_APPROVAL` leaves
+    // a node started for a row that then pends, and starting one is idempotent
+    // and sends no order.
     let started = if gated(store)? {
         None
     } else {
@@ -314,14 +317,7 @@ pub fn submit(
 /// wanted at all (R5 §3.3). The authoritative read is [`begin`]'s, in the unit
 /// that writes the row.
 fn gated(store: &Store) -> Result<bool, TradeError> {
-    let policy: String = store.call(|conn| {
-        conn.query_row(
-            "SELECT paper_order_policy FROM installation_settings WHERE id = 1",
-            [],
-            |r| r.get(0),
-        )
-    })?;
-    Ok(policy == policy::REQUIRE_APPROVAL)
+    Ok(store.call(policy::read)?.paper_order_policy == policy::REQUIRE_APPROVAL)
 }
 
 /// The half of a submit that runs once the row exists and the order is allowed
@@ -469,13 +465,9 @@ pub fn decide(
         Decision::Deny => None,
     };
 
-    let (approval, outcome) = match decision {
-        Decision::Approve => ("APPROVED", None),
-        Decision::Deny => (
-            "DENIED",
-            Some(json!({ "failure_code": "DENIED" }).to_string()),
-        ),
-    };
+    let approval = decision.decided();
+    let outcome =
+        matches!(decision, Decision::Deny).then(|| json!({ "failure_code": "DENIED" }).to_string());
     let now = now_ns();
     let (desk, row) = (desk_id.to_owned(), row_id.to_owned());
     let changed = store.unit(move |tx| {
@@ -1119,12 +1111,7 @@ fn begin(
     let inserted = store.unit(move |tx| {
         let pending =
             kind == "SUBMIT" && policy::read(tx)?.paper_order_policy == policy::REQUIRE_APPROVAL;
-        let approval = if pending {
-            policy::PENDING
-        } else {
-            policy::ALWAYS_ALLOW
-        };
-        let decided_at_ns = (!pending).then_some(row.created_at_ns);
+        let (approval, decided_at_ns) = policy::stamp(pending, row.created_at_ns);
         tx.execute(
             "INSERT INTO trading_actions \
              (desk_id, action_id, id, kind, source, trigger_id, firing_id, request, \

@@ -381,16 +381,23 @@ async fn tail(mut socket: WebSocket, state: Arc<ApiState>) {
 
 /// Frame 1's credential (§4.2, §4.4): `{"bearer": "…", …}` as the first text
 /// frame within 5 s. `None` means the socket was closed with its own refusal —
-/// `4401` for no credential, `4400` for a frame that is not that object — and
-/// `Some(body)` is the whole frame, whose other members are the route's.
+/// `4401` when no credential was presented at all, `4400` for a frame that is
+/// not that object — and `Some(body)` is the whole frame, whose other members
+/// are the route's.
 ///
 /// The one first-frame authentication: the tail takes its `after` from the body
 /// it returns, the terminal takes nothing (§4.4).
 pub(crate) async fn first_frame_auth(socket: &mut WebSocket, credential: &str) -> Option<Value> {
     let first = match tokio::time::timeout(FIRST_FRAME, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
-        // No frame in time, a connection that went away, or a frame that is not
-        // text: no credential was presented either way.
+        // A frame arrived and it is not text: the client spoke, and what it
+        // said is not the object frame 1 must be. `4401` is reserved for a
+        // credential that was never presented or was wrong.
+        Ok(Some(Ok(_))) => {
+            close(socket, 4400, "VALIDATION").await;
+            return None;
+        }
+        // No frame in time, or a connection that went away.
         _ => {
             close(socket, 4401, "UNAUTHORIZED").await;
             return None;
@@ -742,13 +749,14 @@ async fn tail_socket_refuses_a_bad_first_frame() {
         assert_eq!(closed(&mut garbage).await, 4400, "first frame {first:?}");
     }
 
-    // A binary first frame presents no credential either.
+    // A frame that arrived but is not text is as unparseable as garbage text;
+    // only silence and a bad credential are `4401`.
     let mut binary = dial(&base).await;
     binary
         .send(Wire::Binary(vec![1, 2, 3].into()))
         .await
         .unwrap();
-    assert_eq!(closed(&mut binary).await, 4401);
+    assert_eq!(closed(&mut binary).await, 4400);
 
     assert_eq!(
         closed(&mut silent).await,

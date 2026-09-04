@@ -2,9 +2,9 @@
 //! standard output, exit `0`, and nothing touched on the way.
 //!
 //! Contract: `sdd/features/r5-desktop-approval-controls/SPEC.md` §6.1, §8
-//! check 6. In-process coverage of the document itself is `api`'s own check;
-//! this one exists for the two facts only a process can show — the exit code
-//! and the untouched data root.
+//! check 6. What the document describes is `api`'s own check; this one exists
+//! for the three facts only a process can show — the exit code, a document on
+//! standard output, and the untouched data root.
 
 use std::process::Command;
 
@@ -32,15 +32,10 @@ fn openapi_prints_a_document_and_touches_no_data_root() {
     let document: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("the document is JSON on standard output");
     assert_eq!(document["info"]["title"], "MarketRig");
-    let paths = document["paths"].as_object().expect("paths");
-    assert_eq!(
-        paths.len(),
-        marketrigd::api::HTTP_PATHS.len(),
-        "every HTTP route is described and nothing else"
+    assert!(
+        !document["paths"].as_object().expect("paths").is_empty(),
+        "the document describes the HTTP surface"
     );
-    for path in marketrigd::api::HTTP_PATHS {
-        assert!(paths.contains_key(*path), "{path} is not described");
-    }
 
     assert_eq!(
         std::fs::read_dir(home.path()).unwrap().count(),

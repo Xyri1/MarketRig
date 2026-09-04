@@ -4,7 +4,7 @@
 //! settings row and its resource) and §3 (the approval states the two gated
 //! rows carry), per R5-1 and R5-2.
 
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -26,9 +26,10 @@ pub struct Policies {
 
 /// Reads the policies inside the unit that is about to create a code snapshot
 /// or a trading action, which is what keeps them honest under a concurrent
-/// `PUT` (§2). No cache.
-pub fn read(tx: &Transaction<'_>) -> rusqlite::Result<Policies> {
-    tx.query_row(
+/// `PUT` (§2). No cache. Takes a `&Connection` so the same read serves a unit
+/// (a `&Transaction` derefs to one) and the pre-unit peek `trade::submit` takes.
+pub fn read(conn: &Connection) -> rusqlite::Result<Policies> {
+    conn.query_row(
         "SELECT trigger_code_policy, paper_order_policy FROM installation_settings WHERE id = 1",
         [],
         |r| {
@@ -38,6 +39,17 @@ pub fn read(tx: &Transaction<'_>) -> rusqlite::Result<Policies> {
             })
         },
     )
+}
+
+/// The two columns a gated row is born with (§3.1): `PENDING` with no decision
+/// instant, or `ALWAYS_ALLOW` decided the moment it was written. The one place
+/// a code snapshot and a trading action agree on their birth state.
+pub fn stamp(pending: bool, now_ns: i64) -> (&'static str, Option<i64>) {
+    if pending {
+        (PENDING, None)
+    } else {
+        (ALWAYS_ALLOW, Some(now_ns))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +233,14 @@ impl Decision {
         }
     }
 
+    /// The `approval` this decision writes — the state, not the verb (§3.1).
+    pub fn decided(self) -> &'static str {
+        match self {
+            Decision::Approve => "APPROVED",
+            Decision::Deny => "DENIED",
+        }
+    }
+
     pub fn parse(body: &Value) -> Result<Decision, PolicyError> {
         match body.get("decision").and_then(Value::as_str) {
             Some("APPROVE") => Ok(Decision::Approve),
@@ -386,8 +406,13 @@ pub fn approvals(store: &Store, state: &str) -> Result<Vec<Approval>, PolicyErro
 }
 
 /// `GET /approvals/{id}` (§3.1): the same item with the snapshot's `source`.
+/// A record the policy never gated is not an approval, so the single read
+/// withholds it exactly as every listing state does.
 pub fn approval(store: &Store, id: &str) -> Result<Approval, DecideError> {
-    let sql = sql("r.id = ?1", "'source', r.source, ");
+    let sql = sql(
+        "r.id = ?1 AND r.approval <> 'ALWAYS_ALLOW'",
+        "'source', r.source, ",
+    );
     let key = id.to_owned();
     store
         .call(move |conn| conn.query_row(&sql, params![key], approval_row).optional())?
@@ -534,19 +559,14 @@ fn policies_resource() {
         (ALWAYS_ALLOW.to_string(), ALWAYS_ALLOW.to_string())
     );
 
-    // A pending record survives a policy change untouched: only a person's
-    // decision moves it (§2).
+    // A pending record survives a policy change untouched, and so does the
+    // projection its trigger is withholding: only a person's decision moves
+    // either one (§2, §3.2).
     store
         .unit(|tx| {
             tx.execute(
                 "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, \
                  ready_at_ns) VALUES ('d1','alpha','READY','/desks/alpha',1,1)",
-                [],
-            )?;
-            tx.execute(
-                "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
-                 fingerprint, approval, decided_at_ns, created_at_ns) \
-                 VALUES ('s1','d1','print(1)','.py','[\"{script}\"]',300,'ff','PENDING',NULL,1)",
                 [],
             )
         })
@@ -557,17 +577,51 @@ fn policies_resource() {
         300,
     )
     .unwrap();
+    let created = crate::trigger::create(
+        &store,
+        "d1",
+        &format!(
+            r#"{{"name":"nightly","brief":"look at AAPL","schedule":{{"at":"{}"}},
+                 "code":{{"source":"print(1)","suffix":".py"}}}}"#,
+            chrono::DateTime::from_timestamp_nanos(3_600_000_000_000).to_rfc3339()
+        ),
+        300,
+    )
+    .expect("a gated create still records the trigger");
+    let snapshot_id = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    assert_eq!(created["code"]["approval"], "PENDING");
+
+    // Back to Always allow: the row already gated stays gated.
+    put(
+        &store,
+        &json!({ "trigger_code_policy": "ALWAYS_ALLOW" }),
+        400,
+    )
+    .unwrap();
     let snapshot: (String, Option<i64>) = store
-        .call(|c| {
+        .call(move |c| {
             c.query_row(
-                "SELECT approval, decided_at_ns FROM code_snapshots WHERE id = 's1'",
-                [],
+                "SELECT approval, decided_at_ns FROM code_snapshots WHERE id = ?1",
+                params![snapshot_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
         })
         .unwrap();
     assert_eq!(snapshot, (PENDING.to_string(), None));
-    assert_eq!(events(&store).len(), 2, "the change back is its own event");
+    let next: Option<i64> = store
+        .call(|c| {
+            c.query_row(
+                "SELECT next_occurrence_ns FROM triggers WHERE name = 'nightly'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        next, None,
+        "a policy change never projects a pending trigger"
+    );
+    assert_eq!(events(&store).len(), 3, "each change is its own event");
 }
 
 /// The decision body and the two decision codes (§3.1).
@@ -821,6 +875,11 @@ fn the_approvals_listing() {
     assert_eq!(
         approval(&store, "no-such-row").unwrap_err().code(),
         "APPROVAL_NOT_FOUND"
+    );
+    assert_eq!(
+        approval(&store, "s0").unwrap_err().code(),
+        "APPROVAL_NOT_FOUND",
+        "an ungated record is no approval on the single read either"
     );
 
     // --- Every decision is desk-scoped --------------------------------------

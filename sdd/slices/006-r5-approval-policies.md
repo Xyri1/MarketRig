@@ -1,6 +1,6 @@
 # Slice 006 — R5 approval policies and the events tail in the daemon
 
-**Status:** Active — created 2026-09-04; implementation not started
+**Status:** Frozen — created 2026-09-04; implemented and exit checks green 2026-09-05 (chunks C34–C40; feature SPEC §8 checks 1–7 as module checks; gate G1–G41 green on macOS, bundles `target/acceptance/gate-1788546188/` and `gate-1788546882/`; Windows CI runs on push). Never edited again.
 **Implements:** [`features/r5-desktop-approval-controls/`](../features/r5-desktop-approval-controls/SPEC.md) §1 (daemon and CLI parts), §2, §3, §4, and §7.1; the daemon-side half of §6.1 (`--openapi`)
 **Exit:** feature SPEC §8 checks 1–7, gate G38–G41 after G37 (with G21's prologue and E3's setup change), and the static checks green on macOS and Windows CI. No attended scenario: R5's evidence is mechanical.
 

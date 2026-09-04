@@ -60,8 +60,10 @@ pub struct ApiState {
 /// Every path the OpenAPI document describes (§6.1). The two WebSocket-only
 /// routes — the terminal and the Claude Code channel — are absent: utoipa has
 /// no way to describe an upgrade, so they are registered plainly and the
-/// document's `paths` are exactly this list.
-pub const HTTP_PATHS: &[&str] = &[
+/// document's `paths` are exactly this list. The list is the in-process
+/// coverage check's own expectation, never part of the crate's surface.
+#[cfg(test)]
+const HTTP_PATHS: &[&str] = &[
     "/health",
     "/desks",
     "/desks/{desk_id}",
@@ -165,19 +167,20 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(approval))
     .routes(routes!(decide_approval))
     .routes(routes!(quit))
-    // The Claude Code bridge is a header-only WebSocket (§4.4), and an
-    // upgrade is nothing utoipa can describe: a plain route, layered like
-    // every route above it and absent from the document.
-    .route("/desks/{desk_id}/channel", get(channel))
 }
 
-/// The two routes that authenticate themselves: `/events`, whose socket half
-/// carries its credential in frame 1 while its listing half takes the header,
-/// and the terminal, which does whichever the client presents (§4.2, §4.4).
+/// The three routes that authenticate themselves, so that a foreign origin is
+/// refused before any credential is looked at, on all three sockets alike
+/// (§4.4): `/events`, whose socket half carries its credential in frame 1 while
+/// its listing half takes the header; the terminal, which does whichever the
+/// client presents; and the Claude Code bridge, which stays header-only. An
+/// upgrade is nothing utoipa can describe, so the latter two are plain routes,
+/// absent from the document (§6.1).
 fn unguarded() -> OpenApiRouter<Arc<ApiState>> {
     OpenApiRouter::new()
         .routes(routes!(crate::events::events))
         .route("/desks/{desk_id}/terminal", get(terminal))
+        .route("/desks/{desk_id}/channel", get(channel))
 }
 
 /// The document `marketrigd --openapi` prints, and the frontend generates its
@@ -186,8 +189,8 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
     guarded().merge(unguarded()).split_for_parts().1
 }
 
-/// The whole §6 surface, every route behind the bearer check except the two
-/// that check it themselves.
+/// The whole §6 surface, every route behind the bearer check except the three
+/// sockets that check it themselves.
 pub fn router(state: ApiState) -> Router {
     let state = Arc::new(state);
     guarded()
@@ -855,8 +858,8 @@ async fn channel(
 ) -> Result<Response, DeskError> {
     use axum::extract::FromRequestParts;
     let (mut parts, _) = request.into_parts();
-    // Header-only, and the bearer layer has already checked it; the gate is
-    // here for the origin allowlist (§4.4).
+    // Outside the bearer layer, so the origin is refused before the credential
+    // is looked at; header-only, so a missing header is `401` here (§4.4).
     if let Gate::Refused(refused) = ws_gate(&parts.headers, &state.credential, true) {
         return Ok(refused);
     }
@@ -4340,6 +4343,27 @@ async fn sockets_refuse_a_foreign_origin() {
         .header("Origin", FOREIGN)
         .call();
     expect_envelope(read(listing), 403, "ORIGIN_REFUSED");
+
+    // The origin is checked before the credential on all three sockets alike
+    // (§4.4): the header-only channel refuses the foreign origin with no
+    // bearer at all, and with a wrong one, rather than answering `401`.
+    for headers in [
+        vec![("origin", FOREIGN)],
+        vec![("origin", FOREIGN), ("authorization", "Bearer wrong")],
+    ] {
+        let refused = dial_ws(&base, &channel, &headers)
+            .await
+            .expect_err("the origin is refused before the bearer");
+        expect_envelope(refused, 403, "ORIGIN_REFUSED");
+    }
+
+    // An allowlist of exact origins, not prefixes or suffixes.
+    for near_miss in ["http://localhost:14200", "tauri://localhost.evil"] {
+        let refused = dial_ws(&base, "/events", &[("origin", near_miss)])
+            .await
+            .expect_err("a near miss is a foreign origin");
+        expect_envelope(refused, 403, "ORIGIN_REFUSED");
+    }
 
     // Every allowed origin passes to the bearer check, which each socket then
     // answers in its own way: the tail upgrades and waits for frame 1, the
