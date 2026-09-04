@@ -1,4 +1,4 @@
-//! The acceptance experiment: E1, E2, and E3, the attended scenarios.
+//! The acceptance experiment: E1 … E5, the attended scenarios.
 //!
 //! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3,
 //! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3, and root `sdd/SPEC.md` §17,
@@ -894,6 +894,390 @@ fn delivery(scenario: &str, cell: &str, runtime: &str, other: &str) {
 
     console.detach();
     finish(&mut g, scenario, daemon, &desk_id);
+}
+
+// ---------------------------------------------------------------------------
+// E5 — memory, skills, and the closed loop, attended (R4 feature SPEC §7.3)
+// ---------------------------------------------------------------------------
+
+/// The launcher the operator names — the `hindsight-api` of a uv environment
+/// carrying `hindsight-api-slim[embedded-db]==0.9.2` (R4 §1).
+const HINDSIGHT: &str = "MARKETRIG_EXPERIMENT_HINDSIGHT";
+
+/// The provider the real child reasons and embeds with. The key is read, never
+/// printed and never written to the bundle (root §16).
+const MEMORY: [&str; 4] = [
+    "MARKETRIG_EXPERIMENT_MEMORY_BASE_URL",
+    "MARKETRIG_EXPERIMENT_MEMORY_API_KEY",
+    "MARKETRIG_EXPERIMENT_MEMORY_LLM_MODEL",
+    "MARKETRIG_EXPERIMENT_MEMORY_EMBEDDING_MODEL",
+];
+
+#[test]
+fn e5_codex_cli() {
+    closed_loop("E5", "codex", "Codex CLI");
+}
+
+#[test]
+fn e5_claude_code() {
+    closed_loop("E5", "claude", "Claude Code");
+}
+
+/// **E5 — the loop closes on real Hindsight** (R4 feature SPEC §7.3). The cell
+/// configures the real memory child and the real provider from the operator's
+/// own variables, drives one round trip through the session, and watches for
+/// the retain, the skill edit, and a later session's recall. What MarketRig
+/// records is mechanical; what the agent does is inconclusive.
+fn closed_loop(scenario: &str, cell: &str, runtime: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e5-{cell}"));
+    let value = |name: &str| std::env::var(name).unwrap_or_default();
+    let missing: Vec<&str> = std::iter::once(HINDSIGHT)
+        .chain(MEMORY)
+        .filter(|name| value(name).trim().is_empty())
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: unset — {}. E5 needs the real Hindsight launcher \
+             and the real provider; see crates/marketrig-acceptance/EXPERIMENT.md §1.",
+            missing.join(", ")
+        );
+        g.inconclusive(
+            scenario,
+            "the cell's memory variables are unset, so E5 did not run",
+            json!({ "missing": missing }),
+        );
+        return;
+    }
+
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    // The runtime, then the memory installation — all three through REST, the
+    // way the desktop will (root §13.2).
+    let (status, row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{cell}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["state"], "AVAILABLE",
+        "the cell's runtime must be installed and discoverable: {row}"
+    );
+    let (status, child) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/memory/discover",
+        Some(&json!({ "executable": value(HINDSIGHT) }).to_string()),
+    );
+    assert_eq!(status, 200, "{child}");
+    assert_eq!(
+        child["state"], "AVAILABLE",
+        "{HINDSIGHT} must name a Hindsight launcher whose --help carries HINDSIGHT_API_PORT: {child}"
+    );
+    let (status, provider) = g.api(
+        scenario,
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        Some(
+            &json!({
+                "base_url": value(MEMORY[0]), "api_key": value(MEMORY[1]),
+                "llm_model": value(MEMORY[2]), "embedding_model": value(MEMORY[3]),
+            })
+            .to_string(),
+        ),
+    );
+    assert_eq!(status, 200, "{provider}");
+    assert_eq!(provider["api_key_present"], true, "{provider}");
+    assert!(
+        provider.get("api_key").is_none(),
+        "the key never comes back: {provider}"
+    );
+
+    let stamp = marketrig_acceptance::now_secs();
+    let desk = format!("{cell}-e5-{stamp}");
+    let other = format!("{cell}-e5-other-{stamp}");
+    let (status, created) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/desks",
+        Some(&json!({ "name": desk, "runtime": cell }).to_string()),
+    );
+    assert_eq!(status, 201, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+    let (exit, second) = g.cli_json(scenario, &["--json", "desk", "create", &other]);
+    assert_eq!(exit, 0, "{second}");
+
+    // The addendum is the user's own file from here: MarketRig never rewrites
+    // `AGENTS.md` after a desk is READY (per D20), and this cell is the user.
+    let workspace = g.workspace(&desk);
+    let constitution = workspace.join("AGENTS.md");
+    let addendum = format!(
+        "\n## Acceptance addendum ({scenario})\n\n\
+         This desk is one attended MarketRig acceptance cell. When an `EVALUATION` prompt\n\
+         arrives, follow `.agents/skills/desk-improvement/SKILL.md` to the letter: judge the\n\
+         cycle, retain one lesson with `marketrig memory retain {desk} --content \"…\" --tag lesson`,\n\
+         and edit a skill under `.agents/skills/` so a later session inherits it. In a later\n\
+         session, recall what this desk learned with `marketrig memory recall {desk} --query \"…\"`.\n"
+    );
+    let seeded = std::fs::read_to_string(&constitution).expect("the seeded constitution");
+    std::fs::write(&constitution, format!("{seeded}{addendum}")).expect("the acceptance addendum");
+
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — the loop closes: memory, skills, and a later session (feature SPEC §7.3)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:       {desk}\n\
+         Other desk: {other}   (never touched by the session; its bank must stay empty)\n\
+         Runtime:    {runtime} {version} at {path}\n\
+         Hindsight:  {hindsight}\n\
+         Provider:   {base} — llm {llm}, embeddings {embedding}\n\
+         CLI:        {cli}\n\
+         Data root:  {root}\n\
+         Evidence:   {root}\n\
+         \n\
+         Nothing to register and nothing to start, as in E4: MarketRig launches the\n\
+         runtime itself and this console becomes the desk's terminal. The memory\n\
+         child is not running yet — the first memory operation starts it, and a cold\n\
+         start takes about 15 seconds.\n\
+         \n\
+         1. Answer whatever {runtime} asks on first launch, as in E4, and nothing\n\
+         \x20  more.\n\
+         \n\
+         2. Ask the session to buy one unit of an instrument whose market is open\n\
+         \x20  through `submit_order`, and then to sell that same unit. That closes\n\
+         \x20  one position cycle, and MarketRig queues its `EVALUATION` prompt.\n\
+         \n\
+         3. The prompt arrives as the session's own input. Let the session do what\n\
+         \x20  its constitution and its improvement skill say: retain one lesson and\n\
+         \x20  edit a skill under `.agents/skills/`. Do not do either yourself.\n\
+         \n\
+         4. When the harness says so, it ends the session and starts a new one on\n\
+         \x20  the same thread. Ask that session what this desk learned about the\n\
+         \x20  instrument — it must reach for `marketrig memory recall`.\n\
+         \n\
+         The harness waits up to {patience} minutes per step; ^C stops the run.\n\
+         ===========================================================================\n",
+        version = row["version"].as_str().unwrap_or_default(),
+        path = row["executable_path"].as_str().unwrap_or_default(),
+        hindsight = value(HINDSIGHT),
+        base = value(MEMORY[0]),
+        llm = value(MEMORY[2]),
+        embedding = value(MEMORY[3]),
+        cli = g.cli.display(),
+        root = g.out.display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e5.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; the memory child and the provider are configured and the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "child": child, "provider": provider }),
+    );
+
+    let console = console::attach(&endpoint, &desk_id);
+    let tree = skills(&workspace);
+
+    let cycles = |g: &Harness| -> i64 {
+        g.scalar(
+            "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+            &[&desk_id],
+        )
+    };
+    if !waited(PATIENCE, "the session to close one position cycle", || {
+        cycles(&g) >= 1
+    }) {
+        g.inconclusive(
+            scenario,
+            "no position cycle was closed within the cell's patience",
+            json!({ "actions": prompt_states(&g, &desk_id) }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let cycle: String = g.scalar(
+        "SELECT id FROM position_cycles WHERE desk_id = ?1 ORDER BY closed_at_ns LIMIT 1",
+        &[&desk_id],
+    );
+    let evaluated = waited(PATIENCE, "the evaluation prompt to be delivered", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION' \
+             AND state = 'DELIVERED'",
+            &[&desk_id],
+        ) >= 1
+    });
+    if evaluated {
+        assert_delivery(&g, &desk_id);
+        g.note(
+            scenario,
+            "a round trip closed a cycle and MarketRig delivered its evaluation to the session",
+            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the evaluation prompt was not delivered within the cell's patience",
+            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+        );
+    }
+
+    // What the agent does with it: both aspects are the agent's, so both end
+    // inconclusive rather than failing the cell (root §17).
+    if waited(PATIENCE, "the session to retain a lesson", || {
+        !kinds(&g, &desk_id, "MEMORY_RETAINED").is_empty()
+    }) {
+        let retained = kinds(&g, &desk_id, "MEMORY_RETAINED");
+        for event in &retained {
+            assert!(
+                event["items_count"]
+                    .as_i64()
+                    .is_some_and(|count| count >= 1),
+                "a retain the daemon's own row contradicts: {event}"
+            );
+            assert_eq!(
+                event["source"], "INTERACTIVE",
+                "a session's retain is INTERACTIVE (§4.2): {event}"
+            );
+        }
+        g.note(
+            scenario,
+            "the session retained a lesson in this desk's bank",
+            json!({ "retained": retained }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the session retained nothing within the cell's patience",
+            json!({ "cycle": cycle }),
+        );
+    }
+    if waited(PATIENCE, "the session to improve a skill", || {
+        skills(&workspace) != tree
+    }) {
+        g.note(
+            scenario,
+            "the session changed a skill under .agents/skills/",
+            json!({ "before": tree, "after": skills(&workspace) }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "no skill under .agents/skills/ changed within the cell's patience",
+            json!({ "skills": tree }),
+        );
+    }
+
+    // The later session: MarketRig's own two surfaces, then the operator asks it
+    // to remember (§7.3).
+    let (status, ended) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/exit"),
+        None,
+    );
+    assert!(
+        status == 202 || status == 409,
+        "exit answers the process or says there was none: {ended}"
+    );
+    println!(
+        "\r\n{scenario}: starting a new session on the same thread — ask it what this desk learned.\r\n"
+    );
+    let (status, activated) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/activate"),
+        Some(r#"{"mode":"CONTINUE"}"#),
+    );
+    assert_eq!(
+        status, 202,
+        "the desk's thread must be resumable: {activated}"
+    );
+    if waited(PATIENCE, "the later session to recall", || {
+        !kinds(&g, &desk_id, "MEMORY_RECALLED").is_empty()
+    }) {
+        g.note(
+            scenario,
+            "a later session recalled from this desk's bank",
+            json!({ "recalled": kinds(&g, &desk_id, "MEMORY_RECALLED") }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the later session recalled nothing within the cell's patience",
+            json!({ "cycle": cycle }),
+        );
+    }
+
+    // Mechanical, and the one thing that fails the cell outright: a bank that
+    // crosses desks (§4.1).
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "recall",
+        &other,
+        "--query",
+        &format!("cycle {cycle}"),
+    ]);
+    assert_eq!(exit, 0, "the other desk's recall must answer: {stderr}");
+    assert_eq!(
+        printed.trim(),
+        "no results",
+        "the other desk's bank returned something of this desk's: {printed:?}"
+    );
+    assert!(
+        kinds(&g, &desk_id, "MEMORY_RETAINED")
+            .iter()
+            .all(|event| event["items_count"].as_i64().unwrap_or_default() >= 1)
+    );
+    g.note(
+        scenario,
+        "the second desk's bank returned nothing of the first's",
+        json!({ "other": other, "cycle": cycle }),
+    );
+
+    console.detach();
+    finish(&mut g, scenario, daemon, &desk_id);
+}
+
+/// The desk's canonical skill tree as one comparable listing: path, size, and a
+/// content sum, so an edit that keeps a file's length still reads as a change.
+fn skills(workspace: &std::path::Path) -> Vec<String> {
+    let mut listing = Vec::new();
+    let mut dirs = vec![workspace.join(".agents").join("skills")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            let sum: u64 = bytes.iter().map(|byte| u64::from(*byte)).sum();
+            listing.push(format!("{} {} {sum}", path.display(), bytes.len()));
+        }
+    }
+    listing.sort();
+    listing
 }
 
 /// One desk's events of a kind, oldest first, as payloads.

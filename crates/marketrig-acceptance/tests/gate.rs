@@ -30,12 +30,18 @@ use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::{ConfigureCommandExt, TokioChildProcess};
 use serde_json::{Value, json};
 
-/// The R0 `AGENTS.md` seed (R0 feature SPEC §7.6), with the desk name substituted.
+/// The `AGENTS.md` seed (R4 feature SPEC §5.1), with the desk name substituted.
+/// It is a page of prose the feature SPEC owns and `marketrigd` ships as a file,
+/// so the gate reads that file instead of restating it: what it asserts is that
+/// a created desk carries it byte for byte, not what the words are.
+const SEED_AGENTS: &str = include_str!("../../marketrigd/seed/AGENTS.md");
+
 fn agents_seed(name: &str) -> String {
-    format!(
-        "# {name}\n\nThis desk's constitution. MarketRig seeded it at desk creation and never\nrewrites it; its full content arrives with later MarketRig milestones.\n"
-    )
+    SEED_AGENTS.replace("<name>", name)
 }
+
+/// The seeded improvement skill and the canonical tree it lives in (R4 §5.2).
+const SKILL: [&str; 3] = [".agents", "skills", "desk-improvement"];
 
 /// The MarketRig-owned Claude Code shim (R0 feature SPEC §7.2), exactly.
 const SHIM: &str = "@AGENTS.md\n";
@@ -342,6 +348,100 @@ fn alive(pid: i64) -> bool {
     }
 }
 
+/// A loopback port to hand a helper the gate starts itself.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a loopback port")
+        .local_addr()
+        .expect("its address")
+        .port()
+}
+
+/// A helper process the gate started, killed however the run ends.
+struct Killed(std::process::Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The daemon-scoped events of one kind — the memory installation's own, which
+/// belong to no desk (R4 §2.1, §2.3) — oldest first.
+fn global(g: &Harness, kind: &str) -> Vec<Value> {
+    g.events()
+        .into_iter()
+        .filter(|e| e.desk_id.is_none() && e.kind == kind)
+        .map(|e| e.payload)
+        .collect()
+}
+
+/// `marketrig` run from a desk workspace, the way the session's own shell would
+/// run it (R4 §7.2's G35).
+fn cli_in(g: &Harness, dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
+    let done = g
+        .command(&g.cli.clone())
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run marketrig");
+    (
+        done.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&done.stdout).into_owned(),
+        String::from_utf8_lossy(&done.stderr).into_owned(),
+    )
+}
+
+/// A secret reaches none of the three places R4 §7.2 names: the database file
+/// (its journal included), the log root, and the events listing.
+#[track_caller]
+fn nowhere(g: &Harness, what: &str, secret: &str) {
+    assert!(
+        !secret.is_empty(),
+        "{what} is empty, so this proves nothing"
+    );
+    let mut searched: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in fs::read_dir(g.out.join("data"))
+        .expect("the data directory")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.to_string_lossy().contains("marketrig.sqlite3") {
+            searched.push((
+                path.display().to_string(),
+                fs::read(&path).unwrap_or_default(),
+            ));
+        }
+    }
+    let mut roots = vec![g.out.join("logs")];
+    while let Some(dir) = roots.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                roots.push(path);
+            } else {
+                searched.push((
+                    path.display().to_string(),
+                    fs::read(&path).unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    let events: String = g
+        .events()
+        .iter()
+        .map(|e| format!("{} {:?} {}\n", e.kind, e.desk_id, e.payload))
+        .collect();
+    searched.push(("the events listing".to_string(), events.into_bytes()));
+    for (where_, bytes) in searched {
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{what} reached {where_}"
+        );
+    }
+}
+
 async fn resource_text(service: &RunningService<RoleClient, ()>, uri: &str) -> String {
     let result = service
         .read_resource(ReadResourceRequestParams::new(uri))
@@ -432,6 +532,32 @@ fn gate() {
         assert_eq!(
             fs::read_to_string(workspace.join("CLAUDE.md")).expect("CLAUDE.md"),
             SHIM
+        );
+        // The improvement skill and the link to the one canonical tree (R4 §5):
+        // reading the seeded file through `.claude/skills` is what proves the
+        // link resolves, on either platform's kind of link.
+        let seeded = fs::read_to_string(
+            SKILL
+                .iter()
+                .fold(workspace.clone(), |path, part| path.join(part))
+                .join("SKILL.md"),
+        )
+        .expect("the seeded improvement skill");
+        assert!(
+            seeded.starts_with("---\nname: desk-improvement\n"),
+            "{seeded}"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                workspace
+                    .join(".claude")
+                    .join("skills")
+                    .join("desk-improvement")
+                    .join("SKILL.md")
+            )
+            .expect("the same file through .claude/skills"),
+            seeded,
+            "one tree, both paths (R4 §5)"
         );
         ids.push(desk["id"].as_str().expect("id").to_string());
     }
@@ -2929,14 +3055,14 @@ fn gate() {
         || delivered(&g, &delta_id) >= 2,
     );
     let kinds = g.kinds_for(&delta_id);
-    let order: Vec<&String> = kinds
+    let ordered: Vec<&String> = kinds
         .iter()
         .filter(|kind| {
             ["SESSION_STARTED", "SESSION_READY", "PROMPT_DELIVERED"].contains(&kind.as_str())
         })
         .collect();
     assert_eq!(
-        order[..3],
+        ordered[..3],
         ["SESSION_STARTED", "SESSION_READY", "PROMPT_DELIVERED"],
         "{kinds:?}"
     );
@@ -3474,6 +3600,662 @@ fn gate() {
         json!({ "recovery": recovery, "process": process_id, "prompt": attempted, "relaunched": relaunched, "repointed": repointed }),
     );
 
+    // ======================================================================
+    // R4 (feature SPEC `r4-memory-skills-loop` §7.2). The chain continues on the
+    // same root with `memory-standin` (§7.1) in both of its roles: the memory
+    // launcher the daemon starts, registered by explicit path exactly as the
+    // runtimes are, and — started by the gate itself, once, on its own port —
+    // the provider whose model list the daemon fetches. Its knobs ride in the
+    // `memory` object of the same script file the runtime stand-in reads, so
+    // rewriting that file arms the next start of either.
+    // ======================================================================
+    let launcher = g.memory_standin.display().to_string();
+    let models_port = free_port();
+    let provider_base = format!("http://127.0.0.1:{models_port}/v1");
+    // A key shaped like the provider's own, so G33's grep is looking for
+    // something a leak would actually carry.
+    let key = "sk-gate-1f4c0b7a9e2d5836";
+    let provider = |embedding: &str| {
+        json!({
+            "base_url": &provider_base, "api_key": key,
+            "llm_model": "stand-in-llm", "embedding_model": embedding,
+        })
+        .to_string()
+    };
+    let armed = |memory: Value| json!({ "memory": memory });
+    g.script(armed(json!({})));
+    let _models = Killed(
+        g.command(&g.memory_standin.clone())
+            .args(["--models", &models_port.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("the provider stand-in starts"),
+    );
+
+    // --- G33 — configuration and secrets ------------------------------------
+    let daemon15 = g.spawn("G33");
+    endpoint = daemon15.endpoint.clone();
+    let (status, unconfigured) = g.api("G33", &endpoint, "GET", "/memory", None);
+    assert_eq!(status, 200, "{unconfigured}");
+    assert_eq!(unconfigured["child"]["state"], "UNCONFIGURED");
+    assert_eq!(unconfigured["child"]["live"], "NOT_STARTED");
+    assert_eq!(unconfigured["provider"]["api_key_present"], false);
+
+    let explicit_launcher = json!({ "executable": launcher }).to_string();
+    let (status, available) = g.api(
+        "G33",
+        &endpoint,
+        "POST",
+        "/memory/discover",
+        Some(&explicit_launcher),
+    );
+    assert_eq!(status, 200, "{available}");
+    assert_eq!(available["state"], "AVAILABLE", "{available}");
+    assert_eq!(available["executable_path"], launcher.as_str());
+    assert!(
+        available["validated_at_ns"]
+            .as_i64()
+            .is_some_and(|ns| ns > 0)
+    );
+
+    let missing = json!({ "executable": g.out.join("no-such-launcher") }).to_string();
+    let (status, gone) = g.api("G33", &endpoint, "POST", "/memory/discover", Some(&missing));
+    assert_eq!(status, 200, "{gone}");
+    assert_eq!(gone["state"], "UNAVAILABLE");
+    assert_eq!(gone["failure_code"], "NOT_FOUND");
+    // The failed probe is the row every later scenario would inherit, so the
+    // stand-in goes back in.
+    let (_, back) = g.api(
+        "G33",
+        &endpoint,
+        "POST",
+        "/memory/discover",
+        Some(&explicit_launcher),
+    );
+    assert_eq!(back["state"], "AVAILABLE", "{back}");
+
+    let (status, saved) = g.api(
+        "G33",
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        Some(&provider("stand-in-embedding")),
+    );
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["base_url"], provider_base.as_str());
+    assert_eq!(saved["api_key_present"], true);
+    assert!(
+        saved.get("api_key").is_none(),
+        "the key never comes back: {saved}"
+    );
+    let configured = global(&g, "MEMORY_CONFIGURED");
+    assert!(
+        configured
+            .iter()
+            .any(|payload| payload["what"] == "child" && payload["state"] == "AVAILABLE"),
+        "{configured:?}"
+    );
+    assert!(
+        configured
+            .iter()
+            .any(|payload| payload["what"] == "provider"
+                && payload["base_url"] == provider_base.as_str()
+                && payload["embedding_model"] == "stand-in-embedding"),
+        "{configured:?}"
+    );
+
+    let models = "/memory/provider/models";
+    let (status, listed) = g.api("G33", &endpoint, "GET", models, None);
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(
+        listed["models"],
+        json!(["stand-in-llm", "stand-in-embedding"])
+    );
+    g.script(armed(json!({ "models_error": true })));
+    let (status, unreachable) = g.api("G33", &endpoint, "GET", models, None);
+    assert_eq!(status, 502, "{unreachable}");
+    assert_eq!(unreachable["code"], "PROVIDER_UNREACHABLE");
+    g.script(armed(json!({})));
+    let (status, fresh) = g.api("G33", &endpoint, "GET", models, None);
+    assert_eq!(status, 200, "{fresh}");
+    assert_eq!(
+        fresh["models"], listed["models"],
+        "the list is never cached"
+    );
+    nowhere(&g, "the provider key", key);
+    g.note(
+        "G33",
+        "the launcher was discovered by explicit path and refused as NOT_FOUND, the provider was stored with its key held back, the model list was live and never cached, and the key reached neither the database, the log root, nor an event",
+        json!({ "child": back, "provider": saved, "models": fresh["models"] }),
+    );
+
+    // --- G34 — two desks, one lesson ----------------------------------------
+    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(printed.contains("state: AVAILABLE"), "{printed:?}");
+    assert!(
+        printed.contains("live: NOT_STARTED"),
+        "the child is never started by status (§2.2): {printed:?}"
+    );
+    assert!(printed.contains("api_key_present: true"), "{printed:?}");
+
+    let lesson = "AAPL gapped through the open and the market order paid for it";
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "retain",
+        &alpha,
+        "--content",
+        lesson,
+        "--tag",
+        "lesson",
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(printed.trim(), "retained 1 item");
+    let started = global(&g, "MEMORY_STARTED");
+    assert_eq!(started.len(), 1, "the first retain started the child");
+    assert!(started[0]["pid"].as_i64().is_some_and(|pid| pid > 0));
+    let retained = payloads(&g, &ids[0], "MEMORY_RETAINED");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0]["source"], "INTERACTIVE");
+    assert_eq!(retained[0]["items_count"], 1);
+    assert_eq!(retained[0]["tags"], json!(["lesson"]));
+    assert!(retained[0]["trigger_id"].is_null(), "{}", retained[0]);
+    assert!(
+        !serde_json::to_string(&retained[0])
+            .unwrap_or_default()
+            .contains("gapped"),
+        "no event carries what was retained (§4.2)"
+    );
+
+    // The first retain locked the embedding model (§3).
+    let (status, locked) = g.api(
+        "G34",
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        Some(&provider("another-embedding")),
+    );
+    assert_eq!(status, 409, "{locked}");
+    assert_eq!(locked["code"], "EMBEDDING_MODEL_LOCKED");
+
+    let query = "gapped market order";
+    let (exit, printed, stderr) = g.cli(&["memory", "recall", &alpha, "--query", query]);
+    assert_eq!(exit, 0, "{stderr}");
+    let columns: Vec<&str> = printed.trim().split('\t').collect();
+    assert_eq!(
+        columns.len(),
+        3,
+        "one tab-separated line per result: {printed:?}"
+    );
+    assert!(!columns[0].is_empty());
+    assert_eq!(columns[1], "experience");
+    assert_eq!(columns[2], lesson);
+    let (exit, machine) = g.cli_json(
+        "G34",
+        &["--json", "memory", "recall", &alpha, "--query", query],
+    );
+    assert_eq!(exit, 0, "{machine}");
+    assert_eq!(machine["results"][0]["metadata"]["source"], "INTERACTIVE");
+    assert_eq!(
+        machine["results"][0]["metadata"]["desk_id"],
+        ids[0].as_str()
+    );
+    let (exit, printed, stderr) = g.cli(&["memory", "recall", &beta, "--query", query]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(
+        printed.trim(),
+        "no results",
+        "another desk's bank knows nothing of it (§4.1)"
+    );
+
+    // A firing's own retain: the CLI the script runs sends R2's two attribution
+    // headers from the environment the daemon handed it (§4.2, §4.4).
+    let retain_script = script(
+        &g,
+        "g34-retain",
+        "retain the desk learned to wait out the open",
+    );
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, scheduled) = g.cli_json(
+        "G34",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "g34-retain",
+            "--brief",
+            "a retain from a firing",
+            "--at",
+            &at,
+            "--code",
+            &retain_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+            "--timeout",
+            "60",
+        ],
+    );
+    assert_eq!(exit, 0, "{scheduled}");
+    let scheduled_id = scheduled["id"].as_str().expect("id").to_owned();
+    let scheduled_firing = await_firing(&g, &scheduled_id, 0);
+    await_execution(&g, &scheduled_firing, Duration::from_secs(60));
+    let (exit, ran) = g.cli_json(
+        "G34",
+        &["--json", "trigger", "firing", &gamma, &scheduled_firing],
+    );
+    assert_eq!(exit, 0, "{ran}");
+    assert_eq!(ran["execution"]["outcome"], "EXITED", "{ran}");
+    assert_eq!(ran["execution"]["exit_code"], 0, "{ran}");
+    let scheduled_retain = payloads(&g, &gamma_id, "MEMORY_RETAINED");
+    assert_eq!(scheduled_retain.len(), 1);
+    assert_eq!(scheduled_retain[0]["source"], "TRIGGER");
+    assert_eq!(scheduled_retain[0]["trigger_id"], scheduled_id.as_str());
+    assert_eq!(scheduled_retain[0]["firing_id"], scheduled_firing.as_str());
+
+    // Every bearer this run minted, learned from the child's own HOME: the
+    // daemon holds them in memory only, so nothing else could name them.
+    let bearers = fs::read_to_string(g.out.join("data").join("hindsight").join("bearers.txt"))
+        .expect("the stand-in child wrote the bearers it was launched with");
+    let bearers: Vec<&str> = bearers.lines().filter(|line| !line.is_empty()).collect();
+    assert!(!bearers.is_empty(), "the child recorded no bearer");
+    for bearer in &bearers {
+        assert_eq!(bearer.len(), 64, "32 random bytes as hex (§2.2)");
+        nowhere(&g, "the child's bearer", bearer);
+    }
+    nowhere(&g, "the provider key", key);
+    g.note(
+        "G34",
+        "status started nothing, the first retain started the child and locked the embedding model, the lesson came back on its own desk and nowhere else, a firing's script retained through the CLI with both ids, and neither the key nor a bearer reached the database, the log root, or an event",
+        json!({
+            "interactive": retained[0], "scheduled": scheduled_retain[0],
+            "bearers": bearers.len(), "recall": machine["results"],
+        }),
+    );
+
+    // --- G35 — the loop closes ----------------------------------------------
+    // On the desk G28 activated, with the stand-in runtime and the stand-in
+    // feed: a round trip closes a cycle, its evaluation reaches the session as
+    // ordinary input, and the harness then performs the agent's own two steps
+    // through public surfaces — MarketRig never writes either of them (per D17).
+    let delta_quotes = format!("/desks/{delta_id}/market/quotes");
+    let delta_orders = format!("/desks/{delta_id}/orders");
+    let (status, quotes) = g.api("G35", &endpoint, "GET", &delta_quotes, None);
+    assert_eq!(status, 200, "{quotes}");
+    within(
+        Duration::from_secs(40),
+        "delta's first AAPL observation",
+        || {
+            quote_of(
+                &g.call(&endpoint, "GET", &delta_quotes, None).1,
+                "AAPL.XNAS",
+            )["health"]
+                == "LIVE"
+        },
+    );
+    let (status, bought) = g.api(
+        "G35",
+        &endpoint,
+        "POST",
+        &delta_orders,
+        Some(&order("g35-buy-aapl", "AAPL.XNAS", "BUY", "MARKET", "1")),
+    );
+    assert_eq!(status, 201, "{bought}");
+    assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
+    let (status, sold) = g.api(
+        "G35",
+        &endpoint,
+        "POST",
+        &delta_orders,
+        Some(&order("g35-sell-aapl", "AAPL.XNAS", "SELL", "MARKET", "1")),
+    );
+    assert_eq!(status, 201, "{sold}");
+    assert_eq!(sold["outcome"]["status"], "FILLED", "{sold}");
+    let cycle: String = g.scalar(
+        "SELECT id FROM position_cycles WHERE desk_id = ?1",
+        &[&delta_id],
+    );
+    within(
+        Duration::from_secs(180),
+        "the closed cycle's evaluation to be delivered",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION' \
+                 AND state = 'DELIVERED'",
+                &[&delta_id],
+            ) == 1
+        },
+    );
+    let seen = transcript(&rt, &endpoint, &delta_id, Duration::from_secs(60), |text| {
+        text.contains("MarketRig EVALUATION ")
+    });
+    assert!(
+        seen.contains("MarketRig EVALUATION "),
+        "the evaluation reached the session as its own input: {seen:?}"
+    );
+    assert!(
+        seen.contains(&cycle),
+        "the delivered evaluation names the cycle: {seen:?}"
+    );
+
+    // The agent's two steps, performed by the harness from the desk workspace.
+    let delta_workspace = g.workspace(&delta);
+    let learned = format!("lesson for cycle {cycle}");
+    let (exit, printed, stderr) = cli_in(
+        &g,
+        &delta_workspace,
+        &[
+            "memory",
+            "retain",
+            &delta,
+            "--content",
+            &learned,
+            "--tag",
+            "lesson",
+        ],
+    );
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(printed.trim(), "retained 1 item");
+    let skill = SKILL
+        .iter()
+        .fold(delta_workspace.clone(), |path, part| path.join(part))
+        .join("SKILL.md");
+    fs::write(
+        &skill,
+        format!(
+            "---\nname: desk-improvement\ndescription: This desk's own procedure.\n---\n\n\
+             # Desk improvement\n\nCycle {cycle} taught this desk to wait out the open.\n"
+        ),
+    )
+    .expect("the agent's own skill edit");
+    let closed = payloads(&g, &delta_id, "MEMORY_RETAINED");
+    assert_eq!(closed.len(), 1, "the lesson landed on that desk only");
+    assert_eq!(closed[0]["source"], "INTERACTIVE");
+    assert_eq!(payloads(&g, &ids[1], "MEMORY_RETAINED").len(), 0);
+    g.note(
+        "G35",
+        "a round trip closed a cycle, its evaluation was delivered to the session and named the cycle on the terminal, and the agent's two steps — one retain and one skill edit — landed on that desk alone",
+        json!({ "cycle": cycle, "retained": closed[0], "transcript": seen }),
+    );
+
+    // --- G36 — the later session --------------------------------------------
+    let (status, ended) = g.api(
+        "G36",
+        &endpoint,
+        "POST",
+        &session_route(&delta_id, "exit"),
+        None,
+    );
+    assert_eq!(status, 202, "{ended}");
+    let sessions = payloads(&g, &delta_id, "SESSION_STARTED").len();
+    let later = one_off(&mut g, "G36", &delta, "g36-later", 2);
+    await_firing(&g, &later, 0);
+    within(
+        Duration::from_secs(120),
+        "the desk to be activated again for the later firing",
+        || payloads(&g, &delta_id, "SESSION_STARTED").len() > sessions,
+    );
+    let resumed = payloads(&g, &delta_id, "SESSION_STARTED")
+        .pop()
+        .expect("the later session");
+    assert_eq!(resumed["mode"], "RESUME", "{resumed}");
+
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "recall",
+        &delta,
+        "--query",
+        &format!("cycle {cycle}"),
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(
+        printed.contains(&learned),
+        "the later session recalls the lesson: {printed:?}"
+    );
+    let through_claude = delta_workspace
+        .join(".claude")
+        .join("skills")
+        .join("desk-improvement")
+        .join("SKILL.md");
+    assert!(
+        fs::read_to_string(&through_claude)
+            .expect("the skill through .claude/skills")
+            .contains(&cycle),
+        "the improved skill is loadable through the Claude path (§5)"
+    );
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "recall",
+        &alpha,
+        "--query",
+        &format!("cycle {cycle}"),
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(
+        printed.trim(),
+        "no results",
+        "the other desk of G34 knows nothing of that cycle"
+    );
+
+    let (status, switched) = g.api(
+        "G36",
+        &endpoint,
+        "POST",
+        &session_route(&delta_id, "switch"),
+        Some(r#"{"runtime":"codex"}"#),
+    );
+    assert_eq!(status, 200, "{switched}");
+    assert_eq!(switched["selected_runtime"], "codex");
+    assert_eq!(
+        fs::read_to_string(&skill).expect("the skill on its own path"),
+        fs::read_to_string(&through_claude).expect("the skill through the link"),
+        "one file, both paths, after the switch (§5)"
+    );
+    g.note(
+        "G36",
+        "after an exit a later firing resumed the desk's session, the lesson came back through recall, the improved skill was readable through both paths across a runtime switch, and the other desk returned nothing about the cycle",
+        json!({ "resumed": resumed, "switched": switched, "cycle": cycle }),
+    );
+
+    // --- G37 — Hindsight stopped --------------------------------------------
+    // A provider change stops a live child (§2.3), which is how the gate arms a
+    // start: the next operation starts a child that has read the new script.
+    g.script(armed(json!({ "exit_after_ms": 6_000 })));
+    let (status, rearmed) = g.api(
+        "G37",
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        Some(&provider("stand-in-embedding")),
+    );
+    assert_eq!(status, 200, "{rearmed}");
+    let losses = global(&g, "MEMORY_LOST").len();
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "retain",
+        &alpha,
+        "--content",
+        "taken from a child that is about to stop",
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(printed.trim(), "retained 1 item");
+    within(
+        Duration::from_secs(60),
+        "the child's exit to be a loss",
+        || global(&g, "MEMORY_LOST").len() > losses,
+    );
+    let lost = global(&g, "MEMORY_LOST").pop().expect("MEMORY_LOST");
+    assert_eq!(lost["exit_code"], 1, "{lost}");
+    assert!(
+        lost["output_tail_last_line"]
+            .as_str()
+            .is_some_and(|line| line.contains("memory-standin")),
+        "the loss carries the child's own last line: {lost}"
+    );
+    assert_eq!(
+        g.cli_json("G37", &["--json", "memory", "status", &alpha]).1["child"]["state"],
+        "AVAILABLE",
+        "one loss is never the row's failure (§2.3)"
+    );
+
+    // Disarmed, the next operation starts it again and succeeds.
+    g.script(armed(json!({})));
+    let starts = global(&g, "MEMORY_STARTED").len();
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "retain",
+        &alpha,
+        "--content",
+        "taken after the child came back",
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(printed.trim(), "retained 1 item");
+    assert_eq!(
+        global(&g, "MEMORY_STARTED").len(),
+        starts + 1,
+        "the next operation restarted the child once"
+    );
+
+    // Lost twice with no readiness between: the row fails CHILD_FAILED (§2.3).
+    g.script(armed(
+        json!({ "health_after_ms": 600_000, "exit_after_ms": 3_000 }),
+    ));
+    let (status, doomed) = g.api(
+        "G37",
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        Some(&provider("stand-in-embedding")),
+    );
+    assert_eq!(status, 200, "{doomed}");
+    for attempt in 1..=2 {
+        let (exit, printed, stderr) = g.cli(&[
+            "memory",
+            "retain",
+            &alpha,
+            "--content",
+            "this one never lands",
+        ]);
+        assert_eq!(exit, 1, "attempt {attempt}: {printed:?}");
+        assert!(
+            stderr.contains("error: MEMORY_UNAVAILABLE:"),
+            "attempt {attempt}: {stderr:?}"
+        );
+    }
+    assert_eq!(
+        global(&g, "MEMORY_UNAVAILABLE").len(),
+        1,
+        "the second loss is the row's failure"
+    );
+    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(printed.contains("state: UNAVAILABLE"), "{printed:?}");
+    assert!(
+        printed.contains("failure_code: CHILD_FAILED"),
+        "{printed:?}"
+    );
+    let (exit, printed, stderr) =
+        g.cli(&["memory", "retain", &alpha, "--content", "still refused"]);
+    assert_eq!(exit, 1, "{printed:?}");
+    assert!(stderr.contains("error: MEMORY_UNAVAILABLE:"), "{stderr:?}");
+
+    // Everything else on the same daemon is untouched: a firing, an activation,
+    // and a paper action.
+    // Counted before the trigger exists: the dispatcher wakes on the firing's
+    // own acceptance, so the activation can land before the firing is read.
+    let sessions = payloads(&g, &delta_id, "SESSION_STARTED").len();
+    let unaffected = one_off(&mut g, "G37", &delta, "g37-unaffected", 2);
+    let unaffected_firing = await_firing(&g, &unaffected, 0);
+    within(
+        Duration::from_secs(180),
+        "the firing's result to be delivered with memory unavailable",
+        || {
+            result_prompts(&g, &delta_id, &unaffected_firing)
+                .first()
+                .is_some_and(|id| prompt_state(&g, id).0 == "DELIVERED")
+        },
+    );
+    assert!(
+        payloads(&g, &delta_id, "SESSION_STARTED").len() > sessions,
+        "the delivery activated the desk"
+    );
+    let (status, resting) = g.api(
+        "G37",
+        &endpoint,
+        "POST",
+        &delta_orders,
+        Some(&limit("g37-rest-aapl", "AAPL.XNAS", "BUY", "1", "1.00")),
+    );
+    assert_eq!(status, 201, "{resting}");
+    assert_eq!(resting["outcome"]["status"], "ACCEPTED", "{resting}");
+
+    // Retry re-validates the launcher and the loss counter starts again (§2.1).
+    g.script(armed(json!({})));
+    let (status, retried) = g.api("G37", &endpoint, "POST", "/memory/retry", None);
+    assert_eq!(status, 200, "{retried}");
+    assert_eq!(retried["state"], "AVAILABLE");
+    assert!(retried.get("failure_code").is_none(), "{retried}");
+    let (exit, printed, stderr) = g.cli(&[
+        "memory",
+        "retain",
+        &alpha,
+        "--content",
+        "taken after the retry",
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(printed.trim(), "retained 1 item");
+    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(printed.contains("live: READY"), "{printed:?}");
+
+    // A hard kill with the child live: the successor reaps it by its record.
+    let child_pid =
+        parse(&fs::read_to_string(g.children_path()).expect("children.json"))["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|child| child["kind"] == "memory")
+            .and_then(|child| child["pid"].as_i64())
+            .expect("the memory child's record");
+    let dead = daemon15.endpoint.daemon_uuid.clone();
+    let stale = daemon15.endpoint.clone();
+    g.kill("G37", daemon15);
+    g.await_unverifiable(&stale);
+    let daemon16 = g.spawn("G37");
+    let recovery = g.recoveries().pop().expect("a RECOVERY");
+    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
+    assert!(
+        recovery["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| child["kind"] == "memory" && child["pid"] == json!(child_pid)),
+        "the successor reaped the memory child: {recovery}"
+    );
+    within(
+        Duration::from_secs(60),
+        "no memory-standin process to survive the kill",
+        || !alive(child_pid),
+    );
+    let (exit, after) = g.cli_json("G37", &["--json", "memory", "status", &alpha]);
+    assert_eq!(exit, 0, "{after}");
+    assert_eq!(after["child"]["state"], "AVAILABLE");
+    assert_eq!(
+        after["child"]["live"], "NOT_STARTED",
+        "liveness is memory only (§6)"
+    );
+    assert_eq!(after["desk_id"], ids[0].as_str());
+    g.stop("G37", daemon16);
+    g.note(
+        "G37",
+        "a scripted exit was one loss and the next operation restarted the child, two losses with no readiness between failed the row CHILD_FAILED while a firing, an activation, and a paper action went through untouched, retry brought it back, and a hard kill left no stand-in alive with liveness reading NOT_STARTED again",
+        json!({ "lost": lost, "recovery": recovery, "child_pid": child_pid }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-G32 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-G37 complete", json!({ "evidence": evidence }));
 }

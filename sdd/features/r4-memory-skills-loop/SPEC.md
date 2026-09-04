@@ -24,7 +24,9 @@ port    <- bind 127.0.0.1:0, read, release
 bearer  <- 32 random bytes, hex, minted per start, held in memory only
 spawn   <executable>            cwd = data root (which carries no .env for the launcher's dotenv loader)
         env: PATH, HOME=<data root>/hindsight, TERM, LANG/LC_* (+ the Windows set of R3 §4.2, with
-             USERPROFILE and LOCALAPPDATA also = <data root>/hindsight), plus:
+             USERPROFILE and LOCALAPPDATA also = <data root>/hindsight), the daemon's own
+             MARKETRIG_* variables (root §17's seam, as R3 §4.2 forwards them to a runtime;
+             a user's daemon carries none), plus:
         HINDSIGHT_API_HOST=127.0.0.1            HINDSIGHT_API_PORT=<port>
         HINDSIGHT_API_WORKERS=1                 HINDSIGHT_API_LOG_LEVEL=warning
         HINDSIGHT_API_DATABASE_URL=pg0://marketrig
@@ -247,7 +249,7 @@ No new recovery step: the child is a `children.json` record, reaped by the first
 
 ### 7.1 The stand-in memory child
 
-`memory-standin` answers `--help` with usage naming `HINDSIGHT_API_PORT`, then serves HTTP on `HINDSIGHT_API_HOST:HINDSIGHT_API_PORT`: `GET /health` (`200 {"status":"ok"}` once `health_after_ms` has elapsed since start); `POST /v1/default/banks/{bank}/memories` (stores each item's `content`, `context`, `tags`, `metadata` under the bank with a UUID and the receipt instant; answers `{success, bank_id, items_count, async: false}`); `POST …/memories/recall` (case-insensitive substring match of the query's words against `content`, filtered by `tags` when given, answering `results[]` with `id`, `text`, `type: "experience"`, `context`, `tags`, `metadata`, `occurred_start`, `mentioned_at`); `POST …/reflect` (`text` = the matching contents joined by newlines, `based_on.memories` = their ids and texts). Every route but `/health` requires `Authorization: Bearer <HINDSIGHT_API_TENANT_API_KEY>` and answers `401 {"detail":"Invalid API key"}` otherwise; an unknown route is `404`. Knobs from the `memory` object of `MARKETRIG_STANDIN_SCRIPT` (read at start; the file is the same one `runtime-standin` reads):
+`memory-standin` answers `--help` with usage naming `HINDSIGHT_API_PORT`, then serves HTTP on `HINDSIGHT_API_HOST:HINDSIGHT_API_PORT`: `GET /health` (`200 {"status":"ok"}` once `health_after_ms` has elapsed since start); `POST /v1/default/banks/{bank}/memories` (stores each item's `content`, `context`, `tags`, `metadata` under the bank with a UUID and the receipt instant; answers `{success, bank_id, items_count, async: false}`); `POST …/memories/recall` (case-insensitive substring match of the query's words against `content`, filtered by `tags` when given, answering `results[]` with `id`, `text`, `type: "experience"`, `context`, `tags`, `metadata`, `occurred_start`, `mentioned_at`); `POST …/reflect` (`text` = the matching contents joined by newlines, `based_on.memories` = their ids and texts). Every route but `/health` requires `Authorization: Bearer <HINDSIGHT_API_TENANT_API_KEY>` and answers `401 {"detail":"Invalid API key"}` otherwise; an unknown route is `404`. Each start appends the bearer it was launched with to `<HOME>/bearers.txt` — `<data root>/hindsight/bearers.txt`, outside the database and the log root — because the daemon holds those strings in memory only and G33's secrets check has to name them. It prints one banner line to standard output, which is what the loss event's `output_tail_last_line` carries. Knobs from the `memory` object of `MARKETRIG_STANDIN_SCRIPT` (read at start; the file is the same one `runtime-standin` reads):
 
 | Key | Default | Effect |
 | --- | --- | --- |

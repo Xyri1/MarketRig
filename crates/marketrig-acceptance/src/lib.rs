@@ -244,6 +244,9 @@ pub struct Harness {
     /// The stand-in runtime (R3 feature SPEC §9.1), which the gate registers by
     /// explicit path and scripts through [`Harness::script`].
     pub standin: PathBuf,
+    /// The stand-in memory child (R4 feature SPEC §7.1), which the gate both
+    /// registers as the memory launcher and starts itself as the provider.
+    pub memory_standin: PathBuf,
     observations: File,
     /// The last daemon this harness stopped or killed. A hard kill leaves its
     /// `endpoint.json` behind, and on Windows an orphan holding an inherited
@@ -283,7 +286,7 @@ impl Harness {
                 .join(format!("{prefix}-{}", now_secs())),
         };
         fs::create_dir_all(&out).expect("evidence directory");
-        let (daemond, cli, mcp, trigger_code, standin) = build(&workspace);
+        let (daemond, cli, mcp, trigger_code, standin, memory_standin) = build(&workspace);
         eprintln!("acceptance evidence: {}", out.display());
         Harness {
             observations: File::create(out.join("observations.jsonl")).expect("observations"),
@@ -294,6 +297,7 @@ impl Harness {
             mcp,
             trigger_code,
             standin,
+            memory_standin,
             step: 0,
             daemons: 0,
             // Same discipline as the CLI (R0 feature SPEC §8): no proxy, no
@@ -422,10 +426,11 @@ impl Harness {
                 .header("Authorization", bearer)
                 .call(),
             _ => {
-                let request = self
-                    .agent
-                    .post(url.as_str())
-                    .header("Authorization", bearer);
+                let request = match method {
+                    "PUT" => self.agent.put(url.as_str()),
+                    _ => self.agent.post(url.as_str()),
+                }
+                .header("Authorization", bearer);
                 match body {
                     Some(body) => request
                         .header("content-type", "application/json")
@@ -720,7 +725,7 @@ impl Harness {
 /// harness is correct under `CARGO_TARGET_DIR` and on Windows. `trigger-code`
 /// is built with them and lands beside them, which is how it finds the adapter
 /// (R2 feature SPEC §10.1).
-fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .current_dir(workspace)
@@ -751,6 +756,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
     let mut mcp = None;
     let mut trigger_code = None;
     let mut standin = None;
+    let mut memory_standin = None;
     for line in output.stdout.split(|byte| *byte == b'\n') {
         let Ok(message) = serde_json::from_slice::<Value>(line) else {
             continue;
@@ -770,6 +776,7 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
             "marketrig-mcp" => mcp = Some(PathBuf::from(executable)),
             "trigger-code" => trigger_code = Some(PathBuf::from(executable)),
             "runtime-standin" => standin = Some(PathBuf::from(executable)),
+            "memory-standin" => memory_standin = Some(PathBuf::from(executable)),
             _ => {}
         }
     }
@@ -779,5 +786,6 @@ fn build(workspace: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
         mcp.expect("marketrig-mcp executable"),
         trigger_code.expect("trigger-code executable"),
         standin.expect("runtime-standin executable"),
+        memory_standin.expect("memory-standin executable"),
     )
 }

@@ -38,6 +38,7 @@ fn main() {
             std::process::exit(code);
         }
         ["sleep", secs] => std::thread::sleep(Duration::from_secs(number(secs))),
+        ["retain", content @ ..] => retain(&content.join(" ")),
         ["flood", bytes] => flood(number(bytes)),
         _ => fail(format!("unrecognized script line {line:?}")),
     }
@@ -124,6 +125,24 @@ fn order(instrument_id: &str, side: &str, quantity: &str) {
     });
     for answer in answers {
         println!("{answer}");
+    }
+}
+
+/// `retain <text…>` — run `marketrig memory retain` from beside this
+/// executable (R4 feature SPEC §7.2's G34). The CLI sends R2's two attribution
+/// headers from the environment the daemon handed this process, which is what
+/// makes the memory a `TRIGGER` one with both ids in its metadata (§4.2).
+fn retain(content: &str) {
+    let cli = beside_me("marketrig");
+    let desk = var("MARKETRIG_DESK_NAME");
+    let done = std::process::Command::new(&cli)
+        .args(["memory", "retain", &desk, "--content", content])
+        .output()
+        .unwrap_or_else(|e| fail(format!("cannot run {}: {e}", cli.display())));
+    print!("{}", String::from_utf8_lossy(&done.stdout));
+    eprint!("{}", String::from_utf8_lossy(&done.stderr));
+    if !done.status.success() {
+        fail(format!("marketrig memory retain exited {}", done.status));
     }
 }
 

@@ -296,6 +296,7 @@ marketrig [--json] prompt show <desk> <prompt-id>
 
 - `env` — print, as one JSON object, the four `MARKETRIG_*` identifiers, the current directory, and the firing document read from standard input; exit 0;
 - `order <instrument_id> <side> <quantity>` — spawn `marketrig-mcp --desk $MARKETRIG_DESK_NAME` from beside its own executable, initialize as an MCP client, call `submit_order` twice with `action_id = $MARKETRIG_FIRING_ID`, print both results as JSON lines, exit 0;
+- `retain <text…>` — run `marketrig memory retain $MARKETRIG_DESK_NAME --content "<text…>"` from beside its own executable, print what it printed, exit 0 (the CLI sends R2's two attribution headers from this process's own environment, which is what makes the memory a `TRIGGER` one; R4 feature SPEC §7.2's G34);
 - `exit <code>` — exit with that code after writing one line to standard error;
 - `sleep <secs>` — sleep, then exit 0;
 - `flood <bytes>` — write that many bytes to standard output, exit 0.

@@ -1,13 +1,32 @@
 # Running the attended experiment — Windows cells
 
-The experiment is the operator-attended half of the acceptance chain (root `sdd/SPEC.md` §17; R1 feature SPEC §10.3, R2 feature SPEC §10.3). Slice 002's exit needs E1 (Codex CLI) and E2 (Claude Code) once per platform-and-runtime cell; slice 003 adds E3, the scheduled-trigger scenario, and slice 004 adds E4, the runtime-delivery scenario, to the same cells. The R1 macOS cells ran on 2026-09-02 (`target/acceptance/experiment-codex-1788316954/` and `experiment-claude-1788317581/`); this guide is for the two Windows cells and doubles as the procedure anywhere. Commands are PowerShell.
+The experiment is the operator-attended half of the acceptance chain (root `sdd/SPEC.md` §17; R1 feature SPEC §10.3, R2 feature SPEC §10.3). Slice 002's exit needs E1 (Codex CLI) and E2 (Claude Code) once per platform-and-runtime cell; slice 003 adds E3, the scheduled-trigger scenario, slice 004 adds E4, the runtime-delivery scenario, and slice 005 adds E5, the closed loop on real Hindsight, to the same cells. The R1 macOS cells ran on 2026-09-02 (`target/acceptance/experiment-codex-1788316954/` and `experiment-claude-1788317581/`); this guide is for the two Windows cells and doubles as the procedure anywhere. Commands are PowerShell.
 
-One invocation per cell now runs **three** scenarios back to back — E1 or E2, E3, and E4 — each on its own daemon, desk, and bundle. They share your terminal and your hands, so the harness serializes them: each scenario's instructions print only once the previous one has finished. E4 is unlike the other two: MarketRig launches the runtime itself, with the adapter already registered, and **your console becomes the desk's terminal** for the whole scenario.
+One invocation per cell now runs **four** scenarios back to back — E1 or E2, E3, E4, and E5 — each on its own daemon, desk, and bundle. They share your terminal and your hands, so the harness serializes them: each scenario's instructions print only once the previous one has finished. E4 and E5 are unlike the first two: MarketRig launches the runtime itself, with the adapter already registered, and **your console becomes the desk's terminal** for the whole scenario. E5 additionally needs a Hindsight launcher and a real LLM provider; without its five variables it skips with evidence and the rest of the cell still counts.
 
 ## 1. Before you start
 
 - A checkout of the commit under test. `rust-toolchain.toml` pins the toolchain, so the first `cargo` command installs it; the MSVC linker (Visual Studio Build Tools, "Desktop development with C++") must already be present, as on CI's `windows-latest`.
 - Codex CLI and Claude Code installed and signed in: `codex --version`, `claude --version`. The version each cell ran on belongs in the evidence line.
+- For E5 only: a Python environment carrying the Hindsight wheel, and a provider key. `uv` builds one in a few seconds anywhere:
+
+  ```powershell
+  uv venv --python 3.12 .hindsight
+  uv pip install --python .hindsight 'hindsight-api-slim[embedded-db]==0.9.2'
+  .hindsight\Scripts\hindsight-api --help     # macOS: .hindsight/bin/hindsight-api --help
+  ```
+
+  The `--help` output must carry `HINDSIGHT_API_PORT`; that is exactly what MarketRig's discovery probe reads (it ignores the missing-`sentence-transformers` warning on standard error). Keep the environment anywhere you like — MarketRig only ever runs that one executable, with `HOME` redirected into the bundle, so the embedded PostgreSQL it installs on first start lands in the bundle too. Then, before starting the cell:
+
+  ```powershell
+  $env:MARKETRIG_EXPERIMENT_HINDSIGHT = "C:\path\to\.hindsight\Scripts\hindsight-api.exe"
+  $env:MARKETRIG_EXPERIMENT_MEMORY_BASE_URL = "https://api.openai.com/v1"
+  $env:MARKETRIG_EXPERIMENT_MEMORY_API_KEY = "sk-…"
+  $env:MARKETRIG_EXPERIMENT_MEMORY_LLM_MODEL = "gpt-4.1-mini"
+  $env:MARKETRIG_EXPERIMENT_MEMORY_EMBEDDING_MODEL = "text-embedding-3-small"
+  ```
+
+  Any OpenAI-compatible base URL works; the key reaches the credential store and the child's environment and nothing else — it is never printed, never in the bundle, never in a log. Leave all five unset and E5 skips with one `INCONCLUSIVE` line naming what was missing.
 - Nothing else. Do **not** set `MARKETRIG_TEST_DATA_ROOT`, `MARKETRIG_TEST_NO_TRADING`, or `MARKETRIG_TEST_QUOTE_URL` yourself: the harness relocates the root into the bundle and clears both feed seams so the daemon polls real Yahoo.
 - Pick the time. Before asking you to do anything, the harness waits up to 60 seconds for one `LIVE` observation from Yahoo, so at least one catalog market must be in session (feature SPEC §2.2, Monday–Friday, no holiday calendar):
 
@@ -21,14 +40,14 @@ One invocation per cell now runs **three** scenarios back to back — E1 or E2, 
 
 ## 2. Start the cell
 
-One cell per invocation; the other cell's tests skip. The harness builds `marketrigd`, `marketrig`, `marketrig-mcp`, and the `trigger-code` helper itself, spawns a daemon, creates a run-stamped desk, and prints its instructions. It then waits up to 15 minutes per step on the daemon's durable rows. Budget 45–60 minutes for a cell: E1/E2, then E3, then E4.
+One cell per invocation; the other cell's tests skip. The harness builds `marketrigd`, `marketrig`, `marketrig-mcp`, and the `trigger-code` helper itself, spawns a daemon, creates a run-stamped desk, and prints its instructions. It then waits up to 15 minutes per step on the daemon's durable rows. Budget 60–80 minutes for a cell: E1/E2, then E3, E4, and E5.
 
 ```powershell
 $env:MARKETRIG_EXPERIMENT = "codex"     # or "claude"
 cargo test -p marketrig-acceptance --test experiment -- --nocapture
 ```
 
-The bundles are `target\acceptance\experiment-<cell>-<stamp>\` for E1/E2, `target\acceptance\experiment-e3-<cell>-<stamp>\` for E3, and `target\acceptance\experiment-e4-<cell>-<stamp>\` for E4. Do **not** set `MARKETRIG_ACCEPTANCE_OUT` for a cell: it would point both scenarios at one directory and the second would overwrite the first's `observations.jsonl`. Copy the `Desk:`, `Data root:`, and `Adapter:` lines from each printout; the same text is in `<bundle>\instructions.txt` (E1/E2), `<bundle>\instructions-e3.txt` (E3), and `<bundle>\instructions-e4.txt` (E4). Leave this window running and open a second one for the session.
+The bundles are `target\acceptance\experiment-<cell>-<stamp>\` for E1/E2, `target\acceptance\experiment-e3-<cell>-<stamp>\` for E3, `target\acceptance\experiment-e4-<cell>-<stamp>\` for E4, and `target\acceptance\experiment-e5-<cell>-<stamp>\` for E5. Do **not** set `MARKETRIG_ACCEPTANCE_OUT` for a cell: it would point every scenario at one directory and each would overwrite the last one's `observations.jsonl`. Copy the `Desk:`, `Data root:`, and `Adapter:` lines from each printout; the same text is in `<bundle>\instructions.txt` (E1/E2), `<bundle>\instructions-e3.txt` (E3), `<bundle>\instructions-e4.txt` (E4), and `<bundle>\instructions-e5.txt` (E5). Leave this window running and open a second one for the session.
 
 ## 3. Register the adapter, project-scoped
 
@@ -114,7 +133,21 @@ E4 is the R3 scenario, and it inverts the other two: **you register nothing and 
 
 If a Windows console is left echoing every keypress as `;1;0;1_[`-style key reports after a cell (win32-input-mode left on by a cell that ended abnormally), run `[Console]::Write("`e[?9001l")` in it or open a new tab. Nothing else to clean up afterwards: the launch files live under the bundle's `data\runtime\launch\` and the daemon deletes them when the process row closes. Your own Codex or Claude configuration was never touched.
 
-## 7. Read the result
+## 7. Drive the session — E5
+
+E5 is the R4 scenario, and it is E4 plus memory: **you register nothing and start nothing**, your console is again the desk's terminal, and the harness has already discovered the real Hindsight launcher and stored the provider before it prints. Two desks are created; the second is never touched and exists so the harness can prove one desk's bank is not another's. The harness also appends an acceptance addendum to the desk's own `AGENTS.md` — that file is agent-owned from creation, and this cell is the user editing it.
+
+The memory child is not running when the cell starts: nothing starts it but the first memory operation, and a cold start takes about 15 seconds while `pg0` installs its embedded PostgreSQL under `<bundle>\data\hindsight\`. That happens inside the session's first `marketrig memory` call, so the first one is slow and every later one is not.
+
+1. **Answer the first launch** exactly as in §6.
+2. **One round trip.** Ask the session to buy one unit of an instrument whose market is open through `submit_order`, and then to sell that same unit. The closing fill writes the `position_cycles` row and queues its `EVALUATION` prompt in one transaction, and the dispatcher hands the prompt to the session it is already talking to.
+3. **Let the agent work.** The prompt arrives as the session's own input. What it does next is the point of the whole milestone and is **yours to watch, not to do**: its constitution and `.agents/skills/desk-improvement/SKILL.md` tell it to judge the cycle, retain one lesson with `marketrig memory retain`, and edit a skill under `.agents/skills/`. Do not retain or edit anything yourself; an aspect the agent skips ends `INCONCLUSIVE`, which is a result, not a failure.
+4. **The later session.** When the harness says so it ends the session and activates a new one on the same thread (`CONTINUE`). Ask that session what this desk learned about the instrument. It must reach for `marketrig memory recall`; the harness watches for the `MEMORY_RECALLED` event, not for any particular answer.
+5. **The one hard rule.** After the waits, the harness recalls on the *second* desk with a query naming the cycle. That recall must answer `no results`. A bank that crosses desks fails the cell outright, as does a `MEMORY_RETAINED` row the daemon's own numbers contradict.
+
+If the child never becomes ready, `<bundle>\marketrigd-1.stderr` and `marketrig memory status <desk>` say why: `state: UNAVAILABLE` with `failure_code: CHILD_FAILED` means it exited twice, and the row's `failure_message` is the launcher's own last line. A wrong provider key is *not* a child failure — Hindsight starts anyway and the retain fails `MEMORY_ERROR` with the provider's own words, key redacted.
+
+## 8. Read the result
 
 `test result: ok` says only that the harness ran; the verdict is in `<bundle>\observations.jsonl`, one JSON line per step:
 
@@ -123,13 +156,14 @@ If a Windows console is left echoing every keypress as `;1;0;1_[`-style key repo
 - E3's agent-dependent steps — no trigger, no firing, a trigger with no `--code`, or code that placed no order — end `INCONCLUSIVE` with what the harness did see, including the script's captured standard output. Everything after a code-bearing firing exists is the daemon's own and fails the cell instead: the completed execution, the queued prompt, and the attribution on any action row;
 - a step that timed out ends the cell with `INCONCLUSIVE` and `waited_secs: 900` instead. That is not a defect. Rerun the cell; every run creates a new desk and bundle, so rewrite the project-scoped file for the new `<desk>` and `<bundle>`, and delete the timed-out bundle;
 - E4's agent-dependent steps — no session started, no readiness (its first-launch questions unanswered), a result never delivered — end `INCONCLUSIVE`; a delivery the daemon's own rows contradict (a `DELIVERED` prompt naming no runtime or no native session) fails the cell. Whether the delivered text appeared as the session's input is yours to confirm on the console and is recorded `INCONCLUSIVE` by construction;
+- E5's agent-dependent steps — no cycle closed, no retain, no skill change, no recall from the later session — end `INCONCLUSIVE`; the second desk's recall answering anything, or a `MEMORY_RETAINED` row the daemon's numbers contradict, fails the cell. With any of E5's five variables unset the cell is one `INCONCLUSIVE` line naming them and nothing else;
 - a mechanical failure (no daemon, no `LIVE` quote, a wrong row) panics the test with the reason; `<bundle>\marketrigd-1.stderr` and `<bundle>\logs\` hold the daemon's side.
 
 The macOS bundles named at the top are the reference shape for a complete cell.
 
-## 8. Evidence and cleanup
+## 9. Evidence and cleanup
 
-- Keep all three bundles per cell: `experiment-<cell>-<stamp>`, `experiment-e3-<cell>-<stamp>`, and `experiment-e4-<cell>-<stamp>`. The bundle is the evidence; the `.codex\config.toml` and `.mcp.json` inside it carry no secret, only the data-root path.
+- Keep all four bundles per cell: `experiment-<cell>-<stamp>`, `experiment-e3-<cell>-<stamp>`, `experiment-e4-<cell>-<stamp>`, and `experiment-e5-<cell>-<stamp>`. The bundle is the evidence; the `.codex\config.toml` and `.mcp.json` inside it carry no secret, only the data-root path, and neither the provider key nor the child's per-start bearer is anywhere in it — `<bundle>\data\runtime\credentials.json` is the relocated credential store and is the one file that holds the key, by design.
 - Record each cell's stamps, runtime version, and the commit in the slice's freeze note and the roadmap's evidence line.
 - Nothing was written to `~\.codex\config.toml` or Claude Code's user config. If you used the global form from the printout instead, remove it: `codex mcp remove marketrig` / `claude mcp remove marketrig`.
-- Aborting the harness with Ctrl-C skips its teardown; check for a leftover daemon with `Get-Process marketrigd` and stop it before the next cell. On macOS a hard-stopped run can also leave a `trigger-code` child in its own session; `pkill trigger-code` clears it. Aborting E4 also leaves your console in raw mode and the launched runtime running: `Get-Process codex, claude` (macOS: `pkill -f 'codex --remote'`), and `stty sane` on macOS restores the terminal.
+- Aborting the harness with Ctrl-C skips its teardown; check for a leftover daemon with `Get-Process marketrigd` and stop it before the next cell. On macOS a hard-stopped run can also leave a `trigger-code` child in its own session; `pkill trigger-code` clears it. Aborting E4 or E5 also leaves your console in raw mode and the launched runtime running: `Get-Process codex, claude` (macOS: `pkill -f 'codex --remote'`), and `stty sane` on macOS restores the terminal. An aborted E5 can leave the Hindsight child and its embedded PostgreSQL running too: `Get-Process hindsight-api, postgres` (macOS: `pkill -f hindsight-api`).

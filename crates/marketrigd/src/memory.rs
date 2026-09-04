@@ -833,6 +833,11 @@ impl Memory {
             env.push(("LOCALAPPDATA".to_string(), home.clone()));
         }
         env.push(("HOME".to_string(), home));
+        // The daemon's own `MARKETRIG_*` variables ride along, exactly as they
+        // do to a runtime the terminal manager spawns: root §17's test seam is
+        // how the acceptance stand-in child is pointed at its scratch and its
+        // script. A daemon started by a user carries none of them.
+        env.extend(std::env::vars().filter(|(key, _)| key.starts_with("MARKETRIG_")));
         env.extend([
             ("HINDSIGHT_API_HOST".to_string(), "127.0.0.1".to_string()),
             ("HINDSIGHT_API_PORT".to_string(), port.to_string()),
