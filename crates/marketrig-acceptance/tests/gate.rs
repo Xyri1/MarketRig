@@ -393,8 +393,9 @@ fn cli_in(g: &Harness, dir: &std::path::Path, args: &[&str]) -> (i32, String, St
     )
 }
 
-/// A secret reaches none of the three places R4 §7.2 names: the database file
-/// (its journal included), the log root, and the events listing.
+/// A secret reaches none of the three places R4 §7.2 names — the database file
+/// (its journal included), the log root, and the events listing — nor the
+/// evidence bundle the gate itself writes.
 #[track_caller]
 fn nowhere(g: &Harness, what: &str, secret: &str) {
     assert!(
@@ -434,6 +435,11 @@ fn nowhere(g: &Harness, what: &str, secret: &str) {
         .map(|e| format!("{} {:?} {}\n", e.kind, e.desk_id, e.payload))
         .collect();
     searched.push(("the events listing".to_string(), events.into_bytes()));
+    let observations = g.out.join("observations.jsonl");
+    searched.push((
+        observations.display().to_string(),
+        fs::read(&observations).unwrap_or_default(),
+    ));
     for (where_, bytes) in searched {
         assert!(
             !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
@@ -3675,12 +3681,12 @@ fn gate() {
     );
     assert_eq!(back["state"], "AVAILABLE", "{back}");
 
-    let (status, saved) = g.api(
+    let (status, saved) = g.api_redacted(
         "G33",
         &endpoint,
         "PUT",
         "/memory/provider",
-        Some(&provider("stand-in-embedding")),
+        &provider("stand-in-embedding"),
     );
     assert_eq!(status, 200, "{saved}");
     assert_eq!(saved["base_url"], provider_base.as_str());
@@ -3769,12 +3775,12 @@ fn gate() {
     );
 
     // The first retain locked the embedding model (§3).
-    let (status, locked) = g.api(
+    let (status, locked) = g.api_redacted(
         "G34",
         &endpoint,
         "PUT",
         "/memory/provider",
-        Some(&provider("another-embedding")),
+        &provider("another-embedding"),
     );
     assert_eq!(status, 409, "{locked}");
     assert_eq!(locked["code"], "EMBEDDING_MODEL_LOCKED");
@@ -3934,8 +3940,15 @@ fn gate() {
         text.contains("MarketRig EVALUATION ")
     });
     assert!(
-        seen.contains("MarketRig EVALUATION "),
-        "the evaluation reached the session as its own input: {seen:?}"
+        seen.lines().any(|line| {
+            line.split_once("INPUT ").is_some_and(|(_, framed)| {
+                framed.split_once(": ").is_some_and(|(n, text)| {
+                    n.chars().all(|c| c.is_ascii_digit())
+                        && text.starts_with("MarketRig EVALUATION ")
+                })
+            })
+        }),
+        "the evaluation reached the session as its own input, framed like every other: {seen:?}"
     );
     assert!(
         seen.contains(&cycle),
@@ -4065,12 +4078,12 @@ fn gate() {
     // A provider change stops a live child (§2.3), which is how the gate arms a
     // start: the next operation starts a child that has read the new script.
     g.script(armed(json!({ "exit_after_ms": 6_000 })));
-    let (status, rearmed) = g.api(
+    let (status, rearmed) = g.api_redacted(
         "G37",
         &endpoint,
         "PUT",
         "/memory/provider",
-        Some(&provider("stand-in-embedding")),
+        &provider("stand-in-embedding"),
     );
     assert_eq!(status, 200, "{rearmed}");
     let losses = global(&g, "MEMORY_LOST").len();
@@ -4124,12 +4137,12 @@ fn gate() {
     g.script(armed(
         json!({ "health_after_ms": 600_000, "exit_after_ms": 3_000 }),
     ));
-    let (status, doomed) = g.api(
+    let (status, doomed) = g.api_redacted(
         "G37",
         &endpoint,
         "PUT",
         "/memory/provider",
-        Some(&provider("stand-in-embedding")),
+        &provider("stand-in-embedding"),
     );
     assert_eq!(status, 200, "{doomed}");
     for attempt in 1..=2 {

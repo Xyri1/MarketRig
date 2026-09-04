@@ -471,11 +471,48 @@ impl Harness {
         path: &str,
         body: Option<&str>,
     ) -> (u16, Value) {
+        self.api_as(scenario, endpoint, method, path, body, body)
+    }
+
+    /// [`Harness::api`] for a body carrying the provider key: the bundle keeps
+    /// the request's shape with `api_key` held back, so the evidence never
+    /// carries a secret the run was given.
+    #[track_caller]
+    pub fn api_redacted(
+        &mut self,
+        scenario: &str,
+        endpoint: &Endpoint,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> (u16, Value) {
+        let mut shown = parse(body);
+        shown["api_key"] = json!("<redacted>");
+        self.api_as(
+            scenario,
+            endpoint,
+            method,
+            path,
+            Some(body),
+            Some(&shown.to_string()),
+        )
+    }
+
+    #[track_caller]
+    fn api_as(
+        &mut self,
+        scenario: &str,
+        endpoint: &Endpoint,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        shown: Option<&str>,
+    ) -> (u16, Value) {
         let (status, value) = self.call(endpoint, method, path, body);
         self.note(
             scenario,
             "loopback API",
-            json!({ "method": method, "path": path, "request": body, "status": status, "body": value }),
+            json!({ "method": method, "path": path, "request": shown, "status": status, "body": value }),
         );
         (status, value)
     }

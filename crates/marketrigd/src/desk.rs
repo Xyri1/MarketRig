@@ -595,6 +595,8 @@ pub fn link_skills(desk_dir: &Path) -> io::Result<()> {
     buffer.path[print_at..print_at + print.len()].copy_from_slice(&print);
 
     let handle = open_reparse(&link, GENERIC_WRITE.0)?;
+    // A synchronous handle still requires somewhere to write the byte count.
+    let mut returned: u32 = 0;
     let set = unsafe {
         DeviceIoControl(
             handle,
@@ -603,7 +605,7 @@ pub fn link_skills(desk_dir: &Path) -> io::Result<()> {
             8 + u32::from(buffer.data_len),
             None,
             0,
-            None,
+            Some(&mut returned),
             None,
         )
     };
@@ -636,6 +638,7 @@ pub fn skills_link_target(desk_dir: &Path) -> io::Result<Option<PathBuf>> {
     }
     let handle = open_reparse(&link, GENERIC_READ.0)?;
     let mut buffer: Box<MountPoint> = Box::new(unsafe { std::mem::zeroed() });
+    let mut returned: u32 = 0;
     let read = unsafe {
         DeviceIoControl(
             handle,
@@ -644,7 +647,7 @@ pub fn skills_link_target(desk_dir: &Path) -> io::Result<Option<PathBuf>> {
             0,
             Some((&raw mut *buffer).cast()),
             MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-            None,
+            Some(&mut returned),
             None,
         )
     };

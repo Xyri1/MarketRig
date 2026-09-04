@@ -493,13 +493,6 @@ impl Memory {
         }
     }
 
-    /// Whether the store actually holds a key. `Provider::api_key_present`
-    /// answers from `key_ref` instead, which a status read must not pay a
-    /// credential-store round trip for.
-    pub fn key_present(&self) -> bool {
-        matches!(self.load_key(), Ok(Some(_)))
-    }
-
     /// Replaces every occurrence of the stored key in a message the daemon
     /// lifted from the child (§4.3). A message with no key in it, and a store
     /// with no key in it, both come back unchanged.
@@ -566,7 +559,7 @@ fn seam_write(path: &Path, map: &BTreeMap<String, String>) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 /// `PUT /memory/provider`'s body (§3).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Deserialize)]
 pub struct ProviderRequest {
     pub base_url: String,
     /// Omitted keeps whatever key is already stored.
@@ -875,10 +868,13 @@ impl Memory {
         match row.state.as_str() {
             "AVAILABLE" => {}
             "UNAVAILABLE" => {
-                return Err(MemoryError::Unavailable(
+                return Err(MemoryError::Unavailable(sentence(
+                    "The memory child is unavailable",
                     row.failure_message
-                        .unwrap_or_else(|| "The memory child is unavailable.".to_string()),
-                ));
+                        .as_deref()
+                        .or(row.failure_code.as_deref())
+                        .unwrap_or("no reason was recorded"),
+                )));
             }
             _ => return Err(MemoryError::Unconfigured),
         }
@@ -1410,9 +1406,9 @@ fn route(port: u16, bank: &str, suffix: &str) -> String {
 
 impl Memory {
     /// The endpoint one operation talks to. A child that is already ready
-    /// answers straight away and a row the loss rule has failed refuses here
-    /// (§4.3); starting one is [`Self::ensure_ready`]'s, inside the caller's own
-    /// budget.
+    /// answers straight away; anything else is [`Self::ensure_ready`]'s, whose
+    /// [`Self::plan`] is the one place a row the loss rule has failed refuses
+    /// (§4.3).
     async fn endpoint(&self) -> Result<(u16, String), MemoryError> {
         {
             let live = self.live.lock().await;
@@ -1422,22 +1418,14 @@ impl Memory {
                 return Ok((port, bearer));
             }
         }
-        let row = child_row(&self.store)?;
-        if row.state == "UNAVAILABLE" {
-            return Err(MemoryError::Unavailable(sentence(
-                "The memory child is unavailable",
-                row.failure_message
-                    .as_deref()
-                    .or(row.failure_code.as_deref())
-                    .unwrap_or("no reason was recorded"),
-            )));
-        }
         self.ensure_ready().await
     }
 
     /// One call to the child (§4.2). The readiness wait and the request share
-    /// the operation's own budget (§4.3), and every message lifted out of the
-    /// answer is redacted before it can leave.
+    /// the operation's own budget (§4.3) but not its verdict: a child still
+    /// `STARTING` when the wait runs out is `UNAVAILABLE`, only the request
+    /// itself times out. Every message lifted out of the answer is redacted
+    /// before it can leave.
     async fn call(
         &self,
         bank: &str,
@@ -1445,8 +1433,12 @@ impl Memory {
         body: Value,
         budget: Duration,
     ) -> Result<Value, MemoryError> {
+        let started = tokio::time::Instant::now();
+        let (port, bearer) = tokio::time::timeout(budget.min(self.ready_deadline), self.endpoint())
+            .await
+            .unwrap_or_else(|_| Err(MemoryError::Unavailable(SLOW_MESSAGE.to_string())))?;
+        let budget = budget.saturating_sub(started.elapsed());
         let attempt = async {
-            let (port, bearer) = self.endpoint().await?;
             let response = self
                 .http
                 .post(route(port, bank, suffix))
@@ -1927,7 +1919,6 @@ async fn provider_settings() {
     assert!(provider.api_key_present);
     assert!(provider.embedding_locked_at_ns.is_none());
     assert_eq!(memory.load_key().unwrap().as_deref(), Some(FAKE_KEY));
-    assert!(memory.key_present());
     assert_eq!(
         serde_json::to_value(&provider).unwrap()["api_key"],
         Value::Null
@@ -2592,7 +2583,10 @@ async fn loss_then_one_restart_then_child_failed() {
     // The row now answers before anything is spawned.
     let err = memory.ensure_ready().await.unwrap_err();
     assert_eq!(err.code(), "MEMORY_UNAVAILABLE");
-    assert_eq!(err.to_string(), FAKE_LAST_LINE);
+    assert_eq!(
+        err.to_string(),
+        format!("The memory child is unavailable: {FAKE_LAST_LINE}.")
+    );
 
     // Retry clears CHILD_FAILED, re-validates, and starts the count again.
     memory.retry().await.unwrap();
@@ -3186,6 +3180,32 @@ async fn memory_operations() {
         .unwrap_err();
     assert_eq!(err.code(), "MEMORY_UNAVAILABLE");
     assert!(err.to_string().contains("it exited"), "{err}");
+}
+
+/// A child still `STARTING` when the operation's budget runs out is
+/// `MEMORY_UNAVAILABLE`; only the request itself times out (§4.3).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_starting_child_is_unavailable_not_a_timeout() {
+    let (_dir, mut memory) = scratch();
+    memory.recall_timeout = Duration::from_millis(500);
+    let bin = tempfile::tempdir().unwrap();
+    configured(&memory, &fake_launcher(bin.path(), "slow", 60_000, None)).await;
+
+    let err = memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "q".to_string(),
+                budget: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_UNAVAILABLE", "{err}");
+    assert_eq!(memory.live.lock().await.state, LiveState::Starting);
+    memory.stop_child().await;
 }
 
 /// A wrong bearer is the child's own refusal, and it never becomes a MarketRig

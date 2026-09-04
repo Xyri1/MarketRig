@@ -988,18 +988,16 @@ fn closed_loop(scenario: &str, cell: &str, runtime: &str) {
         child["state"], "AVAILABLE",
         "{HINDSIGHT} must name a Hindsight launcher whose --help carries HINDSIGHT_API_PORT: {child}"
     );
-    let (status, provider) = g.api(
+    let (status, provider) = g.api_redacted(
         scenario,
         &endpoint,
         "PUT",
         "/memory/provider",
-        Some(
-            &json!({
-                "base_url": value(MEMORY[0]), "api_key": value(MEMORY[1]),
-                "llm_model": value(MEMORY[2]), "embedding_model": value(MEMORY[3]),
-            })
-            .to_string(),
-        ),
+        &json!({
+            "base_url": value(MEMORY[0]), "api_key": value(MEMORY[1]),
+            "llm_model": value(MEMORY[2]), "embedding_model": value(MEMORY[3]),
+        })
+        .to_string(),
     );
     assert_eq!(status, 200, "{provider}");
     assert_eq!(provider["api_key_present"], true, "{provider}");

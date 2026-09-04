@@ -834,6 +834,22 @@ async fn runtime_retry(
 // The memory installation routes (R4 feature SPEC §2.1, §3). The desk-scoped
 // operations are C31's; nothing here starts the child.
 
+/// One request body, or the §4.3 `VALIDATION` that describes the shape.
+fn memory_request<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: &str,
+    shape: &str,
+) -> Result<T, MemoryError> {
+    is_json(headers)
+        .then(|| serde_json::from_str::<T>(body).ok())
+        .flatten()
+        .ok_or_else(|| {
+            MemoryError::Validation(format!(
+                "The request body must be a JSON object with {shape}."
+            ))
+        })
+}
+
 async fn memory_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<memory::Status>, MemoryError> {
@@ -850,14 +866,8 @@ async fn memory_discover(
     headers: HeaderMap,
     body: String,
 ) -> Result<Response, MemoryError> {
-    let Some(request) = is_json(&headers)
-        .then(|| serde_json::from_str::<MemoryDiscoverRequest>(&body).ok())
-        .flatten()
-    else {
-        return Err(MemoryError::Validation(
-            r#"The request body must be a JSON object with an "executable" path."#.to_string(),
-        ));
-    };
+    let request: MemoryDiscoverRequest =
+        memory_request(&headers, &body, r#"an "executable" path"#)?;
     if !request.executable.is_absolute() {
         return Err(MemoryError::Validation(format!(
             "The executable path {} must be absolute.",
@@ -878,16 +888,11 @@ async fn memory_provider(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<memory::Provider>, MemoryError> {
-    let Some(request) = is_json(&headers)
-        .then(|| serde_json::from_str::<memory::ProviderRequest>(&body).ok())
-        .flatten()
-    else {
-        return Err(MemoryError::Validation(
-            "The request body must be a JSON object with base_url, llm_model, embedding_model, \
-             and an optional api_key."
-                .to_string(),
-        ));
-    };
+    let request = memory_request(
+        &headers,
+        &body,
+        "base_url, llm_model, embedding_model, and an optional api_key",
+    )?;
     Ok(Json(state.memory.put_provider(request).await?))
 }
 
@@ -903,22 +908,6 @@ async fn memory_models(
 // refusals — `DESK_NOT_FOUND`, `DESK_NOT_READY`, and `ATTRIBUTION_INVALID` —
 // are the order routes' own checks, carried into `MemoryError` so both shapes
 // answer through the maps they already have.
-
-/// One request body, or the §4.3 `VALIDATION` that describes the shape.
-fn memory_request<T: serde::de::DeserializeOwned>(
-    headers: &HeaderMap,
-    body: &str,
-    shape: &str,
-) -> Result<T, MemoryError> {
-    is_json(headers)
-        .then(|| serde_json::from_str::<T>(body).ok())
-        .flatten()
-        .ok_or_else(|| {
-            MemoryError::Validation(format!(
-                "The request body must be a JSON object with {shape}."
-            ))
-        })
-}
 
 async fn desk_memory(
     State(state): State<Arc<ApiState>>,
