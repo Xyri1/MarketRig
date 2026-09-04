@@ -285,6 +285,20 @@ fn scheduled(scenario: &str, cell: &str, runtime: &str) {
     assert_eq!(created["state"], "READY", "{created}");
     let desk_id = created["id"].as_str().expect("id").to_owned();
 
+    // R5's installed default gates trigger code (R5 feature SPEC §2), and E3 is
+    // about the session defining a trigger that runs, not about the operator
+    // approving one: the setup puts this root on Always allow, exactly as G21's
+    // prologue does (R5 feature SPEC §7.1).
+    let (status, allowed) = g.api(
+        scenario,
+        &endpoint,
+        "PUT",
+        "/settings/policies",
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{allowed}");
+    assert_eq!(allowed["trigger_code_policy"], "ALWAYS_ALLOW");
+
     // Mechanical, and it also picks the instrument the operator names: the
     // trigger's order should be for something the real feed is observing.
     let quotes = format!("/desks/{desk_id}/market/quotes");

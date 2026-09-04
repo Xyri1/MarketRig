@@ -164,6 +164,167 @@ impl Endpoint {
     }
 }
 
+/// One WebSocket the harness drives (R5 feature SPEC §4.2, §4.4): the events
+/// tail with its first-frame credential, and the sockets G41 only has to dial.
+/// The runtime handle is the caller's own, so a socket outlives the step that
+/// opened it and a scenario can hold one open across steps; every read is
+/// bounded, like every other wait in either mode (root SPEC §17).
+pub struct Socket {
+    stream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    handle: tokio::runtime::Handle,
+}
+
+impl Socket {
+    /// One handshake against the daemon's loopback port: the socket when it
+    /// upgrades, the status and the envelope body when the gate answered
+    /// instead — which is how "refused before any upgrade" is read (§4.4).
+    pub fn dial(
+        rt: &tokio::runtime::Runtime,
+        port: u16,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> Result<Socket, (u16, String)> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+        let mut request = format!("ws://127.0.0.1:{port}{path}")
+            .into_client_request()
+            .expect("a ws url");
+        for (name, value) in headers {
+            request.headers_mut().insert(
+                name.parse::<tokio_tungstenite::tungstenite::http::HeaderName>()
+                    .expect("a header name"),
+                value.parse().expect("a header value"),
+            );
+        }
+        let handle = rt.handle().clone();
+        handle.clone().block_on(async move {
+            match tokio_tungstenite::connect_async(request).await {
+                Ok((stream, _)) => Ok(Socket { stream, handle }),
+                Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                    let (parts, body) = (*response).into_parts();
+                    Err((
+                        parts.status.as_u16(),
+                        String::from_utf8(body.unwrap_or_default()).unwrap_or_default(),
+                    ))
+                }
+                Err(e) => panic!("{path}: expected an upgrade or an HTTP answer, got {e:?}"),
+            }
+        })
+    }
+
+    /// The events tail (§4.2): the handshake, then frame 1. That frame carries
+    /// the credential, so nothing writes it to the bundle — only the frames it
+    /// answers with are evidence.
+    pub fn events(
+        rt: &tokio::runtime::Runtime,
+        endpoint: &Endpoint,
+        after: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> Socket {
+        let mut socket = Socket::dial(rt, endpoint.port, "/events", headers)
+            .unwrap_or_else(|(status, body)| panic!("the tail answered {status}: {body}"));
+        let mut frame = json!({ "bearer": endpoint.credential });
+        if let Some(after) = after {
+            frame["after"] = json!(after);
+        }
+        socket.send(&frame.to_string());
+        socket
+    }
+
+    pub fn send(&mut self, text: &str) {
+        use futures_util::SinkExt as _;
+        let frame = tokio_tungstenite::tungstenite::Message::Text(text.to_owned().into());
+        self.handle
+            .block_on(self.stream.send(frame))
+            .expect("send a frame");
+    }
+
+    /// Text frames parsed as JSON until `until` answers true, the socket
+    /// closes, or the bound passes. Answers everything it read, the frame that
+    /// satisfied `until` last.
+    pub fn read(&mut self, bound: Duration, mut until: impl FnMut(&Value) -> bool) -> Vec<Value> {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let stream = &mut self.stream;
+        self.handle.block_on(async move {
+            let deadline = tokio::time::Instant::now() + bound;
+            let mut seen: Vec<Value> = Vec::new();
+            loop {
+                match tokio::time::timeout_at(deadline, stream.next()).await {
+                    Ok(Some(Ok(Message::Text(text)))) => {
+                        let frame = parse(&text);
+                        let done = until(&frame);
+                        seen.push(frame);
+                        if done {
+                            return seen;
+                        }
+                    }
+                    Ok(Some(Ok(_))) => {}
+                    _ => return seen,
+                }
+            }
+        })
+    }
+
+    /// What a byte-oriented socket wrote — the terminal's replayed ring and its
+    /// live output (R3 §3) — until `until` answers true or the bound passes.
+    pub fn text(&mut self, bound: Duration, until: impl Fn(&str) -> bool) -> String {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let stream = &mut self.stream;
+        self.handle.block_on(async move {
+            let deadline = tokio::time::Instant::now() + bound;
+            let mut seen = String::new();
+            while !until(&seen) {
+                match tokio::time::timeout_at(deadline, stream.next()).await {
+                    Ok(Some(Ok(Message::Binary(bytes)))) => {
+                        seen.push_str(&String::from_utf8_lossy(&bytes));
+                    }
+                    Ok(Some(Ok(Message::Text(text)))) => seen.push_str(&text),
+                    Ok(Some(Ok(_))) => {}
+                    _ => break,
+                }
+            }
+            seen
+        })
+    }
+
+    /// The close code, past any frames still in flight. `None` is the bound
+    /// passing with the socket still open — which is how "untouched" reads; a
+    /// socket that went away without a close frame answers `Some(0)`, which is
+    /// nobody's close code and fails the same assertion.
+    pub fn close_code(&mut self, bound: Duration) -> Option<u16> {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+        let stream = &mut self.stream;
+        self.handle.block_on(async move {
+            let deadline = tokio::time::Instant::now() + bound;
+            loop {
+                match tokio::time::timeout_at(deadline, stream.next()).await {
+                    Ok(Some(Ok(Message::Close(close)))) => {
+                        return Some(close.map_or(0, |frame| u16::from(frame.code)));
+                    }
+                    Ok(Some(Ok(_))) => {}
+                    Err(_) => return None,
+                    Ok(Some(Err(_)) | None) => return Some(0),
+                }
+            }
+        })
+    }
+}
+
+/// One tail frame's position, the `<occurred_at_ns>:<id>` an `after` takes
+/// (R5 feature SPEC §4.2).
+#[track_caller]
+pub fn cursor(event: &Value) -> String {
+    let ns = event["occurred_at_ns"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("not an event frame: {event}"));
+    let id = event["id"].as_str().unwrap_or_default();
+    format!("{ns}:{id}")
+}
+
 /// One `operational_events` row (R0 feature SPEC §3.3), read through read-only
 /// SQLite.
 #[derive(Debug, Clone, PartialEq, Eq)]

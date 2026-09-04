@@ -1,11 +1,15 @@
-//! The acceptance gate: scenarios G1–G32, in order, in one test.
+//! The acceptance gate: scenarios G1–G41, in order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
 //! (the stand-in feed and G12–G20) and `sdd/features/r2-scheduled-triggers/SPEC.md`
 //! §10 (the `trigger-code` binary and G21–G26) and
 //! `sdd/features/r3-runtime-delivery/SPEC.md` §9 (the `runtime-standin` binary
-//! and G27–G32), per D75, R0-7, R1-9, R2-8, R3-8. The
+//! and G27–G32) and `sdd/features/r4-memory-skills-loop/SPEC.md` §7 (the
+//! `memory-standin` binary and G33–G37) and
+//! `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1 (the approval
+//! policies, the events tail, and G38–G41), per D75, R0-7, R1-9, R2-8, R3-8,
+//! R4-7, R5-8. The
 //! harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
@@ -23,7 +27,7 @@ use std::fs::{self, File};
 use std::process::Stdio;
 use std::time::Duration;
 
-use marketrig_acceptance::{Harness, parse, standin, within};
+use marketrig_acceptance::{Harness, Socket, cursor, parse, standin, within};
 use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ReadResourceRequestParams, ResourceContents};
 use rmcp::service::{RoleClient, RunningService};
@@ -1773,6 +1777,19 @@ fn gate() {
     // ======================================================================
     let daemon8 = g.spawn("G21");
     endpoint = daemon8.endpoint.clone();
+    // R5's installed default gates trigger code (R5 feature SPEC §2), while the
+    // R2–R4 chain is written against R2's fixed Always allow. The prologue sets
+    // it once for this database root — the row outlives every daemon on it — and
+    // G38 puts the default back (R5 feature SPEC §7.1).
+    let (status, allowed) = g.api(
+        "G21",
+        &endpoint,
+        "PUT",
+        "/settings/policies",
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{allowed}");
+    assert_eq!(allowed["trigger_code_policy"], "ALWAYS_ALLOW");
     let ns = 1_000_000_000i64;
     let now = || marketrig_acceptance::now_secs() as i64;
     let trigger_route = |id: &str| format!("/desks/{gamma_id}/triggers/{id}");
@@ -2166,7 +2183,7 @@ fn gate() {
     );
     assert_eq!(
         trading["code"]["approved_at_ns"], trading["created_at_ns"],
-        "R2's fixed Always allow (§4.1)"
+        "Always allow, so the snapshot was decided as it was created (R5 §3.2)"
     );
     assert!(
         trading["code"]["fingerprint"]
@@ -4269,6 +4286,1114 @@ fn gate() {
         json!({ "lost": lost, "recovery": recovery, "child_pid": child_pid }),
     );
 
+    // ======================================================================
+    // R5 (feature SPEC `r5-desktop-approval-controls` §7.1). The chain
+    // continues on the same root, the same stand-in feed, and the same
+    // stand-in runtime, with a fresh daemon: the two approval policies, the
+    // events tail with its first-frame credential, and the browser-grade
+    // origin check on the three sockets. G21's prologue put trigger code on
+    // Always allow for the whole R2–R4 chain; G38 puts R5's default back.
+    // ======================================================================
+    let eta = format!("eta-{stamp}");
+    let theta = format!("theta-{stamp}");
+    let iota = format!("iota-{stamp}");
+    let daemon17 = g.spawn("G38");
+    endpoint = daemon17.endpoint.clone();
+    let bearer = format!("Bearer {}", endpoint.credential);
+    let policies = "/settings/policies";
+    let approve = r#"{"decision":"APPROVE"}"#;
+    let deny = r#"{"decision":"DENY"}"#;
+    let decide = |desk_id: &str, id: &str| format!("/desks/{desk_id}/approvals/{id}");
+
+    // --- G38 — policies and the tail ----------------------------------------
+    let (status, installed) = g.api("G38", &endpoint, "GET", policies, None);
+    assert_eq!(status, 200, "{installed}");
+    assert_eq!(
+        installed["trigger_code_policy"], "ALWAYS_ALLOW",
+        "G21's prologue, still in force on this root (§2)"
+    );
+    assert_eq!(
+        installed["paper_order_policy"], "ALWAYS_ALLOW",
+        "the installed default (§2)"
+    );
+    assert_eq!(installed["delivery_mode"], "QUEUE");
+    assert_eq!(
+        installed["steer_available"], false,
+        "steering is reserved and never offered (§2)"
+    );
+
+    let (status, steered) = g.api(
+        "G38",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"delivery_mode":"STEER"}"#),
+    );
+    assert_eq!(status, 409, "{steered}");
+    assert_eq!(steered["code"], "STEER_DISABLED");
+    let (_, unmoved) = g.api("G38", &endpoint, "GET", policies, None);
+    assert_eq!(unmoved, installed, "a refused PUT wrote nothing (§2)");
+
+    // The tail is read live: this client connects and takes its position
+    // before the PUT that writes the row it then receives (§4.2).
+    let mut live = Socket::events(&rt, &endpoint, None, &[]);
+    let opened = live.read(Duration::from_secs(10), |frame| frame.get("tail").is_some());
+    assert_eq!(
+        opened.len(),
+        1,
+        "a client with no `after` is told where it starts, first and only: {opened:?}"
+    );
+
+    let changes = global(&g, "POLICY_CHANGED").len();
+    let (status, restored) = g.api(
+        "G38",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"trigger_code_policy":"REQUIRE_APPROVAL"}"#),
+    );
+    assert_eq!(status, 200, "{restored}");
+    assert_eq!(restored["trigger_code_policy"], "REQUIRE_APPROVAL");
+    assert_eq!(restored["paper_order_policy"], "ALWAYS_ALLOW");
+    let written = global(&g, "POLICY_CHANGED");
+    assert_eq!(
+        written.len(),
+        changes + 1,
+        "one event per field that actually changed (§2)"
+    );
+    assert_eq!(
+        written[changes],
+        json!({ "field": "trigger_code_policy", "from": "ALWAYS_ALLOW", "to": "REQUIRE_APPROVAL" })
+    );
+    let heard = live.read(Duration::from_secs(15), |frame| {
+        frame["kind"] == "POLICY_CHANGED"
+    });
+    let row = heard.last().expect("the row reached the tail").clone();
+    assert_eq!(row["payload"], written[changes]);
+    assert!(
+        row.get("desk_id").is_none(),
+        "an installation-wide row names no desk (§4.2): {row}"
+    );
+    let after = cursor(&row);
+    drop(live);
+
+    let mut fresh: Vec<String> = Vec::new();
+    for name in [&eta, &theta] {
+        let (exit, created) = g.cli_json("G38", &["--json", "desk", "create", name]);
+        assert_eq!(exit, 0, "{created}");
+        assert_eq!(created["state"], "READY");
+        fresh.push(created["id"].as_str().expect("id").to_owned());
+    }
+
+    // Gapless: the reconnect receives exactly what committed while it was
+    // away, then the position its live frames continue from (§4.2).
+    let mut again = Socket::events(&rt, &endpoint, Some(&after), &[]);
+    let replayed = again.read(Duration::from_secs(20), |frame| frame.get("tail").is_some());
+    assert!(
+        replayed
+            .last()
+            .is_some_and(|last| last.get("tail").is_some()),
+        "the replay ends at the tail: {replayed:?}"
+    );
+    assert_eq!(
+        replayed[..replayed.len() - 1]
+            .iter()
+            .map(|row| (
+                row["kind"].as_str().unwrap_or_default(),
+                row["desk_id"].as_str().unwrap_or_default()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("DESK_CREATED", fresh[0].as_str()),
+            ("DESK_READY", fresh[0].as_str()),
+            ("DESK_CREATED", fresh[1].as_str()),
+            ("DESK_READY", fresh[1].as_str()),
+        ],
+        "exactly the two desk creations, in commit order (§4.2)"
+    );
+    drop(again);
+
+    // A subscriber that never reads is dropped once its queue fills, while one
+    // that keeps up is unaffected (§4.1). The queue holds a thousand frames and
+    // the loopback socket buffers about as many again, so the flood is four
+    // thousand rows — one POLICY_CHANGED per PUT — and the reading client
+    // drains between batches so it never fills its own.
+    const FLOOD: usize = 4_000;
+    const BATCH: usize = 500;
+    let mut idle = Socket::events(&rt, &endpoint, None, &[]);
+    let mut reading = Socket::events(&rt, &endpoint, None, &[]);
+    let started = reading.read(Duration::from_secs(10), |frame| frame.get("tail").is_some());
+    assert_eq!(started.len(), 1, "{started:?}");
+    let mut produced = 0usize;
+    let mut kept = 0usize;
+    while produced < FLOOD {
+        for _ in 0..BATCH {
+            let wanted = if produced.is_multiple_of(2) {
+                "REQUIRE_APPROVAL"
+            } else {
+                "ALWAYS_ALLOW"
+            };
+            let body = json!({ "paper_order_policy": wanted }).to_string();
+            // `call`, not `api`: four thousand identical PUTs are a flood, not
+            // evidence, and the bundle keeps the summary below instead.
+            let (status, answered) = g.call(&endpoint, "PUT", policies, Some(&body));
+            assert_eq!(status, 200, "{answered}");
+            produced += 1;
+        }
+        reading.read(Duration::from_secs(180), |frame| {
+            kept += usize::from(frame["kind"] == "POLICY_CHANGED");
+            kept >= produced
+        });
+    }
+    assert_eq!(
+        kept, produced,
+        "the reading subscriber kept up through the whole flood (§4.1)"
+    );
+    assert_eq!(
+        idle.close_code(Duration::from_secs(120)),
+        Some(4408),
+        "a subscriber that never reads is closed SLOW_CONSUMER (§4.1)"
+    );
+    drop(reading);
+
+    // The listing: one desk's own rows, newest first, and `before` paging back
+    // through the flood (§4.3).
+    let (exit, listed) = g.cli_json("G38", &["--json", "desk", "events", &eta]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(
+        listed["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .map(|row| row["kind"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        ["DESK_READY", "DESK_CREATED"],
+        "newest first, and only this desk's (§4.3)"
+    );
+    let (exit, one) = g.cli_json("G38", &["--json", "desk", "events", &eta, "--limit", "1"]);
+    assert_eq!(exit, 0, "{one}");
+    assert_eq!(one["events"].as_array().map(Vec::len), Some(1));
+    let (exit, printed, stderr) = g.cli(&["desk", "events", &eta]);
+    assert_eq!(exit, 0, "{stderr}");
+    let cells: Vec<&str> = printed
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split('\t')
+        .collect();
+    assert_eq!(
+        cells.len(),
+        3,
+        "occurred_at_ns, kind, payload as one line (§4.3): {printed:?}"
+    );
+    assert_eq!(cells[1], "DESK_READY");
+
+    let mut query = "?limit=3".to_string();
+    let mut walked: Vec<(i64, String)> = Vec::new();
+    for page in 0..3 {
+        let (status, body) = g.call(&endpoint, "GET", &format!("/events{query}"), None);
+        assert_eq!(status, 200, "{body}");
+        let rows = body["events"].as_array().expect("events").clone();
+        assert_eq!(rows.len(), 3, "page {page}: {body}");
+        for row in &rows {
+            walked.push((
+                row["occurred_at_ns"].as_i64().unwrap_or_default(),
+                row["id"].as_str().unwrap_or_default().to_owned(),
+            ));
+        }
+        query = format!(
+            "?limit=3&before={}",
+            body["next_before"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a full page pages back (§4.3): {body}"))
+        );
+    }
+    let mut ordered = walked.clone();
+    ordered.sort_by(|a, b| b.cmp(a));
+    ordered.dedup();
+    assert_eq!(
+        ordered, walked,
+        "three pages, newest first and never overlapping (§4.3)"
+    );
+    g.note(
+        "G38",
+        "the policies read as installed with steering refused, restoring the default wrote exactly one POLICY_CHANGED that a live tail client received, a reconnect with its cursor replayed exactly the two desk creations then its tail, a subscriber that never read was closed 4408 while one that kept up took the whole flood, and the listing paged back newest first",
+        json!({
+            "installed": installed, "restored": restored, "change": written[changes],
+            "flood": produced, "kept": kept, "pages": walked.len(),
+        }),
+    );
+
+    // --- G39 — trigger code approval ----------------------------------------
+    // On a fresh desk under the restored default, with the stand-in runtime
+    // G27 registered: nothing about a gated trigger reaches the scheduler
+    // until it is approved (§3.2).
+    let (exit, created) = g.cli_json("G39", &["--json", "desk", "create", &iota]);
+    assert_eq!(exit, 0, "{created}");
+    let iota_id = created["id"].as_str().expect("id").to_owned();
+    let gated_script = script(&g, "g39-gated", "env");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, gated) = g.cli_json(
+        "G39",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &iota,
+            "--name",
+            "g39-once",
+            "--brief",
+            "a script the user has not approved",
+            "--at",
+            &at,
+            "--code",
+            &gated_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{gated}");
+    let gated_id = gated["id"].as_str().expect("id").to_owned();
+    let snapshot = gated["code"]["snapshot_id"]
+        .as_str()
+        .expect("a snapshot")
+        .to_owned();
+    assert_eq!(gated["code"]["approval"], "PENDING");
+    for absent in ["decided_at_ns", "approved_at_ns"] {
+        assert!(
+            gated["code"].get(absent).is_none(),
+            "a pending snapshot has no {absent} (§3.2): {gated}"
+        );
+    }
+    assert!(
+        gated.get("next_occurrence_ns").is_none(),
+        "a pending trigger is never due (§3.2): {gated}"
+    );
+    assert_eq!(projected(&g, &gated_id), None);
+    assert_eq!(
+        payloads(&g, &iota_id, "APPROVAL_REQUESTED"),
+        [json!({ "kind": "TRIGGER_CODE", "id": snapshot, "trigger_id": gated_id })]
+    );
+
+    // Its instant passes with nothing scheduled: no firing, and pending time
+    // creates no miss (§3.2).
+    std::thread::sleep(Duration::from_secs(6));
+    assert_eq!(firings(&g, &gated_id), 0);
+    assert_eq!(payloads(&g, &iota_id, "TRIGGER_MISSED").len(), 0);
+    for leaf in ["disable", "enable"] {
+        let (exit, toggled) = g.cli_json("G39", &["--json", "trigger", leaf, &iota, "g39-once"]);
+        assert_eq!(exit, 0, "{toggled}");
+        assert!(
+            toggled.get("next_occurrence_ns").is_none(),
+            "{leaf} changes nothing while the snapshot is pending (§3.2): {toggled}"
+        );
+    }
+
+    let (status, pending) = g.api("G39", &endpoint, "GET", "/approvals", None);
+    assert_eq!(status, 200, "{pending}");
+    let item = pending["approvals"]
+        .as_array()
+        .expect("approvals")
+        .iter()
+        .find(|item| item["id"] == snapshot.as_str())
+        .unwrap_or_else(|| panic!("the pending snapshot is listed (§3.1): {pending}"))
+        .clone();
+    assert_eq!(item["kind"], "TRIGGER_CODE");
+    assert_eq!(item["desk_id"], iota_id.as_str());
+    assert_eq!(item["desk_name"], iota.as_str());
+    assert_eq!(item["approval"], "PENDING");
+    assert!(item["decided_at_ns"].is_null(), "{item}");
+    assert_eq!(item["detail"]["trigger_id"], gated_id.as_str());
+    assert_eq!(item["detail"]["trigger_name"], "g39-once");
+    assert_eq!(item["detail"]["argv"], json!([runner, "{script}"]));
+    assert!(
+        item["detail"].get("source").is_none(),
+        "the listing withholds every script (§3.1): {item}"
+    );
+    let (status, single) = g.api(
+        "G39",
+        &endpoint,
+        "GET",
+        &format!("/approvals/{snapshot}"),
+        None,
+    );
+    assert_eq!(status, 200, "{single}");
+    assert_eq!(
+        single["detail"]["source"], "env\n",
+        "the single read carries the script (§3.1)"
+    );
+
+    let (status, approved) = g.api(
+        "G39",
+        &endpoint,
+        "POST",
+        &decide(&iota_id, &snapshot),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{approved}");
+    assert_eq!(approved["approval"], "APPROVED");
+    assert!(approved["decided_at_ns"].as_i64().is_some(), "{approved}");
+    assert_eq!(
+        payloads(&g, &iota_id, "APPROVAL_DECIDED"),
+        [json!({ "kind": "TRIGGER_CODE", "id": snapshot, "decision": "APPROVE" })]
+    );
+    let (status, still) = g.api(
+        "G39",
+        &endpoint,
+        "GET",
+        &format!("/desks/{iota_id}/triggers/{gated_id}"),
+        None,
+    );
+    assert_eq!(status, 200, "{still}");
+    assert_eq!(still["code"]["approval"], "APPROVED");
+    assert_eq!(still["code"]["approved_at_ns"], approved["decided_at_ns"]);
+    assert!(
+        still.get("next_occurrence_ns").is_none(),
+        "an elapsed one-off stays never due through its approval (§3.2): {still}"
+    );
+    assert_eq!(payloads(&g, &iota_id, "TRIGGER_MISSED").len(), 0);
+    let (exit, shown, stderr) = g.cli(&["trigger", "show", &iota, "g39-once"]);
+    assert_eq!(exit, 0, "{stderr}");
+    let code_line = shown
+        .lines()
+        .find(|line| line.starts_with("code: "))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(
+        code_line.contains("approval") && code_line.contains("APPROVED"),
+        "trigger show prints the approval in its code block (§3.2): {code_line}"
+    );
+
+    // Rescheduled, the approved snapshot runs — and needs no second approval,
+    // because the code did not change (§3.2).
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, rescheduled) = g.cli_json(
+        "G39",
+        &[
+            "--json", "trigger", "update", &iota, "g39-once", "--at", &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{rescheduled}");
+    assert_eq!(rescheduled["code"]["approval"], "APPROVED");
+    assert_eq!(rescheduled["code"]["snapshot_id"], snapshot.as_str());
+    assert!(
+        rescheduled["next_occurrence_ns"].as_i64().is_some(),
+        "{rescheduled}"
+    );
+    let fired = await_firing(&g, &gated_id, 0);
+    await_execution(&g, &fired, Duration::from_secs(20));
+    assert_eq!(
+        g.scalar::<String>(
+            "SELECT code_snapshot_id FROM firings WHERE id = ?1",
+            &[&fired]
+        ),
+        snapshot,
+        "the firing names the approved snapshot (§3.2)"
+    );
+    within(
+        Duration::from_secs(180),
+        "the approved firing's result to reach the stand-in session",
+        || {
+            result_prompts(&g, &iota_id, &fired)
+                .first()
+                .is_some_and(|id| prompt_state(&g, id).0 == "DELIVERED")
+        },
+    );
+    let seen = transcript(&rt, &endpoint, &iota_id, Duration::from_secs(60), |text| {
+        text.contains("MarketRig TRIGGER_RESULT ")
+    });
+    assert!(
+        seen.contains("MarketRig TRIGGER_RESULT "),
+        "the approved script's result reached the session: {seen:?}"
+    );
+
+    // Denied leaves nothing behind, and different code asks again (§3.2).
+    let denied_script = script(&g, "g39-denied", "sleep 1");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 3));
+    let (exit, refused) = g.cli_json(
+        "G39",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &iota,
+            "--name",
+            "g39-denied",
+            "--brief",
+            "a script the user refuses",
+            "--at",
+            &at,
+            "--code",
+            &denied_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{refused}");
+    let refused_id = refused["id"].as_str().expect("id").to_owned();
+    let refused_snapshot = refused["code"]["snapshot_id"]
+        .as_str()
+        .expect("a snapshot")
+        .to_owned();
+    let (status, denied) = g.api(
+        "G39",
+        &endpoint,
+        "POST",
+        &decide(&iota_id, &refused_snapshot),
+        Some(deny),
+    );
+    assert_eq!(status, 200, "{denied}");
+    assert_eq!(denied["approval"], "DENIED");
+    std::thread::sleep(Duration::from_secs(6));
+    assert_eq!(firings(&g, &refused_id), 0);
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM executions WHERE firing_id IN \
+             (SELECT id FROM firings WHERE trigger_id = ?1)",
+            &[&refused_id]
+        ),
+        0
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND payload LIKE '%' || ?2 || '%'",
+            &[&iota_id, &refused_id]
+        ),
+        0,
+        "a denied trigger leaves no firing, execution, or prompt (§3.2)"
+    );
+    let other_script = script(&g, "g39-other", "sleep 2");
+    let (exit, repatched) = g.cli_json(
+        "G39",
+        &[
+            "--json",
+            "trigger",
+            "update",
+            &iota,
+            "g39-denied",
+            "--code",
+            &other_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{repatched}");
+    assert_eq!(repatched["code"]["approval"], "PENDING");
+    assert_ne!(repatched["code"]["snapshot_id"], refused_snapshot.as_str());
+    assert_eq!(
+        payloads(&g, &iota_id, "APPROVAL_REQUESTED").len(),
+        3,
+        "one request per pending snapshot (§3.1)"
+    );
+
+    // Under Always allow the same create fires unprompted, and its record is
+    // no approval at all (§3.1, §3.2).
+    let (status, ungated_code) = g.api(
+        "G39",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated_code}");
+    let control_script = script(&g, "g39-control", "env");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, control) = g.cli_json(
+        "G39",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &iota,
+            "--name",
+            "g39-control",
+            "--brief",
+            "the ungated control",
+            "--at",
+            &at,
+            "--code",
+            &control_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{control}");
+    let control_id = control["id"].as_str().expect("id").to_owned();
+    let control_snapshot = control["code"]["snapshot_id"]
+        .as_str()
+        .expect("a snapshot")
+        .to_owned();
+    assert_eq!(control["code"]["approval"], "ALWAYS_ALLOW");
+    assert_eq!(control["code"]["approved_at_ns"], control["created_at_ns"]);
+    assert!(
+        control["next_occurrence_ns"].as_i64().is_some(),
+        "{control}"
+    );
+    let control_firing = await_firing(&g, &control_id, 0);
+    await_execution(&g, &control_firing, Duration::from_secs(20));
+    let (_, every) = g.api("G39", &endpoint, "GET", "/approvals?state=ALL", None);
+    assert!(
+        every["approvals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|item| item["id"] != control_snapshot.as_str()),
+        "a record the policy never gated is not an approval (§3.1): {every}"
+    );
+    g.note(
+        "G39",
+        "a gated one-off never became due, its instant passed with no firing and no miss, disable and enable changed nothing, approving it left an elapsed one-off undue, a reschedule ran the approved snapshot and its result reached the stand-in session, a denied one left no firing, execution, or prompt while different code asked again, and the same create under Always allow fired unprompted",
+        json!({
+            "pending": item, "approved": approved, "firing": fired,
+            "denied": denied, "repatched": repatched["code"], "control": control_firing,
+        }),
+    );
+
+    // --- G40 — paper order approval -----------------------------------------
+    // On the desk G35 traded, through the desk's own MCP surface (per D4).
+    let (status, gated_orders) = g.api(
+        "G40",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"paper_order_policy":"REQUIRE_APPROVAL"}"#),
+    );
+    assert_eq!(status, 200, "{gated_orders}");
+    assert_eq!(gated_orders["paper_order_policy"], "REQUIRE_APPROVAL");
+    let delta_positions = format!("/desks/{delta_id}/positions");
+    let (status, quotes) = g.api("G40", &endpoint, "GET", &delta_quotes, None);
+    assert_eq!(status, 200, "{quotes}");
+    for instrument in ["AAPL.XNAS", "600519.XSHG"] {
+        within(
+            Duration::from_secs(60),
+            &format!("delta's {instrument} observation"),
+            || {
+                quote_of(&g.call(&endpoint, "GET", &delta_quotes, None).1, instrument)["health"]
+                    == "LIVE"
+            },
+        );
+    }
+
+    let desk_name = delta.clone();
+    let mcp = g.mcp.clone();
+    let data_root = g.out.clone();
+    let orders = rt.block_on(async {
+        let command = tokio::process::Command::new(&mcp).configure(|command| {
+            command
+                .arg("--desk")
+                .arg(&desk_name)
+                .env("MARKETRIG_TEST_DATA_ROOT", &data_root);
+        });
+        ().serve(TokioChildProcess::new(command).expect("spawn marketrig-mcp"))
+            .await
+            .expect("initialize the MCP session")
+    });
+    let submit = |action_id: &str,
+                  side: &str,
+                  kind: &str,
+                  instrument: &str,
+                  quantity: &str,
+                  price: Value| {
+        rt.block_on(tool(
+            &orders,
+            "submit_order",
+            json!({
+                "action_id": action_id, "instrument_id": instrument,
+                "side": side, "type": kind, "quantity": quantity, "price": price,
+            }),
+        ))
+    };
+
+    let flat = g.call(&endpoint, "GET", &delta_positions, None).1["positions"].clone();
+    let buy = json!({
+        "action_id": "g40-buy-aapl", "instrument_id": "AAPL.XNAS",
+        "side": "BUY", "type": "MARKET", "quantity": "1", "price": null,
+    });
+    let (errored, answered) = rt.block_on(tool(&orders, "submit_order", buy.clone()));
+    assert!(
+        !errored,
+        "a gated submit is an answer, not an error: {answered}"
+    );
+    let gated_order = parse(&answered);
+    assert_eq!(gated_order["approval"], "PENDING");
+    assert_eq!(gated_order["source"], "SESSION");
+    assert!(
+        gated_order.get("outcome").is_none() && gated_order.get("decided_at_ns").is_none(),
+        "no outcome and no decision while pending (§3.3): {gated_order}"
+    );
+    let order_row = gated_order["id"].as_str().expect("the row id").to_owned();
+    g.note(
+        "G40",
+        "the desk's MCP submit_order answered PENDING with no order",
+        json!({ "record": gated_order }),
+    );
+    assert_eq!(
+        g.call(&endpoint, "GET", &delta_positions, None).1["positions"],
+        flat,
+        "the node was neither started nor consulted (§3.3)"
+    );
+    let (errored, replayed) = rt.block_on(tool(&orders, "submit_order", buy));
+    assert!(!errored, "{replayed}");
+    assert_eq!(
+        parse(&replayed)["id"],
+        order_row.as_str(),
+        "a repeated action_id answers the stored record (§3.3)"
+    );
+    let (errored, refused_cancel) = rt.block_on(tool(
+        &orders,
+        "cancel_order",
+        json!({ "client_order_id": "g40-buy-aapl", "action_id": "g40-cancel-aapl" }),
+    ));
+    assert!(errored, "{refused_cancel}");
+    assert!(
+        refused_cancel.contains("ORDER_PENDING_APPROVAL"),
+        "cancelling a pending submit is refused (§3.3): {refused_cancel}"
+    );
+    let (exit, actions) = g.cli_json("G40", &["--json", "history", "actions", &delta]);
+    assert_eq!(exit, 0, "{actions}");
+    assert_eq!(actions["actions"][0]["action_id"], "g40-buy-aapl");
+    assert_eq!(actions["actions"][0]["approval"], "PENDING");
+
+    let cycles = g.scalar::<i64>(
+        "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+        &[&delta_id],
+    );
+    let evaluations = g.scalar::<i64>(
+        "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION'",
+        &[&delta_id],
+    );
+    let (status, filled) = g.api(
+        "G40",
+        &endpoint,
+        "POST",
+        &decide(&delta_id, &order_row),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{filled}");
+    assert_eq!(filled["kind"], "PAPER_ORDER");
+    assert_eq!(filled["approval"], "APPROVED");
+    assert_eq!(filled["detail"]["outcome"]["status"], "FILLED", "{filled}");
+    assert_eq!(
+        payloads(&g, &delta_id, "APPROVAL_DECIDED").last(),
+        Some(&json!({ "kind": "PAPER_ORDER", "id": order_row, "decision": "APPROVE" }))
+    );
+    let held = g.call(&endpoint, "GET", &delta_positions, None).1;
+    assert_eq!(held["positions"][0]["instrument_id"], "AAPL.XNAS");
+    assert_eq!(held["positions"][0]["quantity"], "1");
+
+    // A sell to flat closes one cycle and queues one evaluation, exactly as an
+    // ungated round trip does (§3.3).
+    let (errored, selling) = submit(
+        "g40-sell-aapl",
+        "SELL",
+        "MARKET",
+        "AAPL.XNAS",
+        "1",
+        Value::Null,
+    );
+    assert!(!errored, "{selling}");
+    let sell_row = parse(&selling)["id"]
+        .as_str()
+        .expect("the row id")
+        .to_owned();
+    let (status, sold) = g.api(
+        "G40",
+        &endpoint,
+        "POST",
+        &decide(&delta_id, &sell_row),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{sold}");
+    assert_eq!(sold["detail"]["outcome"]["status"], "FILLED", "{sold}");
+    within(
+        Duration::from_secs(60),
+        "the closed cycle and its evaluation",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+                &[&delta_id],
+            ) == cycles + 1
+                && g.scalar::<i64>(
+                    "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION'",
+                    &[&delta_id],
+                ) == evaluations + 1
+        },
+    );
+
+    // Denied: a terminal outcome and nothing in the sandbox (§3.3).
+    let (errored, resting) = submit(
+        "g40-rest-aapl",
+        "BUY",
+        "LIMIT",
+        "AAPL.XNAS",
+        "1",
+        json!("1.00"),
+    );
+    assert!(!errored, "{resting}");
+    let resting_row = parse(&resting)["id"]
+        .as_str()
+        .expect("the row id")
+        .to_owned();
+    let (status, refused_order) = g.api(
+        "G40",
+        &endpoint,
+        "POST",
+        &decide(&delta_id, &resting_row),
+        Some(deny),
+    );
+    assert_eq!(status, 200, "{refused_order}");
+    assert_eq!(refused_order["approval"], "DENIED");
+    assert_eq!(
+        refused_order["detail"]["outcome"],
+        json!({ "failure_code": "DENIED" })
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
+            &[&delta_id, &"g40-rest-aapl"]
+        ),
+        0,
+        "a denied order never reached the sandbox (§3.3)"
+    );
+
+    // A code-bearing firing's own order is gated the same way and keeps its
+    // attribution (§3.3). Trigger code is Always allow again since G39's
+    // control, so the script runs without a second decision.
+    let ordering_script = script(&g, "g40-order", "order AAPL.XNAS BUY 1");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, ordering) = g.cli_json(
+        "G40",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &delta,
+            "--name",
+            "g40-order",
+            "--brief",
+            "a script whose order the user must approve",
+            "--at",
+            &at,
+            "--code",
+            &ordering_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{ordering}");
+    let ordering_id = ordering["id"].as_str().expect("id").to_owned();
+    let ordering_firing = await_firing(&g, &ordering_id, 0);
+    await_execution(&g, &ordering_firing, Duration::from_secs(20));
+    let ordering_row: String = g.scalar(
+        "SELECT id FROM trading_actions WHERE desk_id = ?1 AND action_id = ?2",
+        &[&delta_id, &ordering_firing],
+    );
+    let (status, from_trigger) = g.api(
+        "G40",
+        &endpoint,
+        "GET",
+        &format!("/approvals/{ordering_row}"),
+        None,
+    );
+    assert_eq!(status, 200, "{from_trigger}");
+    assert_eq!(from_trigger["approval"], "PENDING");
+    assert_eq!(from_trigger["detail"]["source"], "TRIGGER");
+    assert_eq!(from_trigger["detail"]["trigger_id"], ordering_id.as_str());
+    assert_eq!(
+        from_trigger["detail"]["firing_id"],
+        ordering_firing.as_str()
+    );
+
+    // Refused after approval is still a record (§3.3): far beyond the 500,000
+    // CNY seeded at XSHG.
+    let (errored, too_big) = submit(
+        "g40-too-big",
+        "BUY",
+        "MARKET",
+        "600519.XSHG",
+        "50000",
+        Value::Null,
+    );
+    assert!(!errored, "{too_big}");
+    let big_row = parse(&too_big)["id"]
+        .as_str()
+        .expect("the row id")
+        .to_owned();
+    let (status, rejected) = g.api(
+        "G40",
+        &endpoint,
+        "POST",
+        &decide(&delta_id, &big_row),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{rejected}");
+    assert_eq!(rejected["approval"], "APPROVED");
+    assert!(
+        matches!(
+            rejected["detail"]["outcome"]["status"].as_str(),
+            Some("DENIED" | "REJECTED")
+        ),
+        "the sandbox's own refusal is the outcome, not a failure of the decision (§3.3): {rejected}"
+    );
+
+    // Ungated again, a submit is R1's, and its row was never an approval.
+    let (status, ungated_orders) = g.api(
+        "G40",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"paper_order_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated_orders}");
+    let (errored, straight) = submit(
+        "g40-ungated",
+        "BUY",
+        "LIMIT",
+        "AAPL.XNAS",
+        "1",
+        json!("1.00"),
+    );
+    assert!(!errored, "{straight}");
+    let straight = parse(&straight);
+    assert_eq!(straight["approval"], "ALWAYS_ALLOW");
+    assert_eq!(straight["decided_at_ns"], straight["created_at_ns"]);
+    assert_eq!(straight["outcome"]["status"], "ACCEPTED", "{straight}");
+    rt.block_on(async {
+        let _ = orders.cancel().await;
+    });
+    g.note(
+        "G40",
+        "a gated submit answered PENDING with no order and no position, its replay answered the same record, its cancel was refused ORDER_PENDING_APPROVAL, approving it filled and moved the position, a sell to flat closed one cycle and queued one evaluation, a denied order ended DENIED with nothing in the sandbox, a firing's own order was gated with its attribution, an over-balance buy came back APPROVED with the sandbox's refusal in its outcome, and an ungated submit read ALWAYS_ALLOW",
+        json!({
+            "pending": gated_order, "approved": filled, "denied": refused_order,
+            "from_trigger": from_trigger, "rejected": rejected, "ungated": straight,
+        }),
+    );
+
+    // --- G41 — sockets and a hard kill --------------------------------------
+    // A browser origin outside the allowlist is refused before any upgrade, on
+    // all three sockets (§4.4). The header rides along because the channel is
+    // header-only and sits behind the bearer layer: with it, what each of the
+    // three answers is about the origin and nothing else.
+    let foreign = [
+        ("origin", "https://example.com"),
+        ("authorization", &bearer),
+    ];
+    for path in [
+        "/events".to_string(),
+        format!("/desks/{delta_id}/terminal"),
+        format!("/desks/{delta_id}/channel"),
+    ] {
+        match Socket::dial(&rt, endpoint.port, &path, &foreign) {
+            Ok(_) => panic!("{path} upgraded a refused origin"),
+            Err((status, body)) => {
+                assert_eq!(status, 403, "{path}: {body}");
+                assert_eq!(parse(&body)["code"], "ORIGIN_REFUSED", "{path}: {body}");
+            }
+        }
+    }
+
+    // An allowed origin with no header upgrades and authenticates in frame 1;
+    // a wrong credential closes 4401 (§4.2, §4.4).
+    let allowed = [("origin", "tauri://localhost")];
+    let mut wrong = Socket::dial(&rt, endpoint.port, "/events", &allowed)
+        .unwrap_or_else(|(status, body)| panic!("an allowed origin upgrades: {status} {body}"));
+    wrong.send(&json!({ "bearer": "not-the-credential" }).to_string());
+    assert_eq!(wrong.close_code(Duration::from_secs(10)), Some(4401));
+
+    // The header path is exactly R3's, and a refused header-free connection on
+    // a desk with no session never supersedes it (§4.4).
+    let mut viewer = Socket::dial(
+        &rt,
+        endpoint.port,
+        &format!("/desks/{iota_id}/terminal"),
+        &[("authorization", &bearer)],
+    )
+    .unwrap_or_else(|(status, body)| panic!("the header path attaches: {status} {body}"));
+    let ring = viewer.text(Duration::from_secs(30), |seen| seen.contains("INPUT "));
+    assert!(
+        ring.contains("INPUT "),
+        "the header-authenticated viewer read the replayed ring: {ring:?}"
+    );
+    let mut sessionless = Socket::dial(
+        &rt,
+        endpoint.port,
+        &format!("/desks/{gamma_id}/terminal"),
+        &allowed,
+    )
+    .unwrap_or_else(|(status, body)| panic!("no header still upgrades: {status} {body}"));
+    sessionless.send(&json!({ "bearer": endpoint.credential }).to_string());
+    assert_eq!(
+        sessionless.close_code(Duration::from_secs(10)),
+        Some(4409),
+        "a desk with no session answers NO_LIVE_SESSION as a close code (§4.4)"
+    );
+    assert_eq!(
+        viewer.close_code(Duration::from_millis(500)),
+        None,
+        "the live viewer of another desk was untouched (§4.4)"
+    );
+    drop(viewer);
+
+    // Both policies gate again, and one undecided record of each kind is left
+    // in place across a hard kill (§7.1).
+    for body in [
+        r#"{"trigger_code_policy":"REQUIRE_APPROVAL"}"#,
+        r#"{"paper_order_policy":"REQUIRE_APPROVAL"}"#,
+    ] {
+        let (status, set) = g.api("G41", &endpoint, "PUT", policies, Some(body));
+        assert_eq!(status, 200, "{set}");
+    }
+    let survivor_script = script(&g, "g41-survivor", "env");
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 3_600));
+    let (exit, surviving) = g.cli_json(
+        "G41",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &iota,
+            "--name",
+            "g41-survivor",
+            "--brief",
+            "a snapshot that outlives a kill",
+            "--at",
+            &at,
+            "--code",
+            &survivor_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{surviving}");
+    assert_eq!(surviving["code"]["approval"], "PENDING");
+    let surviving_snapshot = surviving["code"]["snapshot_id"]
+        .as_str()
+        .expect("a snapshot")
+        .to_owned();
+    let (status, surviving_order) = g.api(
+        "G41",
+        &endpoint,
+        "POST",
+        &delta_orders,
+        Some(&limit("g41-survivor", "AAPL.XNAS", "BUY", "1", "1.00")),
+    );
+    assert_eq!(
+        status, 202,
+        "a gated submit answers 202 (§3.3): {surviving_order}"
+    );
+    assert_eq!(surviving_order["approval"], "PENDING");
+    let surviving_row = surviving_order["id"]
+        .as_str()
+        .expect("the row id")
+        .to_owned();
+
+    // A client takes its position, then the daemon dies under it (§4.4). The
+    // two desks with live sessions settle first, so the only row after that
+    // position is the successor's own.
+    within(
+        Duration::from_secs(240),
+        "every prompt on the two live desks to settle",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id IN (?1, ?2) AND state = 'QUEUED'",
+                &[&delta_id, &iota_id],
+            ) == 0
+        },
+    );
+    let mut before_kill = Socket::events(&rt, &endpoint, None, &[]);
+    let opened = before_kill.read(Duration::from_secs(10), |frame| frame.get("tail").is_some());
+    let mark = opened[0]["tail"]
+        .as_str()
+        .expect("the tail cursor")
+        .to_owned();
+    let dead = daemon17.endpoint.daemon_uuid.clone();
+    let stale = daemon17.endpoint.clone();
+    g.kill("G41", daemon17);
+    g.await_unverifiable(&stale);
+    drop(before_kill);
+    let daemon18 = g.spawn("G41");
+    endpoint = daemon18.endpoint.clone();
+    let recovery = g.recoveries().pop().expect("a RECOVERY");
+    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
+    let names = recovery.to_string();
+    assert!(
+        !names.contains(&surviving_snapshot) && !names.contains(&surviving_row),
+        "an undecided record is pure SQLite and recovery says nothing about it (§3.3): {recovery}"
+    );
+    let (status, survived) = g.api("G41", &endpoint, "GET", "/approvals", None);
+    assert_eq!(status, 200, "{survived}");
+    let waiting: Vec<&str> = survived["approvals"]
+        .as_array()
+        .expect("approvals")
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    assert!(
+        waiting.contains(&surviving_snapshot.as_str()) && waiting.contains(&surviving_row.as_str()),
+        "both are still PENDING after the restart: {survived}"
+    );
+    let (status, decided_snapshot) = g.api(
+        "G41",
+        &endpoint,
+        "POST",
+        &decide(&iota_id, &surviving_snapshot),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{decided_snapshot}");
+    assert_eq!(decided_snapshot["approval"], "APPROVED");
+    let (status, decided_order) = g.api(
+        "G41",
+        &endpoint,
+        "POST",
+        &decide(&delta_id, &surviving_row),
+        Some(deny),
+    );
+    assert_eq!(status, 200, "{decided_order}");
+    assert_eq!(decided_order["approval"], "DENIED");
+
+    // The reconnect with the pre-kill cursor is told about the restart first:
+    // the successor's own recovery unit, and nothing from before the kill
+    // (§4.4). The unit is one instant, and the sessions the kill lost are
+    // written inside it, ahead of the RECOVERY that names them (R3 §6.3).
+    let mut resumed = Socket::events(&rt, &endpoint, Some(&mark), &[]);
+    let after_kill = resumed.read(Duration::from_secs(20), |frame| frame["kind"] == "RECOVERY");
+    let restart = after_kill.last().expect("the RECOVERY row").clone();
+    assert_eq!(restart["payload"]["previous_daemon_uuid"], dead.as_str());
+    assert!(
+        after_kill
+            .iter()
+            .all(|row| row["occurred_at_ns"] == restart["occurred_at_ns"]),
+        "the first rows are the successor's recovery unit alone: {after_kill:?}"
+    );
+    assert!(
+        after_kill[..after_kill.len() - 1]
+            .iter()
+            .all(|row| row["kind"] == "SESSION_EXITED"),
+        "only the kill's lost sessions precede the RECOVERY in that unit: {after_kill:?}"
+    );
+    drop(resumed);
+    g.stop("G41", daemon18);
+    g.note(
+        "G41",
+        "a foreign origin was refused before any upgrade on all three sockets, an allowed origin with a wrong first frame closed 4401, a header-free terminal on a desk with no session closed 4409 while the live viewer of another desk stayed attached, and a hard kill left one undecided record of each kind untouched, unnamed by recovery and decidable on the successor, whose recovery unit — the lost sessions, then the RECOVERY that names them — was the first thing the reconnecting client received",
+        json!({
+            "snapshot": surviving_snapshot, "order": surviving_row,
+            "recovery": recovery, "decided": [decided_snapshot, decided_order],
+        }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-G37 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-G41 complete", json!({ "evidence": evidence }));
 }
