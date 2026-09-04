@@ -17,6 +17,8 @@ use process_wrap::tokio::ProcessSession;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
+#[cfg(test)]
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, mpsc, watch};
@@ -1082,37 +1084,45 @@ async fn outcomes_one_record_one_prompt() {
     assert_eq!((executions, prompts), (5, 5));
 }
 
-/// §4.5: terminating ends the whole group, not just the leader.
+/// §4.5: terminating ends the whole group, not just the leader. Timeout's
+/// outcome is covered above; this check waits for the grandchild before ending
+/// the group so process startup time cannot race the behavior under test.
 #[cfg(test)]
 #[tokio::test(flavor = "multi_thread")]
-async fn group_terminated_on_timeout() {
+async fn group_terminated() {
     use sysinfo::{Pid, System};
 
-    let (_dir, store, roots) = scratch();
-    seed_desk(&store, &roots, "d1", "alpha");
-    let source = if cfg!(windows) {
-        "$p = Start-Process ping -ArgumentList '-n 90 127.0.0.1' -PassThru -WindowStyle Hidden\n\
-         Write-Output $p.Id\n\
-         Start-Sleep 90\n"
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-Command",
+            "$p = Start-Process ping -ArgumentList '-n 90 127.0.0.1' -PassThru -WindowStyle Hidden; \
+             [Console]::Out.WriteLine($p.Id); [Console]::Out.Flush(); Start-Sleep 90",
+        ]);
+        command
     } else {
-        "sleep 60 &\necho $!\nwait\n"
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60 & echo $!; wait"]);
+        command
     };
-    // PowerShell on a cold CI runner can take over a second to start and
-    // print the pid, so the Windows timeout leaves it room; the grandchild
-    // still outlives the bound by a wide margin either way.
-    let timeout_secs = if cfg!(windows) { 8 } else { 1 };
-    seed_firing(&store, "d1", "f1", source, &shell().1, timeout_secs, 10);
-
-    let claimed = claim(&store, "daemon-1").unwrap();
-    let (_keep, quit) = no_quit();
-    execute(&store, &roots, "daemon-1", claimed[0].clone(), quit).await;
-
-    let (_, outcome, _, _, _, stdout, _, _, _) = execution(&store, "f1");
-    assert_eq!(outcome, "TIMED_OUT");
-    let pid: u32 = String::from_utf8_lossy(&stdout)
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    let mut child = spawn(command).expect("spawn the contained group");
+    let mut stdout = BufReader::new(child.take_stdout().expect("piped stdout"));
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(30), stdout.read_line(&mut line))
+        .await
+        .expect("the grandchild starts")
+        .expect("read the grandchild pid");
+    let pid: u32 = line
         .trim()
         .parse()
         .expect("the script prints its grandchild's pid");
+    child.terminate().await;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
