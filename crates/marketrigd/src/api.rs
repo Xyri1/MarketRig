@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 use crate::desk::{self, Desk, DeskError};
 use crate::memory::{self, MemoryError};
-use crate::policy::{self, PolicyError};
+use crate::policy::{self, DecideError, PolicyError};
 use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
 use crate::trigger::{self, TriggerError};
@@ -118,6 +118,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks/{desk_id}/prompts", get(list_prompts))
         .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
         .route("/settings/policies", get(policies).put(put_policies))
+        .route("/approvals", get(approvals))
+        .route("/approvals/{id}", get(approval))
+        .route("/desks/{desk_id}/approvals/{id}", post(decide_approval))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -236,6 +239,24 @@ impl IntoResponse for PolicyError {
             PolicyError::Validation(_) => StatusCode::BAD_REQUEST,
             PolicyError::SteerDisabled => StatusCode::CONFLICT,
             PolicyError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The R5 §3.1 code-to-status map, appended the same way. `DecideError::code()`
+/// owns the code; this owns the status.
+impl IntoResponse for DecideError {
+    fn into_response(self) -> Response {
+        // An order approval that cannot reach the node keeps R1's own mapping.
+        if let DecideError::Trade(e) = self {
+            return e.into_response();
+        }
+        let status = match &self {
+            DecideError::NotFound(_) => StatusCode::NOT_FOUND,
+            DecideError::AlreadyDecided { .. } => StatusCode::CONFLICT,
+            DecideError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DecideError::Trade(_) => unreachable!("answered above"),
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -1278,6 +1299,58 @@ async fn put_policies(
         .flatten()
         .unwrap_or(serde_json::Value::Null);
     Ok(Json(policy::put(&state.store, &body, store::now_ns())?))
+}
+
+// The approvals (R5 feature SPEC §3.1). The listing and the single read are
+// installation-wide; the decision is desk-scoped, like every other write.
+
+/// `?state=PENDING|DECIDED|ALL`; absent is `PENDING`, and `policy::approvals`
+/// owns which words are words.
+#[derive(Deserialize)]
+struct StateQuery {
+    state: Option<String>,
+}
+
+async fn approvals(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<StateQuery>,
+) -> Result<Json<serde_json::Value>, PolicyError> {
+    let approvals = policy::approvals(&state.store, query.state.as_deref().unwrap_or("PENDING"))?;
+    Ok(Json(serde_json::json!({ "approvals": approvals })))
+}
+
+async fn approval(
+    State(state): State<Arc<ApiState>>,
+    Path(id): Path<String>,
+) -> Result<Json<policy::Approval>, DecideError> {
+    Ok(Json(policy::approval(&state.store, &id)?))
+}
+
+/// The one decision route. A body that is not a decision is `VALIDATION`, which
+/// is `PolicyError`'s status, so the two failures are mapped one by one rather
+/// than through a third error type.
+async fn decide_approval(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let body: serde_json::Value = is_json(&headers)
+        .then(|| serde_json::from_str(&body).ok())
+        .flatten()
+        .unwrap_or(serde_json::Value::Null);
+    let decision = match policy::Decision::parse(&body) {
+        Ok(decision) => decision,
+        Err(e) => return e.into_response(),
+    };
+    match policy::decide(&state.store, &state.registry, &desk_id, &id, decision) {
+        // An approved trigger may be due now (R5 feature SPEC §3.2).
+        Ok(approval) => {
+            state.scheduler_wake.notify_one();
+            Json(approval).into_response()
+        }
+        Err(e) => e.into_response(),
+    }
 }
 
 /// Answers, then asks the daemon to shut down (§4.2). A full or closed channel
@@ -3271,5 +3344,141 @@ async fn policy_routes() {
     assert_eq!(
         json(&call_get(policies, ok).1)["trigger_code_policy"],
         "ALWAYS_ALLOW"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// api::approval_routes (R5 feature SPEC §8 check 4, the route half)
+// ---------------------------------------------------------------------------
+
+/// The three approval routes (§3.1): all behind the bearer, `VALIDATION` for a
+/// body or a `state` that is not one, and an approval that reaches the trigger.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_routes() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+    let (status, body) = call_post(
+        url("/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"alpha"}"#)),
+    );
+    assert_eq!(status, 201, "{body}");
+    let desk = json(&body)["id"].as_str().unwrap().to_string();
+
+    // --- Every new route sits behind the bearer ----------------------------
+    for bearer in [None, Some("wrong-credential")] {
+        expect_envelope(call_get(url("/approvals"), bearer), 401, "UNAUTHORIZED");
+        expect_envelope(call_get(url("/approvals/s-1"), bearer), 401, "UNAUTHORIZED");
+        expect_envelope(
+            call_post(
+                url(&format!("/desks/{desk}/approvals/s-1")),
+                bearer,
+                Some(("application/json", r#"{"decision":"APPROVE"}"#)),
+            ),
+            401,
+            "UNAUTHORIZED",
+        );
+    }
+
+    // --- The default policy gates code, so creating one asks -----------------
+    let at = chrono::DateTime::from_timestamp_nanos(crate::store::now_ns() + 3_600_000_000_000)
+        .to_rfc3339();
+    let (status, body) = call_post(
+        url(&format!("/desks/{desk}/triggers")),
+        ok,
+        Some((
+            "application/json",
+            &format!(
+                r#"{{"name":"nightly","brief":"look at AAPL","schedule":{{"at":"{at}"}},
+                     "code":{{"source":"print(1)","suffix":".py"}}}}"#
+            ),
+        )),
+    );
+    assert_eq!(status, 201, "{body}");
+    let trigger = json(&body);
+    let trigger_id = trigger["id"].as_str().unwrap().to_string();
+    let snapshot = trigger["code"]["snapshot_id"].as_str().unwrap().to_string();
+
+    let (status, body) = call_get(url("/approvals"), ok);
+    assert_eq!(status, 200, "{body}");
+    let listed = json(&body)["approvals"].clone();
+    assert_eq!(listed.as_array().map(Vec::len), Some(1), "{listed}");
+    assert_eq!(listed[0]["kind"], "TRIGGER_CODE");
+    assert_eq!(listed[0]["id"], snapshot.as_str());
+    assert_eq!(listed[0]["desk_name"], "alpha");
+    assert!(listed[0]["detail"]["source"].is_null(), "{listed}");
+    assert_eq!(
+        json(&call_get(url("/approvals?state=DECIDED"), ok).1)["approvals"],
+        serde_json::json!([])
+    );
+    expect_envelope(
+        call_get(url("/approvals?state=MAYBE"), ok),
+        400,
+        "VALIDATION",
+    );
+
+    // The single read adds the source; an id nobody owns is not found.
+    let (status, body) = call_get(url(&format!("/approvals/{snapshot}")), ok);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["detail"]["source"], "print(1)");
+    expect_envelope(
+        call_get(url("/approvals/s-1"), ok),
+        404,
+        "APPROVAL_NOT_FOUND",
+    );
+
+    // --- The decision -------------------------------------------------------
+    let decide = |id: &str, body: &str| {
+        call_post(
+            url(&format!("/desks/{desk}/approvals/{id}")),
+            ok,
+            Some(("application/json", body)),
+        )
+    };
+    expect_envelope(
+        decide(&snapshot, r#"{"decision":"MAYBE"}"#),
+        400,
+        "VALIDATION",
+    );
+    expect_envelope(decide(&snapshot, "not json"), 400, "VALIDATION");
+    expect_envelope(
+        decide("s-1", r#"{"decision":"APPROVE"}"#),
+        404,
+        "APPROVAL_NOT_FOUND",
+    );
+
+    let (status, body) = decide(&snapshot, r#"{"decision":"APPROVE"}"#);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["approval"], "APPROVED");
+    assert!(
+        json(&body)["decided_at_ns"]
+            .as_i64()
+            .is_some_and(|ns| ns > 0)
+    );
+    expect_envelope(
+        decide(&snapshot, r#"{"decision":"DENY"}"#),
+        409,
+        "APPROVAL_DECIDED",
+    );
+
+    // The trigger reads the decision, and the listing has moved it.
+    let (status, body) = call_get(url(&format!("/desks/{desk}/triggers/{trigger_id}")), ok);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["code"]["approval"], "APPROVED");
+    assert!(
+        json(&body)["next_occurrence_ns"]
+            .as_i64()
+            .is_some_and(|ns| ns > 0)
+    );
+    assert_eq!(
+        json(&call_get(url("/approvals"), ok).1)["approvals"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        json(&call_get(url("/approvals?state=ALL"), ok).1)["approvals"][0]["id"],
+        snapshot.as_str()
     );
 }

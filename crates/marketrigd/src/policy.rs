@@ -4,7 +4,7 @@
 //! settings row and its resource) and §3 (the approval states the two gated
 //! rows carry), per R5-1 and R5-2.
 
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -287,6 +287,135 @@ impl From<TradeError> for DecideError {
 }
 
 // ---------------------------------------------------------------------------
+// The listing and the decision route (§3.1)
+// ---------------------------------------------------------------------------
+
+/// The two kinds a person decides (§3.1).
+pub const TRIGGER_CODE: &str = "TRIGGER_CODE";
+pub const PAPER_ORDER: &str = "PAPER_ORDER";
+
+/// One gated record of either kind, as `GET /approvals` and the decision route
+/// answer it (§3.1). `id` is the `code_snapshots` or `trading_actions` row's own
+/// UUID; `detail` is the kind's own object.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Approval {
+    pub kind: String,
+    pub id: String,
+    pub desk_id: String,
+    pub desk_name: String,
+    pub approval: String,
+    pub requested_at_ns: i64,
+    /// Null exactly while `PENDING`.
+    pub decided_at_ns: Option<i64>,
+    pub detail: Value,
+}
+
+/// The one `UNION ALL` behind both reads (§3.1). Both arms alias their row `r`,
+/// so `filter` — a literal built here, never input — reads the same in each;
+/// `source` is the extra `detail` member the single read adds and the listing
+/// withholds, so a listing never carries every pending script.
+///
+/// A snapshot's trigger is the one that currently names it, and after a patch
+/// attached newer code, the trigger of the last firing that ran it; neither
+/// exists for a snapshot whose trigger was hard-deleted, and then it is null.
+fn sql(filter: &str, source: &str) -> String {
+    format!(
+        "SELECT 'TRIGGER_CODE' AS kind, r.id AS id, r.desk_id AS desk_id, d.name AS desk_name, \
+                r.approval AS approval, r.created_at_ns AS requested_at_ns, \
+                r.decided_at_ns AS decided_at_ns, \
+                json_object({source}'trigger_id', t.id, 'trigger_name', t.name, \
+                            'suffix', r.suffix, 'argv', json(r.argv), \
+                            'timeout_secs', r.timeout_secs, 'fingerprint', r.fingerprint, \
+                            'source_bytes', length(cast(r.source AS BLOB))) AS detail \
+           FROM code_snapshots r JOIN desks d ON d.id = r.desk_id \
+           LEFT JOIN triggers t ON t.id = coalesce( \
+                (SELECT o.id FROM triggers o WHERE o.code_snapshot_id = r.id), \
+                (SELECT f.trigger_id FROM firings f WHERE f.code_snapshot_id = r.id \
+                  ORDER BY f.accepted_at_ns DESC, f.id DESC LIMIT 1)) \
+          WHERE {filter} \
+         UNION ALL \
+         SELECT 'PAPER_ORDER', r.id, r.desk_id, d.name, r.approval, r.created_at_ns, \
+                r.decided_at_ns, \
+                json_object('action_id', r.action_id, 'source', r.source, \
+                            'trigger_id', r.trigger_id, 'firing_id', r.firing_id, \
+                            'request', json(r.request), 'outcome', json(r.outcome)) \
+           FROM trading_actions r JOIN desks d ON d.id = r.desk_id \
+          WHERE {filter} \
+          ORDER BY requested_at_ns DESC, id DESC"
+    )
+}
+
+/// One row of either arm. SQLite writes every `detail` member, so the members
+/// §3.1 marks optional — a snapshot with no trigger, an order with no
+/// attribution, a record with no outcome — are dropped here.
+fn approval_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Approval> {
+    let mut detail: Value =
+        serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_else(|_| json!({}));
+    if let Some(members) = detail.as_object_mut() {
+        members.retain(|_, value| !value.is_null());
+    }
+    Ok(Approval {
+        kind: r.get(0)?,
+        id: r.get(1)?,
+        desk_id: r.get(2)?,
+        desk_name: r.get(3)?,
+        approval: r.get(4)?,
+        requested_at_ns: r.get(5)?,
+        decided_at_ns: r.get(6)?,
+        detail,
+    })
+}
+
+/// `GET /approvals?state=…` (§3.1), installation-wide, newest first. A record
+/// that was never gated — `ALWAYS_ALLOW` — is not an approval and is listed by
+/// no state.
+pub fn approvals(store: &Store, state: &str) -> Result<Vec<Approval>, PolicyError> {
+    let filter = match state {
+        "PENDING" => "r.approval = 'PENDING'",
+        "DECIDED" => "r.approval IN ('APPROVED','DENIED')",
+        "ALL" => "r.approval <> 'ALWAYS_ALLOW'",
+        other => {
+            return Err(PolicyError::Validation(format!(
+                "The query parameter \"state\" must be \"PENDING\", \"DECIDED\", or \"ALL\", \
+                 not {other:?}."
+            )));
+        }
+    };
+    let sql = sql(filter, "");
+    Ok(store.call(move |conn| conn.prepare(&sql)?.query_map([], approval_row)?.collect())?)
+}
+
+/// `GET /approvals/{id}` (§3.1): the same item with the snapshot's `source`.
+pub fn approval(store: &Store, id: &str) -> Result<Approval, DecideError> {
+    let sql = sql("r.id = ?1", "'source', r.source, ");
+    let key = id.to_owned();
+    store
+        .call(move |conn| conn.query_row(&sql, params![key], approval_row).optional())?
+        .ok_or_else(|| DecideError::NotFound(id.to_string()))
+}
+
+/// `POST /desks/{desk_id}/approvals/{id}` (§3.1): resolve the id in
+/// `code_snapshots` and then in `trading_actions`, both under the path's desk —
+/// a row of another desk is simply not there — apply that kind's own decision,
+/// and answer the approval as it now reads. The route wakes the scheduler,
+/// since an approved trigger may have become due.
+pub fn decide(
+    store: &Store,
+    registry: &crate::node::Registry,
+    desk_id: &str,
+    id: &str,
+    decision: Decision,
+) -> Result<Approval, DecideError> {
+    match crate::trigger::decide(store, desk_id, id, decision, crate::store::now_ns()) {
+        Err(DecideError::NotFound(_)) => {
+            crate::trade::decide(store, registry, desk_id, id, decision)?
+        }
+        decided => decided?,
+    }
+    approval(store, id)
+}
+
+// ---------------------------------------------------------------------------
 // policy (feature SPEC §8 check 1)
 // ---------------------------------------------------------------------------
 
@@ -469,4 +598,280 @@ fn decision_body() {
         .code(),
         "APPROVAL_DECIDED"
     );
+}
+
+// ---------------------------------------------------------------------------
+// policy::approvals (feature SPEC §8 check 4)
+// ---------------------------------------------------------------------------
+
+/// 2026-09-03T12:00:00Z, so the gated records are older than any `now_ns()` a
+/// submit or a decision stamps and the listing's order is known.
+#[cfg(test)]
+const T0: i64 = 1_788_436_800_000_000_000;
+
+/// Two `READY` desks with both policies on **Require approval**, and a registry
+/// that never starts a node — nothing below reaches the sandbox.
+#[cfg(test)]
+fn gated_store() -> (
+    tempfile::TempDir,
+    Store,
+    std::sync::Arc<crate::node::Registry>,
+) {
+    let (dir, store) = crate::store::open_temp();
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES ('d1','alpha','READY','/desks/alpha',1,1), \
+                        ('d2','beta','READY','/desks/beta',1,1)",
+                [],
+            )
+        })
+        .unwrap();
+    put(
+        &store,
+        &json!({ "paper_order_policy": REQUIRE_APPROVAL }),
+        1,
+    )
+    .unwrap();
+    let registry = std::sync::Arc::new(crate::node::Registry::new(
+        store.clone(),
+        std::sync::Arc::new(crate::feed::MarketState::new()),
+        None,
+    ));
+    (dir, store, registry)
+}
+
+/// Every desk's `APPROVAL_DECIDED`, oldest first.
+#[cfg(test)]
+fn decided_events(store: &Store) -> Vec<(String, Value)> {
+    store
+        .call(|c| {
+            c.prepare(
+                "SELECT desk_id, payload FROM operational_events \
+                 WHERE kind = 'APPROVAL_DECIDED' ORDER BY occurred_at_ns, id",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or(Value::Null),
+                ))
+            })?
+            .collect()
+        })
+        .unwrap()
+}
+
+/// The union listing's order and shapes, the `state` filter and its refusal,
+/// the single read's `source`, desk scoping, both decision refusals, and the
+/// `APPROVAL_DECIDED` payload of each kind (§3.1, feature SPEC §8 check 4).
+#[cfg(test)]
+#[test]
+fn the_approvals_listing() {
+    let (_dir, store, registry) = gated_store();
+    let second = 1_000_000_000;
+
+    // A code trigger, then a patch attaching different code: the first snapshot
+    // is superseded, and only the firing that ran it still names it.
+    let created = crate::trigger::create(
+        &store,
+        "d1",
+        &format!(
+            r#"{{"name":"nightly","brief":"look at AAPL","schedule":{{"at":"{}"}},
+                 "code":{{"source":"print(1)","suffix":".py"}}}}"#,
+            chrono::DateTime::from_timestamp_nanos(T0 + 3_600 * second).to_rfc3339()
+        ),
+        T0,
+    )
+    .expect("the create is well formed");
+    let trigger_id = created["id"].as_str().unwrap().to_string();
+    let superseded = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    let patched = crate::trigger::patch(
+        &store,
+        "d1",
+        &trigger_id,
+        r#"{"code":{"source":"print(22)","suffix":".py"}}"#,
+        T0 + second,
+    )
+    .unwrap();
+    let current = patched["code"]["snapshot_id"].as_str().unwrap().to_string();
+    let (ran, owner) = (superseded.clone(), trigger_id.clone());
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+                 trigger_revision, brief, code_snapshot_id) \
+                 VALUES ('f1','d1',?1,?2,?2,1,'look at AAPL',?3)",
+                params![owner, T0, ran],
+            )
+        })
+        .unwrap();
+
+    // A gated order on the other desk, recorded without touching the sandbox.
+    let (action, submitted) = crate::trade::submit(
+        &store,
+        &registry,
+        "d2",
+        r#"{"action_id":"buy-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"MARKET","quantity":"10","price":null}"#,
+        &crate::trade::Source::Session,
+    )
+    .expect("a gated order is recorded, not refused");
+    assert_eq!(submitted, crate::trade::Submitted::Pending);
+
+    // A snapshot that was never gated is not an approval at all.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO code_snapshots VALUES \
+                 ('s0','d1','print(0)','.py','[\"{script}\"]',300,'ff','ALWAYS_ALLOW',1,1)",
+                [],
+            )
+        })
+        .unwrap();
+
+    // --- The listing: both kinds, one query, newest first -------------------
+    let pending = approvals(&store, "PENDING").unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|a| (a.kind.as_str(), a.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (PAPER_ORDER, action.id.as_str()),
+            (TRIGGER_CODE, current.as_str()),
+            (TRIGGER_CODE, superseded.as_str()),
+        ]
+    );
+    let older = &pending[2];
+    assert_eq!(
+        serde_json::to_value(older)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        [
+            "approval",
+            "decided_at_ns",
+            "desk_id",
+            "desk_name",
+            "detail",
+            "id",
+            "kind",
+            "requested_at_ns"
+        ]
+    );
+    assert_eq!(
+        (older.desk_id.as_str(), older.desk_name.as_str()),
+        ("d1", "alpha")
+    );
+    assert_eq!(older.approval, PENDING);
+    assert_eq!(older.requested_at_ns, T0);
+    assert_eq!(older.decided_at_ns, None);
+    let fingerprint = older.detail["fingerprint"].as_str().unwrap().to_string();
+    assert_eq!(fingerprint.len(), 64, "a hex SHA-256");
+    assert_eq!(
+        older.detail,
+        json!({
+            "trigger_id": trigger_id,
+            "trigger_name": "nightly",
+            "suffix": ".py",
+            "argv": ["{script}"],
+            "timeout_secs": 300,
+            "fingerprint": fingerprint,
+            "source_bytes": 8,
+        }),
+        "a superseded snapshot finds its trigger through the firing that ran it"
+    );
+    assert_eq!(pending[1].detail["trigger_id"], trigger_id.as_str());
+    assert_eq!(
+        pending[0].detail,
+        json!({
+            "action_id": "buy-1",
+            "source": "SESSION",
+            "request": {
+                "action_id": "buy-1",
+                "instrument_id": "AAPL.XNAS",
+                "side": "BUY",
+                "type": "MARKET",
+                "quantity": "10",
+                "price": null,
+            },
+        }),
+        "a session order has no attribution and no outcome yet"
+    );
+
+    // --- The state filter ---------------------------------------------------
+    assert!(approvals(&store, "DECIDED").unwrap().is_empty());
+    assert_eq!(
+        approvals(&store, "ALL").unwrap().len(),
+        3,
+        "the ungated snapshot is no approval under any state"
+    );
+    for state in ["", "pending", "MAYBE"] {
+        assert_eq!(approvals(&store, state).unwrap_err().code(), "VALIDATION");
+    }
+
+    // --- The single read carries the source the listing withholds -----------
+    let read = approval(&store, &superseded).unwrap();
+    assert_eq!(read.detail["source"], "print(1)");
+    assert_eq!(read.detail.as_object().unwrap().len(), 8);
+    assert!(!older.detail.as_object().unwrap().contains_key("source"));
+    assert_eq!(
+        approval(&store, "no-such-row").unwrap_err().code(),
+        "APPROVAL_NOT_FOUND"
+    );
+
+    // --- Every decision is desk-scoped --------------------------------------
+    assert_eq!(
+        decide(&store, &registry, "d2", &superseded, Decision::Approve)
+            .unwrap_err()
+            .code(),
+        "APPROVAL_NOT_FOUND",
+        "another desk's path never finds this snapshot"
+    );
+    assert_eq!(approval(&store, &superseded).unwrap().approval, PENDING);
+
+    // --- One route, two kinds, and the decision answers the record ----------
+    let denied = decide(&store, &registry, "d2", &action.id, Decision::Deny).unwrap();
+    assert_eq!(denied.approval, "DENIED");
+    assert!(denied.decided_at_ns.is_some());
+    assert_eq!(
+        denied.detail["outcome"],
+        json!({ "failure_code": "DENIED" })
+    );
+    let approved = decide(&store, &registry, "d1", &current, Decision::Approve).unwrap();
+    assert_eq!(approved.approval, "APPROVED");
+    assert_eq!(approved.detail["source"], "print(22)");
+    assert_eq!(
+        decided_events(&store),
+        vec![
+            (
+                "d2".to_string(),
+                json!({ "kind": "PAPER_ORDER", "id": action.id, "decision": "DENY" })
+            ),
+            (
+                "d1".to_string(),
+                json!({ "kind": "TRIGGER_CODE", "id": current, "decision": "APPROVE" })
+            ),
+        ]
+    );
+
+    // --- A decided record names its state and stays put ---------------------
+    for (desk, id, state) in [("d2", &action.id, "DENIED"), ("d1", &current, "APPROVED")] {
+        let again = decide(&store, &registry, desk, id, Decision::Approve).unwrap_err();
+        assert_eq!(again.code(), "APPROVAL_DECIDED");
+        assert!(again.to_string().contains(state), "{again}");
+    }
+    assert_eq!(
+        approvals(&store, "PENDING")
+            .unwrap()
+            .iter()
+            .map(|a| a.id.clone())
+            .collect::<Vec<_>>(),
+        vec![superseded]
+    );
+    assert_eq!(approvals(&store, "DECIDED").unwrap().len(), 2);
+    assert_eq!(approvals(&store, "ALL").unwrap().len(), 3);
 }
