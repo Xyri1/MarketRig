@@ -27,6 +27,8 @@ spawn   <executable>            cwd = data root (which carries no .env for the l
              USERPROFILE and LOCALAPPDATA also = <data root>/hindsight), the daemon's own
              MARKETRIG_* variables (root §17's seam, as R3 §4.2 forwards them to a runtime;
              a user's daemon carries none), plus:
+        PYTHONUTF8=1      (the banner is block glyphs; off a terminal Python otherwise writes the
+                           system code page, and a GBK Windows box exited on the first one, 2026-09-04)
         HINDSIGHT_API_HOST=127.0.0.1            HINDSIGHT_API_PORT=<port>
         HINDSIGHT_API_WORKERS=1                 HINDSIGHT_API_LOG_LEVEL=warning
         HINDSIGHT_API_DATABASE_URL=pg0://marketrig

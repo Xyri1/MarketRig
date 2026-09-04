@@ -836,6 +836,11 @@ impl Memory {
         // script. A daemon started by a user carries none of them.
         env.extend(std::env::vars().filter(|(key, _)| key.starts_with("MARKETRIG_")));
         env.extend([
+            // The launcher's banner is block glyphs; off a terminal Python
+            // encodes standard output in the system code page, and a GBK
+            // Windows box died on the first glyph (the Windows E5 cell,
+            // 2026-09-04). UTF-8 mode everywhere, so both platforms match.
+            ("PYTHONUTF8".to_string(), "1".to_string()),
             ("HINDSIGHT_API_HOST".to_string(), "127.0.0.1".to_string()),
             ("HINDSIGHT_API_PORT".to_string(), port.to_string()),
             ("HINDSIGHT_API_WORKERS".to_string(), "1".to_string()),
@@ -2457,6 +2462,7 @@ async fn child_launch_environment_and_stop() {
     };
     let env = read_env();
     for (key, value) in [
+        ("PYTHONUTF8", "1"),
         ("HINDSIGHT_API_HOST", "127.0.0.1"),
         ("HINDSIGHT_API_PORT", &port.to_string()),
         ("HINDSIGHT_API_WORKERS", "1"),
