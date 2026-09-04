@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::desk::{self, DeskError};
+use crate::policy::{self, DecideError, Decision};
 use crate::schedule::Schedule;
 use crate::store::{Store, StoreError};
 
@@ -211,14 +212,28 @@ impl Snapshot {
         })
     }
 
-    /// One immutable row (§7). Every snapshot is **Always allow** until the
-    /// policy read lands here (R5 feature SPEC §3.2).
-    fn insert(&self, tx: &Transaction<'_>, desk_id: &str, now_ns: i64) -> rusqlite::Result<String> {
+    /// One immutable row (§7), gated by the installation's trigger-code policy
+    /// read in this same unit (R5 feature SPEC §3.2): **Always allow** decides
+    /// it on the spot, **Require approval** leaves it `PENDING` with no
+    /// decision instant and asks for one. Returns the row's id and its state.
+    fn insert(
+        &self,
+        tx: &Transaction<'_>,
+        desk_id: &str,
+        trigger_id: &str,
+        now_ns: i64,
+    ) -> rusqlite::Result<(String, String)> {
+        let pending = policy::read(tx)?.trigger_code_policy == policy::REQUIRE_APPROVAL;
+        let approval = if pending {
+            policy::PENDING
+        } else {
+            policy::ALWAYS_ALLOW
+        };
         let id = Uuid::now_v7().to_string();
         tx.execute(
             "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
              fingerprint, approval, decided_at_ns, created_at_ns) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ALWAYS_ALLOW', ?8, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
                 desk_id,
@@ -227,11 +242,121 @@ impl Snapshot {
                 serde_json::to_string(&self.argv).unwrap_or_default(),
                 self.timeout_secs,
                 fingerprint(&self.source, &self.suffix, &self.argv, self.timeout_secs),
+                approval,
+                (!pending).then_some(now_ns),
                 now_ns,
             ],
         )?;
-        Ok(id)
+        if pending {
+            desk::append_event(
+                tx,
+                "APPROVAL_REQUESTED",
+                Some(desk_id),
+                now_ns,
+                json!({ "kind": "TRIGGER_CODE", "id": id, "trigger_id": trigger_id }),
+            )?;
+        }
+        Ok((id, approval.to_string()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// The projection rule (R5 feature SPEC §3.2, per R5-3)
+// ---------------------------------------------------------------------------
+
+/// The one place the projection rule lives: a trigger has a next occurrence
+/// only while it is enabled, undeleted, and its code snapshot — when it has one
+/// — is decided in its favour. `candidate` is R2's scan (§2), run only when the
+/// rule allows it, so an undecided trigger costs nothing. Every site that
+/// computes a projection goes through here: create, patch (enable and disable
+/// among them), the decision below, and the scheduler's advance. Delete writes
+/// its `NULL` directly, which is this rule with nothing left to ask.
+pub fn projection(
+    enabled: bool,
+    approval: Option<&str>,
+    candidate: impl FnOnce() -> Option<i64>,
+) -> Option<i64> {
+    match approval {
+        Some("PENDING" | "DENIED") => None,
+        _ => enabled.then(candidate).flatten(),
+    }
+}
+
+/// The trigger-code half of `POST /desks/{d}/approvals/{id}` (§3.2): the
+/// decision, its instant, the owning trigger's projection recomputed from that
+/// instant, and `APPROVAL_DECIDED`, in one unit. The route wakes the scheduler
+/// after this returns; nothing here does.
+pub fn decide(
+    store: &Store,
+    desk_id: &str,
+    snapshot_id: &str,
+    decision: Decision,
+    now_ns: i64,
+) -> Result<(), DecideError> {
+    let (desk, snapshot) = (desk_id.to_string(), snapshot_id.to_string());
+    store.unit(move |tx| {
+        let Some(approval) = tx
+            .query_row(
+                "SELECT approval FROM code_snapshots WHERE desk_id = ?1 AND id = ?2",
+                params![desk, snapshot],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        else {
+            return Ok(Err(DecideError::NotFound(snapshot)));
+        };
+        if approval != policy::PENDING {
+            return Ok(Err(DecideError::AlreadyDecided { approval }));
+        }
+        let decided = match decision {
+            Decision::Approve => "APPROVED",
+            Decision::Deny => "DENIED",
+        };
+        tx.execute(
+            "UPDATE code_snapshots SET approval = ?3, decided_at_ns = ?4 \
+             WHERE desk_id = ?1 AND id = ?2",
+            params![desk, snapshot, decided, now_ns],
+        )?;
+        // The owning trigger — at most one, since every attachment inserts its
+        // own row — projects again from the decision instant, so an elapsed
+        // one-off stays NULL and a recurring one skips the boundaries it spent
+        // waiting (§3.2). A denial projects nothing, which it already had.
+        let owner = tx
+            .query_row(
+                "SELECT id, recurrence, at_ns, rrule, dtstart, tz, enabled, deleted_at_ns \
+                 FROM triggers WHERE code_snapshot_id = ?1",
+                params![snapshot],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        Schedule::from_row(
+                            &r.get::<_, String>(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ),
+                        r.get::<_, i64>(6)? == 1 && r.get::<_, Option<i64>>(7)?.is_none(),
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((trigger_id, schedule, due)) = owner {
+            let next = projection(due, Some(decided), || schedule.next_after(now_ns));
+            tx.execute(
+                "UPDATE triggers SET next_occurrence_ns = ?2 WHERE id = ?1",
+                params![trigger_id, next],
+            )?;
+        }
+        desk::append_event(
+            tx,
+            "APPROVAL_DECIDED",
+            Some(&desk),
+            now_ns,
+            json!({ "kind": "TRIGGER_CODE", "id": snapshot, "decision": decision.as_str() }),
+        )?;
+        Ok(Ok(()))
+    })?
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +452,8 @@ fn trigger_select(with_source: bool) -> String {
         "SELECT t.id, t.desk_id, t.name, t.recurrence, t.brief, t.context, \
          t.at_ns, t.rrule, t.dtstart, t.tz, t.enabled, t.revision, t.next_occurrence_ns, \
          t.created_at_ns, t.updated_at_ns, t.deleted_at_ns, c.id, {}, c.suffix, c.argv, \
-         c.timeout_secs, c.fingerprint, c.decided_at_ns, length(CAST(c.source AS BLOB)) \
+         c.timeout_secs, c.fingerprint, c.decided_at_ns, length(CAST(c.source AS BLOB)), \
+         c.approval \
          FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id",
         if with_source { "c.source" } else { "NULL" }
     )
@@ -348,15 +474,22 @@ fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
         Some(snapshot_id) => {
             let source: Option<String> = r.get(17)?;
             let argv: String = r.get(19)?;
+            let decided_at_ns: Option<i64> = r.get(22)?;
+            let approval: String = r.get(24)?;
             json!({
                 "snapshot_id": snapshot_id,
                 "suffix": r.get::<_, String>(18)?,
                 "argv": serde_json::from_str::<Value>(&argv).unwrap_or(Value::Null),
                 "timeout_secs": r.get::<_, i64>(20)?,
                 "fingerprint": r.get::<_, String>(21)?,
-                // Derived from `decided_at_ns`; absent once a snapshot can
-                // be PENDING or DENIED (R5 feature SPEC §3.2).
-                "approved_at_ns": r.get::<_, Option<i64>>(22)?,
+                // R2's field, now derived: the decision instant while the
+                // snapshot is allowed, absent while it is PENDING or DENIED
+                // (R5 feature SPEC §3.2).
+                "approved_at_ns": matches!(approval.as_str(), "ALWAYS_ALLOW" | "APPROVED")
+                    .then_some(decided_at_ns)
+                    .flatten(),
+                "approval": approval,
+                "decided_at_ns": decided_at_ns,
                 "source_bytes": r.get::<_, i64>(23)?,
                 "source": with_source.then_some(source).flatten(),
             })
@@ -561,10 +694,17 @@ pub fn create(
     // transaction on the create path.
     let next = schedule.next_after(now_ns);
     let created = store.unit(move |tx| {
-        let snapshot_id = match &code {
+        let snapshot = match &code {
             None => None,
-            Some(code) => Some(code.insert(tx, &desk_owned, now_ns)?),
+            Some(code) => Some(code.insert(tx, &desk_owned, &id, now_ns)?),
         };
+        let (snapshot_id, approval) = match &snapshot {
+            None => (None, None),
+            Some((id, approval)) => (Some(id.as_str()), Some(approval.as_str())),
+        };
+        // A fresh trigger is enabled and undeleted; only its snapshot can
+        // withhold the projection (R5 feature SPEC §3.2).
+        let next = projection(true, approval, || next);
         let (at_ns, rrule, dtstart, tz) = schedule_columns(&schedule);
         tx.execute(
             "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, context, \
@@ -692,9 +832,10 @@ pub fn patch(
         .unit(move |tx| {
             let Some(current) = tx
                 .query_row(
-                    "SELECT recurrence, brief, context, at_ns, rrule, dtstart, tz, enabled, \
-                     code_snapshot_id FROM triggers \
-                     WHERE desk_id = ?1 AND id = ?2 AND deleted_at_ns IS NULL",
+                    "SELECT t.recurrence, t.brief, t.context, t.at_ns, t.rrule, t.dtstart, \
+                     t.tz, t.enabled, t.code_snapshot_id, c.fingerprint, c.approval \
+                     FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id \
+                     WHERE t.desk_id = ?1 AND t.id = ?2 AND t.deleted_at_ns IS NULL",
                     params![desk, id],
                     |r| {
                         Ok((
@@ -709,6 +850,8 @@ pub fn patch(
                             r.get::<_, Option<String>>(2)?,
                             r.get::<_, i64>(7)? == 1,
                             r.get::<_, Option<String>>(8)?,
+                            r.get::<_, Option<String>>(9)?,
+                            r.get::<_, Option<String>>(10)?,
                         ))
                     },
                 )
@@ -716,21 +859,44 @@ pub fn patch(
             else {
                 return Ok(None);
             };
-            let (row_schedule, row_brief, row_context, row_enabled, row_snapshot) = current;
+            let (
+                row_schedule,
+                row_brief,
+                row_context,
+                row_enabled,
+                row_snapshot,
+                row_fingerprint,
+                row_approval,
+            ) = current;
             let schedule = patch.schedule.unwrap_or(row_schedule);
             let enabled = patch.enabled.unwrap_or(row_enabled);
-            let snapshot_id = match &patch.code {
-                None => row_snapshot,
-                Some(None) => None,
-                Some(Some(code)) => Some(code.insert(tx, &desk, now_ns)?),
+            let same_code = |code: &Snapshot| {
+                row_fingerprint.as_deref()
+                    == Some(
+                        fingerprint(&code.source, &code.suffix, &code.argv, code.timeout_secs)
+                            .as_str(),
+                    )
+            };
+            let (snapshot_id, approval) = match &patch.code {
+                None => (row_snapshot, row_approval),
+                // Code that fingerprints identical to the current snapshot is
+                // the same code: the row and its decision are kept, because
+                // only a change needs approving again (root §8.3, R5 feature
+                // SPEC §3.2).
+                Some(Some(code)) if same_code(code) => (row_snapshot, row_approval),
+                Some(None) => (None, None),
+                Some(Some(code)) => {
+                    let (snapshot_id, approval) = code.insert(tx, &desk, &id, now_ns)?;
+                    (Some(snapshot_id), Some(approval))
+                }
             };
             let (at_ns, rrule, dtstart, tz) = schedule_columns(&schedule);
-            // Disabled is never due; otherwise the projection is recomputed from
-            // the definition's own anchor against now (§2).
+            // Disabled or undecided is never due; otherwise the projection is
+            // recomputed from the definition's own anchor against now (§2).
             // ponytail: the scan runs inside the unit because the row's schedule
             // is read here; it is bounded at 100,000 candidates (R2-1's ceiling,
             // a persisted cursor is the upgrade).
-            let next = enabled.then(|| schedule.next_after(now_ns)).flatten();
+            let next = projection(enabled, approval.as_deref(), || schedule.next_after(now_ns));
             tx.execute(
                 "UPDATE triggers SET brief = ?3, context = ?4, recurrence = ?5, at_ns = ?6, \
                  rrule = ?7, dtstart = ?8, tz = ?9, enabled = ?10, code_snapshot_id = ?11, \
@@ -1058,5 +1224,335 @@ fn result_prompt_payload() {
             "stdout_truncated": false, "stderr_truncated": true,
             "started_at_ns": 80, "finished_at_ns": 90,
         })
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Trigger code approval (R5 feature SPEC §3.2, §8 check 2)
+// ---------------------------------------------------------------------------
+
+/// A store with one `READY` desk, on the shipped defaults — the trigger-code
+/// policy is **Require approval** until a test says otherwise.
+#[cfg(test)]
+fn desk_store() -> (tempfile::TempDir, Store) {
+    let (dir, store) = crate::store::open_temp();
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES ('d1','alpha','READY','/desks/alpha',1,1)",
+                [],
+            )
+        })
+        .unwrap();
+    (dir, store)
+}
+
+#[cfg(test)]
+fn set_policy(store: &Store, value: &'static str) {
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "UPDATE installation_settings SET trigger_code_policy = ?1 WHERE id = 1",
+                params![value],
+            )
+        })
+        .unwrap();
+}
+
+/// The desk's operational events, oldest first.
+#[cfg(test)]
+fn desk_events(store: &Store) -> Vec<(String, Value)> {
+    store
+        .call(|c| {
+            c.prepare(
+                "SELECT kind, payload FROM operational_events WHERE desk_id = 'd1' \
+                 ORDER BY occurred_at_ns, id",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or(Value::Null),
+                ))
+            })?
+            .collect()
+        })
+        .unwrap()
+}
+
+#[cfg(test)]
+fn snapshot_count(store: &Store) -> i64 {
+    store
+        .call(|c| c.query_row("SELECT count(*) FROM code_snapshots", [], |r| r.get(0)))
+        .unwrap()
+}
+
+#[cfg(test)]
+fn rfc3339(at_ns: i64) -> String {
+    chrono::DateTime::from_timestamp_nanos(at_ns).to_rfc3339()
+}
+
+/// A one-off create body carrying code.
+#[cfg(test)]
+fn code_body(name: &str, at_ns: i64, source: &str) -> String {
+    format!(
+        r#"{{"name":"{name}","brief":"look at AAPL","schedule":{{"at":"{}"}},
+             "code":{{"source":"{source}","suffix":".py"}}}}"#,
+        rfc3339(at_ns)
+    )
+}
+
+/// 2026-09-03T12:00:00Z, so a minute rule's boundaries are known.
+#[cfg(test)]
+const T0: i64 = 1_788_436_800_000_000_000;
+#[cfg(test)]
+const SECOND: i64 = 1_000_000_000;
+
+/// The rule itself (§3.2): the scan runs only when the trigger is enabled and
+/// its snapshot is decided in its favour.
+#[cfg(test)]
+#[test]
+fn the_projection_rule() {
+    let candidate = || Some(7);
+    assert_eq!(projection(true, None, candidate), Some(7));
+    assert_eq!(projection(true, Some("ALWAYS_ALLOW"), candidate), Some(7));
+    assert_eq!(projection(true, Some("APPROVED"), candidate), Some(7));
+    assert_eq!(projection(false, None, candidate), None);
+    assert_eq!(projection(false, Some("APPROVED"), candidate), None);
+    for state in ["PENDING", "DENIED"] {
+        assert_eq!(
+            projection(true, Some(state), || panic!("the scan never runs")),
+            None
+        );
+    }
+}
+
+/// **Never due** (§3.2): a pending one-off is undue through disable, enable,
+/// and an approval that arrives after its instant; only a reschedule arms it.
+#[cfg(test)]
+#[test]
+fn a_pending_trigger_is_never_due() {
+    let (_dir, store) = desk_store();
+    let created = create(
+        &store,
+        "d1",
+        &code_body("nightly", T0 + 2 * SECOND, "print(1)"),
+        T0,
+    )
+    .expect("the create is well formed");
+    let id = created["id"].as_str().unwrap().to_string();
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    assert_eq!(created["code"]["approval"], "PENDING");
+    assert!(
+        created["code"]["decided_at_ns"].is_null() && created["code"]["approved_at_ns"].is_null(),
+        "an undecided snapshot has no instant: {created}"
+    );
+    assert!(
+        created["next_occurrence_ns"].is_null(),
+        "pending is never due: {created}"
+    );
+    assert_eq!(
+        desk_events(&store),
+        vec![(
+            "APPROVAL_REQUESTED".to_string(),
+            json!({ "kind": "TRIGGER_CODE", "id": snapshot, "trigger_id": id })
+        )]
+    );
+
+    // Disable and enable are patches; the rule outranks both.
+    for body in [r#"{"enabled":false}"#, r#"{"enabled":true}"#] {
+        let patched = patch(&store, "d1", &id, body, T0 + SECOND).unwrap();
+        assert_eq!(patched["code"]["approval"], "PENDING");
+        assert!(patched["next_occurrence_ns"].is_null(), "{body}: {patched}");
+    }
+
+    // Approved after its instant: decided, and still never due.
+    let decided = T0 + 5 * SECOND;
+    decide(&store, "d1", &snapshot, Decision::Approve, decided).unwrap();
+    let after = get(&store, "d1", &id).unwrap();
+    assert_eq!(after["code"]["approval"], "APPROVED");
+    assert_eq!(after["code"]["decided_at_ns"], decided);
+    assert_eq!(after["code"]["approved_at_ns"], decided);
+    assert!(
+        after["next_occurrence_ns"].is_null(),
+        "an elapsed one-off stays NULL: {after}"
+    );
+
+    // A reschedule is what arms it, and the approved snapshot is kept.
+    let armed = decided + 2 * SECOND;
+    let moved = patch(
+        &store,
+        "d1",
+        &id,
+        &format!(r#"{{"schedule":{{"at":"{}"}}}}"#, rfc3339(armed)),
+        decided,
+    )
+    .unwrap();
+    assert_eq!(moved["next_occurrence_ns"], armed);
+    assert_eq!(moved["code"]["snapshot_id"], snapshot.as_str());
+    assert_eq!(moved["code"]["approval"], "APPROVED");
+    assert_eq!(snapshot_count(&store), 1);
+}
+
+/// **Recurring approved** (§3.2): the next boundary after the decision, not
+/// after creation.
+#[cfg(test)]
+#[test]
+fn approval_projects_a_recurring_trigger_from_the_decision() {
+    let (_dir, store) = desk_store();
+    let body = r#"{"name":"tick","brief":"watch","schedule":
+        {"rrule":"FREQ=MINUTELY","dtstart":"2026-09-03T12:00:00","tz":"UTC"},
+        "code":{"source":"print(1)","suffix":".py"}}"#;
+    let created = create(&store, "d1", body, T0).unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    assert!(created["next_occurrence_ns"].is_null(), "{created}");
+
+    // 12:01:30 — the boundaries at 12:00 and 12:01 are spent waiting.
+    let decided = T0 + 90 * SECOND;
+    decide(&store, "d1", &snapshot, Decision::Approve, decided).unwrap();
+    let after = get(&store, "d1", &id).unwrap();
+    assert_eq!(after["next_occurrence_ns"], T0 + 120 * SECOND);
+}
+
+/// **Denied leaves nothing** (§3.2): the trigger keeps the denied snapshot and
+/// stays undue; different code asks again.
+#[cfg(test)]
+#[test]
+fn a_denied_snapshot_stays_and_new_code_asks_again() {
+    let (_dir, store) = desk_store();
+    let created = create(
+        &store,
+        "d1",
+        &code_body("nightly", T0 + 3_600 * SECOND, "print(1)"),
+        T0,
+    )
+    .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+
+    let decided = T0 + SECOND;
+    decide(&store, "d1", &snapshot, Decision::Deny, decided).unwrap();
+    let after = get(&store, "d1", &id).unwrap();
+    assert_eq!(after["code"]["approval"], "DENIED");
+    assert_eq!(after["code"]["decided_at_ns"], decided);
+    assert!(
+        after["code"]["approved_at_ns"].is_null(),
+        "denial derives no approval instant: {after}"
+    );
+    assert!(
+        after["next_occurrence_ns"].is_null(),
+        "denied is never due, though its instant is ahead: {after}"
+    );
+    assert_eq!(
+        desk_events(&store)[1],
+        (
+            "APPROVAL_DECIDED".to_string(),
+            json!({ "kind": "TRIGGER_CODE", "id": snapshot, "decision": "DENY" })
+        )
+    );
+
+    // Different code: a second snapshot, pending, and a second request. The
+    // denied row stays.
+    let repatched = patch(
+        &store,
+        "d1",
+        &id,
+        r#"{"code":{"source":"print(2)","suffix":".py"}}"#,
+        decided,
+    )
+    .unwrap();
+    let second = repatched["code"]["snapshot_id"].as_str().unwrap();
+    assert_ne!(second, snapshot);
+    assert_eq!(repatched["code"]["approval"], "PENDING");
+    assert!(repatched["next_occurrence_ns"].is_null(), "{repatched}");
+    assert_eq!(snapshot_count(&store), 2);
+    assert_eq!(
+        desk_events(&store)
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "APPROVAL_REQUESTED",
+            "APPROVAL_DECIDED",
+            "APPROVAL_REQUESTED"
+        ]
+    );
+}
+
+/// **Same code, no reapproval** (§3.2): a brief patch and a byte-identical code
+/// patch both keep the snapshot and its decision.
+#[cfg(test)]
+#[test]
+fn identical_code_keeps_its_decision() {
+    let (_dir, store) = desk_store();
+    let armed = T0 + 3_600 * SECOND;
+    let created = create(&store, "d1", &code_body("nightly", armed, "print(1)"), T0).unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    decide(&store, "d1", &snapshot, Decision::Approve, T0 + SECOND).unwrap();
+
+    for body in [
+        r#"{"brief":"look at MSFT"}"#,
+        r#"{"code":{"source":"print(1)","suffix":".py"}}"#,
+    ] {
+        let patched = patch(&store, "d1", &id, body, T0 + 2 * SECOND).unwrap();
+        assert_eq!(patched["code"]["snapshot_id"], snapshot.as_str(), "{body}");
+        assert_eq!(patched["code"]["approval"], "APPROVED", "{body}");
+        assert_eq!(patched["next_occurrence_ns"], armed, "{body}");
+    }
+    assert_eq!(snapshot_count(&store), 1);
+    assert_eq!(desk_events(&store).len(), 2, "one request, one decision");
+}
+
+/// **Always allow** (§3.2): R2's behaviour unchanged, and nothing to decide.
+#[cfg(test)]
+#[test]
+fn always_allow_keeps_r2_behaviour() {
+    let (_dir, store) = desk_store();
+    set_policy(&store, "ALWAYS_ALLOW");
+    let armed = T0 + 3_600 * SECOND;
+    let created = create(&store, "d1", &code_body("nightly", armed, "print(1)"), T0).unwrap();
+    assert_eq!(created["code"]["approval"], "ALWAYS_ALLOW");
+    assert_eq!(created["code"]["decided_at_ns"], T0);
+    assert_eq!(created["code"]["approved_at_ns"], T0);
+    assert_eq!(created["next_occurrence_ns"], armed);
+    assert!(desk_events(&store).is_empty(), "nothing to approve");
+
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+    let e = decide(&store, "d1", &snapshot, Decision::Approve, T0 + SECOND).unwrap_err();
+    assert_eq!(e.code(), "APPROVAL_DECIDED");
+}
+
+/// The decision is desk-scoped and taken once (§3.1).
+#[cfg(test)]
+#[test]
+fn a_decision_is_scoped_and_once() {
+    let (_dir, store) = desk_store();
+    let created = create(
+        &store,
+        "d1",
+        &code_body("nightly", T0 + 3_600 * SECOND, "print(1)"),
+        T0,
+    )
+    .unwrap();
+    let snapshot = created["code"]["snapshot_id"].as_str().unwrap().to_string();
+
+    for (desk, id) in [("d2", snapshot.as_str()), ("d1", "01997f00-nope")] {
+        let e = decide(&store, desk, id, Decision::Approve, T0 + SECOND).unwrap_err();
+        assert_eq!(e.code(), "APPROVAL_NOT_FOUND", "{desk}/{id}");
+    }
+    decide(&store, "d1", &snapshot, Decision::Approve, T0 + SECOND).unwrap();
+    match decide(&store, "d1", &snapshot, Decision::Deny, T0 + 2 * SECOND).unwrap_err() {
+        DecideError::AlreadyDecided { approval } => assert_eq!(approval, "APPROVED"),
+        other => panic!("a decided snapshot is a conflict, not {other:?}"),
+    }
+    assert_eq!(
+        desk_events(&store)
+            .iter()
+            .filter(|(kind, _)| kind == "APPROVAL_DECIDED")
+            .count(),
+        1,
+        "a refused decision writes nothing"
     );
 }

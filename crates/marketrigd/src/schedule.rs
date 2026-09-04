@@ -278,10 +278,17 @@ pub fn accept_or_miss(
 ) -> rusqlite::Result<Pass> {
     let due: Vec<Due> = tx
         .prepare(
-            "SELECT id, desk_id, name, recurrence, brief, context, at_ns, rrule, dtstart, tz, \
-             revision, code_snapshot_id, next_occurrence_ns FROM triggers \
-             WHERE deleted_at_ns IS NULL AND enabled = 1 AND next_occurrence_ns IS NOT NULL \
-             AND next_occurrence_ns <= ?1 ORDER BY next_occurrence_ns, id",
+            // The snapshot's state joins in so the advance can go through the one
+            // projection rule (R5 feature SPEC §3.2). A due row is eligible by
+            // construction — only that rule ever writes a projection — so this
+            // is the rule living in one place, not a second gate.
+            "SELECT t.id, t.desk_id, t.name, t.recurrence, t.brief, t.context, t.at_ns, \
+             t.rrule, t.dtstart, t.tz, t.revision, t.code_snapshot_id, \
+             t.next_occurrence_ns, c.approval \
+             FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id \
+             WHERE t.deleted_at_ns IS NULL AND t.enabled = 1 \
+             AND t.next_occurrence_ns IS NOT NULL AND t.next_occurrence_ns <= ?1 \
+             ORDER BY t.next_occurrence_ns, t.id",
         )?
         .query_map(params![now_ns], |r| {
             Ok(Due {
@@ -300,6 +307,7 @@ pub fn accept_or_miss(
                 revision: r.get(10)?,
                 code_snapshot_id: r.get(11)?,
                 occurrence_ns: r.get(12)?,
+                approval: r.get(13)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -310,6 +318,10 @@ pub fn accept_or_miss(
         if trigger.occurrence_ns >= started_at_ns
             && now_ns.saturating_sub(trigger.occurrence_ns) <= LATE_BOUND_NS
         {
+            // The advance is the same after a first acceptance and after
+            // losing the race to one: computed here, before the row's fields
+            // move into the firing.
+            let next = advance(&trigger, one_off, trigger.occurrence_ns);
             let firing = FiringRow {
                 id: Uuid::now_v7().to_string(),
                 desk_id: trigger.desk_id.clone(),
@@ -344,9 +356,6 @@ pub fn accept_or_miss(
                 Err(rusqlite::Error::SqliteFailure(f, _))
                     if f.code == ErrorCode::ConstraintViolation =>
                 {
-                    let next = (!one_off)
-                        .then(|| trigger.schedule.next_after(trigger.occurrence_ns))
-                        .flatten();
                     project(tx, &trigger.id, next)?;
                     continue;
                 }
@@ -357,9 +366,6 @@ pub fn accept_or_miss(
             if firing.code_snapshot_id.is_none() {
                 insert_result_prompt(tx, &firing, &trigger.name, None, now_ns)?;
             }
-            let next = (!one_off)
-                .then(|| trigger.schedule.next_after(trigger.occurrence_ns))
-                .flatten();
             project(tx, &trigger.id, next)?;
             pass.accepted.push(Accepted {
                 has_code: firing.code_snapshot_id.is_some(),
@@ -367,9 +373,7 @@ pub fn accept_or_miss(
                 desk_id: firing.desk_id,
             });
         } else {
-            let next = (!one_off)
-                .then(|| trigger.schedule.next_after(now_ns))
-                .flatten();
+            let next = advance(&trigger, one_off, now_ns);
             let (count, count_capped) = trigger
                 .schedule
                 .count_between(trigger.occurrence_ns, now_ns);
@@ -407,6 +411,19 @@ struct Due {
     revision: i64,
     code_snapshot_id: Option<String>,
     occurrence_ns: i64,
+    /// The code snapshot's approval state, `None` for a code-free trigger.
+    approval: Option<String>,
+}
+
+/// The advance after an acceptance or a miss, through the one projection rule
+/// (R5 feature SPEC §3.2). A due row is enabled and undeleted by construction;
+/// a consumed one-off projects nothing, and everything else is R2's scan.
+fn advance(trigger: &Due, one_off: bool, reference_ns: i64) -> Option<i64> {
+    crate::trigger::projection(true, trigger.approval.as_deref(), || {
+        (!one_off)
+            .then(|| trigger.schedule.next_after(reference_ns))
+            .flatten()
+    })
 }
 
 fn project(tx: &Transaction<'_>, trigger_id: &str, next: Option<i64>) -> rusqlite::Result<()> {

@@ -19,7 +19,7 @@ const DESKS: &str =
 
 const TRIGGERS: &str = r#"{"triggers":[{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","source":"SCHEDULED","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"created_at_ns":10,"updated_at_ns":10},{"id":"01997f00-0000-7000-8000-00000000000d","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"weekday","source":"SCHEDULED","recurrence":"RECURRING","brief":"Trade the open.","schedule":{"rrule":"FREQ=DAILY;BYHOUR=9","dtstart":"2026-09-03T09:30:00","tz":"America/New_York"},"enabled":false,"revision":2,"created_at_ns":11,"updated_at_ns":12}]}"#;
 
-const TRIGGER_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","source":"SCHEDULED","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"code":{"snapshot_id":"01997f00-0000-7000-8000-0000000000ee","suffix":".py","argv":["{script}"],"timeout_secs":300,"fingerprint":"e3b0","approved_at_ns":10,"source_bytes":9,"source":"print(1)\n"},"created_at_ns":10,"updated_at_ns":10}"#;
+const TRIGGER_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","source":"SCHEDULED","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"code":{"snapshot_id":"01997f00-0000-7000-8000-0000000000ee","suffix":".py","argv":["{script}"],"timeout_secs":300,"fingerprint":"e3b0","approval":"APPROVED","decided_at_ns":10,"approved_at_ns":10,"source_bytes":9,"source":"print(1)\n"},"created_at_ns":10,"updated_at_ns":10}"#;
 
 const FIRINGS: &str = r#"{"firings":[{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000005,"trigger_revision":1,"brief":"Check the tape.","execution":{"state":"COMPLETE","outcome":"EXITED","exit_code":0}},{"id":"01997f00-0000-7000-8000-00000000000e","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1779999999940000000,"accepted_at_ns":1779999999940000003,"trigger_revision":1,"brief":"Check the tape."}]}"#;
 
@@ -546,7 +546,8 @@ fn human_output_carries_the_documented_rows_and_fields() {
     );
 
     // A single resource: every field the daemon sent, in its own key order,
-    // nested objects as compact JSON.
+    // nested objects as compact JSON — so the `code:` block carries the
+    // snapshot's `approval` and `decided_at_ns` (R5 feature SPEC §3.2).
     let show = marketrig(root.path(), &["trigger", "show", DESK, TRIGGER]);
     assert_eq!(code(&show), 0, "{show:?}");
     assert_eq!(
@@ -571,6 +572,8 @@ fn human_output_carries_the_documented_rows_and_fields() {
                     "argv": ["{script}"],
                     "timeout_secs": 300,
                     "fingerprint": "e3b0",
+                    "approval": "APPROVED",
+                    "decided_at_ns": 10,
                     "approved_at_ns": 10,
                     "source_bytes": 9,
                     "source": "print(1)\n",

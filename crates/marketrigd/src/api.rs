@@ -2284,6 +2284,15 @@ fn call_delete(url: String, bearer: Option<&str>) -> (u16, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trigger_codes() {
     let served = serve().await;
+    // R2's group under R2's policy: the daemon now ships **Require approval**
+    // for trigger code, whose own scenarios are `trigger`'s (R5 feature SPEC
+    // §3.2). Nothing else here is about approval.
+    crate::policy::put(
+        &served.store,
+        &serde_json::json!({ "trigger_code_policy": "ALWAYS_ALLOW" }),
+        crate::store::now_ns(),
+    )
+    .unwrap();
     let base = served.base.clone();
     let url = |path: &str| format!("{base}{path}");
     let ok = Some(CREDENTIAL);
@@ -2465,6 +2474,8 @@ async fn trigger_codes() {
             "argv": ["python3", "{script}"],
             "timeout_secs": 300,
             "fingerprint": crate::trigger::fingerprint("print(1)", ".py", &argv, 300),
+            "approval": "ALWAYS_ALLOW",
+            "decided_at_ns": nightly["created_at_ns"],
             "approved_at_ns": nightly["created_at_ns"],
             "source_bytes": 8,
             "source": "print(1)",
