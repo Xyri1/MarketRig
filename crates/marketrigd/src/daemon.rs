@@ -166,8 +166,11 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
         _ => {}
     }
 
-    // 6. finish every desk a crash left CREATING (§7.3).
+    // 6. finish every desk a crash left CREATING (§7.3), then reconcile the two
+    //    things MarketRig owns in a READY workspace — the CLAUDE.md shim and
+    //    the .claude/skills link — and nothing else (R4 feature SPEC §5).
     desk::complete_interrupted(&store)?;
+    desk::validate_ready(&store)?;
 
     // 6a. discover every UNDISCOVERED runtime before the listener binds (R3
     //     feature SPEC §2), and drop the previous run's launch files, which

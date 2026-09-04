@@ -176,7 +176,7 @@ Before serving, startup re-runs step 2–3 for every `CREATING` row found (root 
 
 ### 7.5 `READY` validation
 
-For a `READY` desk, `workspace_status` is computed at read time: `OK` when the workspace directory exists and `AGENTS.md` is readable, otherwise `UNAVAILABLE` with a one-line reason. The durable row stays `READY`; nothing is recreated or rewritten (per D20) except the `CLAUDE.md` shim, which MarketRig owns and reconciles. An unavailable workspace blocks neither other desks nor startup.
+For a `READY` desk, `workspace_status` is computed at read time: `OK` when the workspace directory exists and `AGENTS.md` is readable, otherwise `UNAVAILABLE` with a one-line reason. The durable row stays `READY`; nothing is recreated or rewritten (per D20) except the two things MarketRig owns and reconciles at startup: the `CLAUDE.md` shim and, from R4, the `.claude/skills` link ([`features/r4-memory-skills-loop/SPEC.md`](../r4-memory-skills-loop/SPEC.md) §5). An unavailable workspace blocks neither other desks nor startup.
 
 ### 7.6 Seeds
 
@@ -189,7 +189,7 @@ This desk's constitution. MarketRig seeded it at desk creation and never
 rewrites it; its full content arrives with later MarketRig milestones.
 ```
 
-The constitution's real wording is deferred (root §18) and grows with the milestones that add the surfaces it names; this placeholder is R0's minimal seed per the feature PRD. `.agents/skills/` and the `.claude/skills` link are not created in R0 (per D21, R4).
+This placeholder is R0's minimal seed per the feature PRD; from R4 creation writes the constitution [`features/r4-memory-skills-loop/SPEC.md`](../r4-memory-skills-loop/SPEC.md) §5.1 prints instead, alongside the seeded improvement skill and the `.claude/skills` link R0 does not create (per D21, R4). A desk seeded before R4 keeps this placeholder.
 
 ## 8. CLI
 
