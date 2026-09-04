@@ -901,6 +901,9 @@ impl Memory {
     /// this deadline bounds only the start itself.
     pub async fn ensure_ready(&self) -> Result<(u16, String), MemoryError> {
         let deadline = tokio::time::Instant::now() + self.ready_deadline;
+        // Once this caller has started the child, a loss is its answer, never a
+        // second start inside the same operation (§2.3: "once").
+        let mut started = false;
         loop {
             let state = {
                 let live = self.live.lock().await;
@@ -913,11 +916,17 @@ impl Memory {
                 live.state
             };
             if state == LiveState::Starting {
-                if tokio::time::Instant::now() >= deadline {
+                // Past the deadline the readiness task is about to record the
+                // loss (one health attempt at most); answering before it does
+                // would call a child `STARTING` that the next read finds `LOST`.
+                if tokio::time::Instant::now() >= deadline + HEALTH_TIMEOUT + HEALTH_POLL {
                     return Err(MemoryError::Unavailable(SLOW_MESSAGE.to_string()));
                 }
                 tokio::time::sleep(WATCH_POLL).await;
                 continue;
+            }
+            if started {
+                return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
             }
 
             // `NOT_STARTED` or `LOST`: this caller starts it, once.
@@ -934,18 +943,22 @@ impl Memory {
                 live.output_tail.clear();
                 live.generation
             };
-            return self.start(launch, generation, deadline).await;
+            self.start(launch, generation, deadline).await?;
+            started = true;
         }
     }
 
     /// Spawns the claimed start, records it, and hands the child to its
-    /// supervisor before polling `/health` (§2.2).
+    /// supervisor and its readiness poll (§2.2). Both are tasks of their own:
+    /// the caller that claimed the start may be dropped (a client gone, a
+    /// recall's budget shorter than the deadline) and the child must still
+    /// reach `READY` or be lost, never stay `STARTING` with nobody watching.
     async fn start(
         &self,
         launch: Launch,
         generation: u64,
         deadline: tokio::time::Instant,
-    ) -> Result<(u16, String), MemoryError> {
+    ) -> Result<(), MemoryError> {
         let mut command = tokio::process::Command::new(&launch.executable);
         command
             // The data root carries no `.env` for the launcher's dotenv loader.
@@ -997,68 +1010,21 @@ impl Memory {
                 launched_at_ns: now_ns(),
             },
         );
-        tokio::spawn(supervise(
-            Supervisor {
-                store: self.store.clone(),
-                roots: self.roots.clone(),
-                live: self.live.clone(),
-                key: launch.key.clone(),
-                generation,
-            },
-            stdout,
+        let context = || Supervisor {
+            store: self.store.clone(),
+            roots: self.roots.clone(),
+            live: self.live.clone(),
+            key: launch.key.clone(),
+            generation,
+        };
+        tokio::spawn(supervise(context(), stdout));
+        tokio::spawn(await_ready(
+            context(),
+            self.http.clone(),
+            launch.port,
+            deadline,
         ));
-        self.await_ready(launch, generation, deadline).await
-    }
-
-    /// `GET /health` until `200`, the deadline, or the child's end (§2.2).
-    async fn await_ready(
-        &self,
-        launch: Launch,
-        generation: u64,
-        deadline: tokio::time::Instant,
-    ) -> Result<(u16, String), MemoryError> {
-        let health = format!("http://127.0.0.1:{}/health", launch.port);
-        loop {
-            {
-                let live = self.live.lock().await;
-                if live.generation != generation || live.state != LiveState::Starting {
-                    return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
-                }
-            }
-            let answered = matches!(
-                self.http.get(&health).timeout(HEALTH_TIMEOUT).send().await,
-                Ok(response) if response.status() == reqwest::StatusCode::OK
-            );
-            if answered {
-                let pid = {
-                    let mut live = self.live.lock().await;
-                    if live.generation != generation || live.state != LiveState::Starting {
-                        return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
-                    }
-                    live.state = LiveState::Ready;
-                    live.losses_since_ready = 0;
-                    live.pid.unwrap_or_default()
-                };
-                let at_ns = now_ns();
-                self.store.unit(move |tx| {
-                    append_event(tx, "MEMORY_STARTED", None, at_ns, json!({ "pid": pid }))
-                })?;
-                return Ok((launch.port, launch.bearer));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                lose(
-                    &self.store,
-                    &self.roots,
-                    &self.live,
-                    generation,
-                    &launch.key,
-                    None,
-                )
-                .await;
-                return Err(MemoryError::Unavailable(SLOW_MESSAGE.to_string()));
-            }
-            tokio::time::sleep(HEALTH_POLL).await;
-        }
+        Ok(())
     }
 
     /// §2.3: stop a live child. A provider change and Quit both call it; ending
@@ -1086,6 +1052,61 @@ impl Memory {
         if let Some(pid) = pid {
             crate::daemon::forget_child(&self.roots, pid);
         }
+    }
+}
+
+/// `GET /health` until `200`, the deadline, or the child's end (§2.2): one task
+/// per start, like the supervisor, so readiness lands whether or not the caller
+/// that started the child is still waiting.
+async fn await_ready(
+    context: Supervisor,
+    http: reqwest::Client,
+    port: u16,
+    deadline: tokio::time::Instant,
+) {
+    let health = format!("http://127.0.0.1:{port}/health");
+    loop {
+        {
+            let live = context.live.lock().await;
+            if live.generation != context.generation || live.state != LiveState::Starting {
+                return;
+            }
+        }
+        let answered = matches!(
+            http.get(&health).timeout(HEALTH_TIMEOUT).send().await,
+            Ok(response) if response.status() == reqwest::StatusCode::OK
+        );
+        if answered {
+            let pid = {
+                let mut live = context.live.lock().await;
+                if live.generation != context.generation || live.state != LiveState::Starting {
+                    return;
+                }
+                live.state = LiveState::Ready;
+                live.losses_since_ready = 0;
+                live.pid.unwrap_or_default()
+            };
+            let at_ns = now_ns();
+            if let Err(e) = context.store.unit(move |tx| {
+                append_event(tx, "MEMORY_STARTED", None, at_ns, json!({ "pid": pid }))
+            }) {
+                tracing::warn!(error = %e, "recording MEMORY_STARTED failed");
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            lose(
+                &context.store,
+                &context.roots,
+                &context.live,
+                context.generation,
+                &context.key,
+                None,
+            )
+            .await;
+            return;
+        }
+        tokio::time::sleep(HEALTH_POLL).await;
     }
 }
 
@@ -3190,7 +3211,7 @@ async fn a_starting_child_is_unavailable_not_a_timeout() {
     let (_dir, mut memory) = scratch();
     memory.recall_timeout = Duration::from_millis(500);
     let bin = tempfile::tempdir().unwrap();
-    configured(&memory, &fake_launcher(bin.path(), "slow", 60_000, None)).await;
+    configured(&memory, &fake_launcher(bin.path(), "slow", 1_500, None)).await;
 
     let err = memory
         .recall_op(
@@ -3205,6 +3226,22 @@ async fn a_starting_child_is_unavailable_not_a_timeout() {
         .unwrap_err();
     assert_eq!(err.code(), "MEMORY_UNAVAILABLE", "{err}");
     assert_eq!(memory.live.lock().await.state, LiveState::Starting);
+
+    // The caller gave up, the start did not: readiness is its own task, so the
+    // child the next operation finds is READY, not STARTING with nobody polling.
+    let waited = tokio::time::Instant::now() + Duration::from_secs(10);
+    while memory.live.lock().await.state != LiveState::Ready {
+        assert!(
+            tokio::time::Instant::now() < waited,
+            "the abandoned start never became READY"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        events(&memory.store)
+            .iter()
+            .any(|(kind, _)| kind == "MEMORY_STARTED")
+    );
     memory.stop_child().await;
 }
 
