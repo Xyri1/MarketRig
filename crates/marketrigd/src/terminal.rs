@@ -180,6 +180,13 @@ impl Manager {
                 command.env(key, value);
             }
         }
+        // Every Windows process needs `SystemRoot`, and an environment with no
+        // entry at all is a single NUL where CreateProcessW wants a double NUL
+        // (error 87), so the one variable rides along on Windows.
+        #[cfg(windows)]
+        if let Ok(root) = std::env::var("SystemRoot") {
+            command.env("SystemRoot", root);
+        }
         for (key, value) in &spawn.env {
             command.env(key, value);
         }

@@ -4287,8 +4287,7 @@ async fn ws_send(
 fn idle_terminal() -> crate::terminal::Spawn {
     // The manager clears the child's environment (no PATH), and every real
     // adapter passes an absolute executable, so no shell: `ping.exe` by path
-    // idles for thirty seconds on its own (`cmd.exe /c "…"` under ConPTY
-    // failed CreateProcessW with error 87 on CI).
+    // idles for thirty seconds on its own.
     let argv = if cfg!(windows) {
         let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         vec![
