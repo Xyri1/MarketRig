@@ -490,7 +490,7 @@ Three risks are accepted rather than mitigated:
 
 ### D59 — Hey API generates the frontend REST client
 
-**Decision:** Generate frontend REST types and the native-Fetch SDK from the daemon's OpenAPI document using pinned `@hey-api/openapi-ts` and `@hey-api/client-fetch`, and fail CI when the committed client no longer matches that document. The daemon must emit the document from its own route definitions; the emitter is chosen alongside the web framework at plan time (D48). Use the browser WebSocket API separately for terminal bytes and live events.
+**Decision:** Generate frontend REST types and the native-Fetch SDK from the daemon's OpenAPI document using pinned `@hey-api/openapi-ts` with its bundled `@hey-api/client-fetch` plugin (a separate package before `openapi-ts` 0.73.0, bundled and deprecated on npm since; verified 2026-09-04), and fail CI when the committed client no longer matches that document. The daemon must emit the document from its own route definitions; the emitter is chosen alongside the web framework at plan time (D48). Use the browser WebSocket API separately for terminal bytes and live events.
 
 **Rationale:** Generation avoids duplicate handwritten contracts without adding a query cache, runtime validation framework, or larger SDK stack. The generator's input has to be the daemon's own schema — a handwritten OpenAPI file would reintroduce exactly the duplicate contract this decision exists to remove, so an emitter is a requirement on the framework choice, not an optional extra.
 

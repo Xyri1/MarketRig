@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0 through R4 are delivered; Milestone R5's design is next.
+Milestones R0 through R4 are delivered; Milestone R5 is design complete and its first slice is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -184,6 +184,8 @@ Dependencies: Milestone R3.
 
 This milestone realizes the choices recorded per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D70, D71, and D72.
 
+**Design complete 2026-09-04** — [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC with gate G38–G41 and the packaged smoke); implementation not started.
+
 **Goal:** Give the user a control plane over desks that are already running.
 
 Expected outcomes:
@@ -208,7 +210,7 @@ a desk's real terminal attaches, survives a tray hide and reopen, and keeps work
 
 **Why here:** the control plane is cheapest to build once the daemon's surface has stopped moving, and nothing before it needs a window — the loop is already proven headless by R4; approvals ride with it because the approval boundary is worth little until something can present the prompt.
 
-**Planned slices (2026-09-04):** one feature folder, three slices, in this order so the gate keeps growing headless before a window exists:
+**Slices (created 2026-09-04):** one feature folder, three slices — [`slices/006-r5-approval-policies.md`](slices/006-r5-approval-policies.md), [`slices/007-r5-shell-control-plane.md`](slices/007-r5-shell-control-plane.md), [`slices/008-r5-tray-quit-smoke.md`](slices/008-r5-tray-quit-smoke.md) — in this order so the gate keeps growing headless before a window exists:
 
 1. **006 — approval policies in the daemon:** the two policies for trigger code and paper orders, their pending lifecycles, the routes that resolve them, and the gate scenarios for the second and third evidence lines. Daemon-only, and it settles the REST surface the frontend is generated from.
 2. **007 — shell and control plane:** the Tauri shell, the OpenAPI-generated client, the three-panel frontend over the real terminal, the event tail, and the desktop and notification approval surfaces; brings the frontend toolchain and its checks into CI.
