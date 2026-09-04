@@ -208,13 +208,13 @@ a desk's real terminal attaches, survives a tray hide and reopen, and keeps work
 
 **Why here:** the control plane is cheapest to build once the daemon's surface has stopped moving, and nothing before it needs a window — the loop is already proven headless by R4; approvals ride with it because the approval boundary is worth little until something can present the prompt.
 
-**Planned slices (2026-09-04):** one feature folder, three slices, each scoped to one agent session, in this order so the gate keeps growing headless before a window exists:
+**Planned slices (2026-09-04):** one feature folder, three slices, in this order so the gate keeps growing headless before a window exists:
 
 1. **006 — approval policies in the daemon:** the two policies for trigger code and paper orders, their pending lifecycles, the routes that resolve them, and the gate scenarios for the second and third evidence lines. Daemon-only, and it settles the REST surface the frontend is generated from.
 2. **007 — shell and control plane:** the Tauri shell, the OpenAPI-generated client, the three-panel frontend over the real terminal, the event tail, and the desktop and notification approval surfaces; brings the frontend toolchain and its checks into CI.
 3. **008 — tray, Quit, and the packaged smoke:** close-hides-to-tray and Quit on both platforms, and the WebdriverIO packaged smoke from a wiped per-user root, the last evidence line.
 
-The feature docs settle the pending-approval rows and their events before slicing, since both the gate and the frontend build on them. A slice is one agent session's worth of work: part of one roadmap item, or several small ones together.
+The feature docs settle the pending-approval rows and their events before slicing, since both the gate and the frontend build on them.
 
 Dependencies: Milestone R4.
 
