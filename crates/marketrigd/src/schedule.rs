@@ -763,8 +763,9 @@ fn seed(store: &Store, rows: Vec<String>) {
                 [],
             )?;
             tx.execute(
-                "INSERT INTO code_snapshots VALUES \
-                 ('c1','d1','print(1)','.py','[\"{script}\"]',300,'ff',1,1)",
+                "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, \
+                 timeout_secs, fingerprint, approval, decided_at_ns, created_at_ns) VALUES \
+                 ('c1','d1','print(1)','.py','[\"{script}\"]',300,'ff','ALWAYS_ALLOW',1,1)",
                 [],
             )?;
             for sql in &rows {

@@ -15,7 +15,7 @@
 | Route | Body | Answers |
 | --- | --- | --- |
 | `GET /settings/policies` | — | `200 {trigger_code_policy, paper_order_policy, delivery_mode, steer_available: false, updated_at_ns}` |
-| `PUT /settings/policies` | any subset of `{trigger_code_policy, paper_order_policy, delivery_mode}` | `200` the resource; `400 VALIDATION` (unknown value, empty object); `409 STEER_DISABLED` |
+| `PUT /settings/policies` | any subset of `{trigger_code_policy, paper_order_policy, delivery_mode}` | `200` the resource; `400 VALIDATION` (unknown field, unknown value, empty object); `409 STEER_DISABLED` |
 
 Vocabulary: `ALWAYS_ALLOW | REQUIRE_APPROVAL` for the two policies; `delivery_mode` admits only `QUEUE`. Each field that changes appends `POLICY_CHANGED {field, from, to}` (installation-wide, `desk_id` null) in the same unit as the update; a `PUT` that changes nothing writes nothing and answers `200`. The unit that inserts a code snapshot (§3.2) or a trading action (§3.3) reads its column with `SELECT … FROM installation_settings WHERE id = 1` inside its own transaction.
 

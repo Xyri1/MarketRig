@@ -10,6 +10,7 @@ pub mod feed;
 pub mod log;
 pub mod memory;
 pub mod node;
+pub mod policy;
 pub mod runtime;
 pub mod schedule;
 pub mod session;

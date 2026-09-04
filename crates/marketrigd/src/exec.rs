@@ -845,8 +845,8 @@ fn seed_firing(
         .unit(move |tx| {
             tx.execute(
                 "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
-                 fingerprint, approved_at_ns, created_at_ns) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'fp', 1, 1)",
+                 fingerprint, approval, decided_at_ns, created_at_ns) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'fp', 'ALWAYS_ALLOW', 1, 1)",
                 params![snapshot, desk_id, source, suffix, argv, timeout_secs],
             )?;
             tx.execute(

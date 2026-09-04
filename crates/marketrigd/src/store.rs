@@ -122,6 +122,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/003_r2.sql"),
     include_str!("store/004_r3.sql"),
     include_str!("store/005_r4.sql"),
+    include_str!("store/006_r5.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -255,7 +256,11 @@ impl Store {
 fn prepare(path: &Path) -> Result<Connection, StoreError> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
-    conn.pragma_update(None, "foreign_keys", true)?;
+    // SQLite's documented ALTER TABLE procedure: enforcement stays off for the
+    // migration window, so a migration can rebuild a table other tables
+    // reference (migration 6 rebuilds `code_snapshots`). The pragma is a no-op
+    // inside a transaction, which is why it is set here and not in the SQL.
+    conn.pragma_update(None, "foreign_keys", false)?;
 
     let applied: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     let newest = MIGRATIONS.len() as i64;
@@ -271,6 +276,7 @@ fn prepare(path: &Path) -> Result<Connection, StoreError> {
         tx.pragma_update(None, "user_version", i as i64 + 1)?;
         tx.commit()?;
     }
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(conn)
 }
 
@@ -337,6 +343,7 @@ fn migrations_apply_and_stamp() {
             "executions",
             "fills",
             "firings",
+            "installation_settings",
             "memory_child",
             "memory_provider",
             "native_sessions",
@@ -1052,4 +1059,260 @@ fn memory_migration_applies() {
             .is_err(),
         "an unknown memory kind must be rejected"
     );
+}
+
+// ---------------------------------------------------------------------------
+// store (R5 feature SPEC §8 check 7)
+// ---------------------------------------------------------------------------
+
+/// Migration 6 (feature SPEC `r5-desktop-approval-controls` §2, §3): a fresh
+/// database carries the seeded settings row and the approval vocabulary, and a
+/// migration-5 database upgrades in place — every row intact, both gated tables
+/// backfilled `ALWAYS_ALLOW` with `decided_at_ns = created_at_ns`,
+/// `approved_at_ns` gone, and the three new event kinds accepted.
+#[cfg(test)]
+#[test]
+fn approval_migration_applies() {
+    let (_dir, store) = open_temp();
+    let strict: i64 = store
+        .call(|c| {
+            c.query_row(
+                "SELECT strict FROM pragma_table_list WHERE schema = 'main' \
+                 AND name = 'installation_settings'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(strict, 1, "installation_settings must be STRICT");
+    let seeded: (i64, String, String, String, i64) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT count(*), trigger_code_policy, paper_order_policy, delivery_mode, \
+                 updated_at_ns FROM installation_settings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        seeded,
+        (
+            1,
+            "REQUIRE_APPROVAL".to_string(),
+            "ALWAYS_ALLOW".to_string(),
+            "QUEUE".to_string(),
+            0
+        )
+    );
+    // The row is one row, and steering is refused by the column itself.
+    for sql in [
+        "INSERT INTO installation_settings VALUES (2,'ALWAYS_ALLOW','ALWAYS_ALLOW','QUEUE',1)",
+        "UPDATE installation_settings SET delivery_mode = 'STEER' WHERE id = 1",
+        "UPDATE installation_settings SET trigger_code_policy = 'MAYBE' WHERE id = 1",
+    ] {
+        assert!(
+            store.unit(move |tx| tx.execute(sql, [])).is_err(),
+            "{sql} must be rejected"
+        );
+    }
+    drop(store);
+
+    // A migration-5 database upgrades in place. Its snapshot is referenced by a
+    // trigger and by a firing, which is what the rebuild has to keep valid.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..5] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
+                 fingerprint, approved_at_ns, created_at_ns) \
+               VALUES ('s0','0199','print(1)','.py','[\"{script}\"]',300,'ff',1100,1100);
+             INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                 enabled, revision, code_snapshot_id, next_occurrence_ns, created_at_ns, \
+                 updated_at_ns) \
+               VALUES ('t0','0199','morning','SCHEDULED','ONE_OFF','Check the tape.',9000, \
+                 1,1,'s0',9000,1100,1100);
+             INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+                 trigger_revision, brief, code_snapshot_id) \
+               VALUES ('f0','0199','t0',9000,9001,1,'Check the tape.','s0');
+             INSERT INTO trading_actions (desk_id, action_id, id, kind, source, trigger_id, \
+                 firing_id, request, outcome, created_at_ns) \
+               VALUES ('0199','a0','i0','SUBMIT','TRIGGER','t0','f0','{\"q\":\"1\"}', \
+                 '{\"status\":\"FILLED\"}',1200);
+             INSERT INTO operational_events VALUES ('e0','MEMORY_RETAINED','0199',1300,'{}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 5i64).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        MIGRATIONS.len() as i64,
+        "migration 6 applied"
+    );
+
+    // Every row survives, both references still resolve, and the backfill is
+    // ALWAYS_ALLOW with decided_at_ns = created_at_ns.
+    #[allow(clippy::type_complexity)]
+    let carried: (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        i64,
+        String,
+        i64,
+    ) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT name FROM desks), \
+                 (SELECT source FROM code_snapshots WHERE id = 's0'), \
+                 (SELECT code_snapshot_id FROM triggers WHERE id = 't0'), \
+                 (SELECT code_snapshot_id FROM firings WHERE id = 'f0'), \
+                 (SELECT count(*) FROM operational_events), \
+                 (SELECT approval FROM code_snapshots WHERE id = 's0'), \
+                 (SELECT decided_at_ns FROM code_snapshots WHERE id = 's0'), \
+                 (SELECT approval FROM trading_actions WHERE id = 'i0'), \
+                 (SELECT decided_at_ns FROM trading_actions WHERE id = 'i0')",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        (
+            "alpha".to_string(),
+            "print(1)".to_string(),
+            "s0".to_string(),
+            "s0".to_string(),
+            1,
+            "ALWAYS_ALLOW".to_string(),
+            1100,
+            "ALWAYS_ALLOW".to_string(),
+            1200,
+        )
+    );
+    // The trading action kept its firing attribution and its outcome.
+    let action: (String, String, String, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT source, trigger_id, firing_id, outcome FROM trading_actions \
+                 WHERE id = 'i0'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        action,
+        (
+            "TRIGGER".to_string(),
+            "t0".to_string(),
+            "f0".to_string(),
+            "{\"status\":\"FILLED\"}".to_string(),
+        )
+    );
+    // Nothing dangles: the rebuild re-pointed both referrers at the new table.
+    let violations: i64 = store
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(violations, 0, "no dangling reference after the rebuild");
+
+    // R2's approved_at_ns is gone from both tables; the two new columns are there.
+    let columns = |table: &'static str| -> Vec<String> {
+        store
+            .call(move |c| {
+                c.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")?
+                    .query_map([table], |r| r.get::<_, String>(0))?
+                    .collect()
+            })
+            .unwrap()
+    };
+    for table in ["code_snapshots", "trading_actions"] {
+        let names = columns(table);
+        assert!(
+            !names.iter().any(|n| n == "approved_at_ns"),
+            "{table} still carries approved_at_ns: {names:?}"
+        );
+        for column in ["approval", "decided_at_ns"] {
+            assert!(names.iter().any(|n| n == column), "{table} lacks {column}");
+        }
+    }
+
+    // The state vocabulary and its one invariant hold on both tables.
+    for table in ["code_snapshots", "trading_actions"] {
+        for (approval, decided) in [("BOGUS", "1"), ("PENDING", "1"), ("APPROVED", "NULL")] {
+            let sql =
+                format!("UPDATE {table} SET approval = '{approval}', decided_at_ns = {decided}");
+            assert!(
+                store.unit(move |tx| tx.execute(&sql, [])).is_err(),
+                "{table} must reject {approval} with decided_at_ns {decided}"
+            );
+        }
+        let sql = format!("UPDATE {table} SET approval = 'PENDING', decided_at_ns = NULL");
+        store.unit(move |tx| tx.execute(&sql, [])).unwrap();
+    }
+
+    // The widened vocabulary accepts the three R5 kinds and still refuses the rest.
+    for (n, kind) in ["POLICY_CHANGED", "APPROVAL_REQUESTED", "APPROVAL_DECIDED"]
+        .into_iter()
+        .enumerate()
+    {
+        store
+            .unit(move |tx| {
+                tx.execute(
+                    "INSERT INTO operational_events VALUES (?1, ?2, NULL, ?3, '{}')",
+                    rusqlite::params![format!("p{n}"), kind, 2000 + n as i64],
+                )
+            })
+            .unwrap_or_else(|e| panic!("{kind} must be accepted: {e}"));
+    }
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO operational_events VALUES ('p9','APPROVAL_WOBBLED',NULL,3000,'{}')",
+                [],
+            ))
+            .is_err(),
+        "an unknown approval kind must be rejected"
+    );
+    // The tail index is back on the rebuilt table.
+    let index: String = store
+        .call(|c| {
+            c.query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'operational_events' AND sql IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(index, "operational_events_tail");
 }

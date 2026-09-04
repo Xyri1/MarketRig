@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 use crate::desk::{self, Desk, DeskError};
 use crate::memory::{self, MemoryError};
+use crate::policy::{self, PolicyError};
 use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
 use crate::trigger::{self, TriggerError};
@@ -115,6 +116,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks/{desk_id}/memory/reflect", post(memory_reflect))
         .route("/desks/{desk_id}/prompts", get(list_prompts))
         .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
+        .route("/settings/policies", get(policies).put(put_policies))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .with_state(state)
@@ -218,6 +220,19 @@ impl IntoResponse for MemoryError {
             MemoryError::Timeout => StatusCode::GATEWAY_TIMEOUT,
             MemoryError::Error(_) | MemoryError::ProviderUnreachable(_) => StatusCode::BAD_GATEWAY,
             MemoryError::Desk(_) => unreachable!("answered above"),
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The R5 §2 code-to-status map, appended the same way. `PolicyError::code()`
+/// owns the code; this owns the status.
+impl IntoResponse for PolicyError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            PolicyError::Validation(_) => StatusCode::BAD_REQUEST,
+            PolicyError::SteerDisabled => StatusCode::CONFLICT,
+            PolicyError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -1228,6 +1243,27 @@ async fn show_prompt(
     Path((desk_id, prompt_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, TriggerError> {
     Ok(Json(trigger::prompt(&state.store, &desk_id, &prompt_id)?))
+}
+
+// The installation policies (R5 feature SPEC §2). Nothing here decides an
+// approval; a policy change affects only records created after it.
+
+async fn policies(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<policy::Resource>, PolicyError> {
+    Ok(Json(policy::get(&state.store)?))
+}
+
+async fn put_policies(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<policy::Resource>, PolicyError> {
+    let body: serde_json::Value = is_json(&headers)
+        .then(|| serde_json::from_str(&body).ok())
+        .flatten()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(Json(policy::put(&state.store, &body, store::now_ns())?))
 }
 
 /// Answers, then asks the daemon to shut down (§4.2). A full or closed channel
@@ -3089,4 +3125,85 @@ async fn memory_routes() {
     for secret in ["a lesson", "from a trigger", "what did I learn"] {
         assert!(!written.contains(secret), "{secret:?} reached an event");
     }
+}
+
+// ---------------------------------------------------------------------------
+// api::policy_routes (R5 feature SPEC §8 check 1, the route half)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+fn call_put(url: String, bearer: Option<&str>, body: &str) -> (u16, String) {
+    let mut request = agent().put(url).header("content-type", "application/json");
+    if let Some(token) = bearer {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    read(request.send(body))
+}
+
+/// `GET`/`PUT /settings/policies` (§2): both sit behind the bearer, and
+/// `PolicyError` reaches the wire as the one envelope with its own status.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn policy_routes() {
+    let served = serve().await;
+    let policies = format!("{}/settings/policies", served.base);
+    let ok = Some(CREDENTIAL);
+
+    // --- Every new route sits behind the bearer ----------------------------
+    for bearer in [None, Some("wrong-credential")] {
+        expect_envelope(call_get(policies.clone(), bearer), 401, "UNAUTHORIZED");
+        expect_envelope(
+            call_put(policies.clone(), bearer, "{}"),
+            401,
+            "UNAUTHORIZED",
+        );
+    }
+
+    let (status, body) = call_get(policies.clone(), ok);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        json(&body),
+        serde_json::json!({
+            "trigger_code_policy": "REQUIRE_APPROVAL",
+            "paper_order_policy": "ALWAYS_ALLOW",
+            "delivery_mode": "QUEUE",
+            "steer_available": false,
+            "updated_at_ns": 0,
+        })
+    );
+
+    // The three refusals of §2, each with its own status.
+    expect_envelope(call_put(policies.clone(), ok, "{}"), 400, "VALIDATION");
+    expect_envelope(
+        call_put(policies.clone(), ok, r#"{"trigger_code_policy":"MAYBE"}"#),
+        400,
+        "VALIDATION",
+    );
+    expect_envelope(
+        call_put(
+            policies.clone(),
+            ok,
+            r#"{"delivery_mode":"QUEUE","nope":"x"}"#,
+        ),
+        400,
+        "VALIDATION",
+    );
+    expect_envelope(
+        call_put(policies.clone(), ok, r#"{"delivery_mode":"STEER"}"#),
+        409,
+        "STEER_DISABLED",
+    );
+
+    let (status, body) = call_put(
+        policies.clone(),
+        ok,
+        r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(json(&body)["trigger_code_policy"], "ALWAYS_ALLOW");
+    assert!(json(&body)["updated_at_ns"].as_i64().unwrap() > 0);
+    assert_eq!(
+        json(&call_get(policies, ok).1)["trigger_code_policy"],
+        "ALWAYS_ALLOW"
+    );
 }

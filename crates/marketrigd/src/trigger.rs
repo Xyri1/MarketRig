@@ -211,13 +211,14 @@ impl Snapshot {
         })
     }
 
-    /// One immutable row (§7). R2's approval is the fixed **Always allow**, so
-    /// `approved_at_ns` is `created_at_ns` (per R2-3).
+    /// One immutable row (§7). Every snapshot is **Always allow** until the
+    /// policy read lands here (R5 feature SPEC §3.2).
     fn insert(&self, tx: &Transaction<'_>, desk_id: &str, now_ns: i64) -> rusqlite::Result<String> {
         let id = Uuid::now_v7().to_string();
         tx.execute(
             "INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
-             fingerprint, approved_at_ns, created_at_ns) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+             fingerprint, approval, decided_at_ns, created_at_ns) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ALWAYS_ALLOW', ?8, ?8)",
             params![
                 id,
                 desk_id,
@@ -326,7 +327,7 @@ fn trigger_select(with_source: bool) -> String {
         "SELECT t.id, t.desk_id, t.name, t.recurrence, t.brief, t.context, \
          t.at_ns, t.rrule, t.dtstart, t.tz, t.enabled, t.revision, t.next_occurrence_ns, \
          t.created_at_ns, t.updated_at_ns, t.deleted_at_ns, c.id, {}, c.suffix, c.argv, \
-         c.timeout_secs, c.fingerprint, c.approved_at_ns, length(CAST(c.source AS BLOB)) \
+         c.timeout_secs, c.fingerprint, c.decided_at_ns, length(CAST(c.source AS BLOB)) \
          FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id",
         if with_source { "c.source" } else { "NULL" }
     )
@@ -353,6 +354,8 @@ fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
                 "argv": serde_json::from_str::<Value>(&argv).unwrap_or(Value::Null),
                 "timeout_secs": r.get::<_, i64>(20)?,
                 "fingerprint": r.get::<_, String>(21)?,
+                // Derived from `decided_at_ns`; absent once a snapshot can
+                // be PENDING or DENIED (R5 feature SPEC §3.2).
                 "approved_at_ns": r.get::<_, Option<i64>>(22)?,
                 "source_bytes": r.get::<_, i64>(23)?,
                 "source": with_source.then_some(source).flatten(),

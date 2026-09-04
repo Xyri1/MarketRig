@@ -901,8 +901,9 @@ fn begin(
     let inserted = store.unit(move |tx| {
         tx.execute(
             "INSERT INTO trading_actions \
-             (desk_id, action_id, id, kind, source, trigger_id, firing_id, request, created_at_ns) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (desk_id, action_id, id, kind, source, trigger_id, firing_id, request, \
+              approval, decided_at_ns, created_at_ns) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ALWAYS_ALLOW', ?9, ?9)",
             params![
                 desk,
                 row.action_id,
