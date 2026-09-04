@@ -1094,6 +1094,35 @@ fn closed_loop(scenario: &str, cell: &str, runtime: &str) {
     let console = console::attach(&endpoint, &desk_id);
     let tree = skills(&workspace);
 
+    // E4 started its session through a one-off's firing; here nothing is due,
+    // so the harness activates a fresh session on the desk's selected runtime
+    // itself (R3 feature SPEC §7), and the operator answers the first launch.
+    let (status, activated) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/activate"),
+        Some(r#"{"mode":"NEW"}"#),
+    );
+    assert_eq!(status, 202, "the runtime must be activatable: {activated}");
+    if !waited(PATIENCE, "the session to become ready", || {
+        !kinds(&g, &desk_id, "SESSION_READY").is_empty()
+    }) {
+        g.inconclusive(
+            scenario,
+            "the launch never reached readiness — the operator may not have answered its first-launch questions",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    g.note(
+        scenario,
+        "MarketRig started the runtime and the launch reached readiness",
+        json!({ "activation": kinds(&g, &desk_id, "SESSION_STARTED") }),
+    );
+
     let cycles = |g: &Harness| -> i64 {
         g.scalar(
             "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
