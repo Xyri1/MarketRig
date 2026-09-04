@@ -175,6 +175,35 @@ impl Contained {
             tracing::warn!(error = %e, "terminating a contained process group failed");
         }
     }
+
+    /// Asks the leader to end on its own before ending the group: `SIGTERM`,
+    /// then up to `grace` for the exit, then [`Self::terminate`]. For a child
+    /// that daemonizes work outside its own session (the memory child's
+    /// embedded PostgreSQL, started by `pg0` and stopped only from Hindsight's
+    /// `SIGTERM` handler), the signal is the one thing that reaches it.
+    ///
+    /// ponytail: on Windows there is no `SIGTERM`, so this is the plain kill and
+    /// a daemonized grandchild survives; a `pg0 stop --name marketrig` run from
+    /// beside the launcher is the upgrade the day Windows E5 shows the orphan.
+    pub async fn terminate_gracefully(&mut self, grace: std::time::Duration) {
+        #[cfg(unix)]
+        if let Some(pid) = self.id() {
+            // SAFETY: a plain signal send to a pid this daemon spawned.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+            let deadline = tokio::time::Instant::now() + grace;
+            while tokio::time::Instant::now() < deadline {
+                if !matches!(self.try_wait(), Ok(None)) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        #[cfg(windows)]
+        let _ = grace;
+        self.terminate().await;
+    }
 }
 
 // ---------------------------------------------------------------------------

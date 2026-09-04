@@ -151,6 +151,10 @@ pub struct Memory {
 const LONG_TIMEOUT: Duration = Duration::from_secs(180);
 /// Recall (§4.3).
 const RECALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a stop waits for the child to end itself after `SIGTERM` before the
+/// group is killed (§2.3): Hindsight takes its embedded PostgreSQL down in about
+/// a second, and Quit's whole budget is five.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 
 impl Memory {
     pub fn new(store: Store, roots: Roots, daemon_uuid: String) -> io::Result<Memory> {
@@ -964,10 +968,10 @@ impl Memory {
             // The data root carries no `.env` for the launcher's dotenv loader.
             .current_dir(&self.roots.data)
             .stdin(Stdio::null())
+            // Both streams feed the one tail: the launcher logs to standard
+            // output, and a startup failure's traceback goes to standard error.
             .stdout(Stdio::piped())
-            // Spike H: the launcher logs to standard output and leaves standard
-            // error empty, so there is nothing here worth a pipe and a task.
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         command.env_clear();
         for (key, value) in &launch.env {
             command.env(key, value);
@@ -989,12 +993,13 @@ impl Memory {
         };
         let pid = child.id().unwrap_or_default();
         let stdout = child.take_stdout();
+        let stderr = child.take_stderr();
         let mut live = self.live.lock().await;
         // A stop that landed while the spawn was in flight ends this start
         // before it is recorded or supervised, so nothing is orphaned (§2.3).
         if live.generation != generation {
             drop(live);
-            child.terminate().await;
+            child.terminate_gracefully(STOP_GRACE).await;
             return Err(MemoryError::Unavailable(LOST_MESSAGE.to_string()));
         }
         live.pid = Some(pid);
@@ -1017,7 +1022,13 @@ impl Memory {
             key: launch.key.clone(),
             generation,
         };
-        tokio::spawn(supervise(context(), stdout));
+        if let Some(reader) = stdout {
+            tokio::spawn(drain(context(), reader));
+        }
+        if let Some(reader) = stderr {
+            tokio::spawn(drain(context(), reader));
+        }
+        tokio::spawn(supervise(context()));
         tokio::spawn(await_ready(
             context(),
             self.http.clone(),
@@ -1047,11 +1058,12 @@ impl Memory {
             (child, pid)
         };
         if let Some(mut child) = child {
-            child.terminate().await;
+            child.terminate_gracefully(STOP_GRACE).await;
         }
         if let Some(pid) = pid {
             crate::daemon::forget_child(&self.roots, pid);
         }
+        reap_postgres(&self.roots);
     }
 }
 
@@ -1110,6 +1122,32 @@ async fn await_ready(
     }
 }
 
+/// The embedded PostgreSQL the child started under our redirected `HOME` and,
+/// when it crashed rather than handled `SIGTERM`, left running (§2.3). pg0
+/// keeps the postmaster's pid as the first line of `postmaster.pid`; a
+/// `SIGTERM` there is PostgreSQL's own smart shutdown.
+///
+/// ponytail: knows pg0's instance layout for the one instance name §2.2 sets;
+/// on Windows it does nothing and the orphan waits for a `pg0 stop`.
+fn reap_postgres(roots: &Roots) {
+    let path = roots
+        .data
+        .join("hindsight/.pg0/instances/marketrig/data/postmaster.pid");
+    let Some(pid) = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| raw.lines().next()?.trim().parse::<i32>().ok())
+    else {
+        return;
+    };
+    #[cfg(unix)]
+    // SAFETY: a plain signal send to a pid recorded under this daemon's own root.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    #[cfg(windows)]
+    let _ = pid;
+}
+
 /// Everything one start's supervisor needs; it outlives the call that started
 /// the child, so it carries clones rather than a borrow of [`Memory`].
 struct Supervisor {
@@ -1120,33 +1158,32 @@ struct Supervisor {
     generation: u64,
 }
 
-/// One task per start: the child's standard output into the tail, and the
-/// child's exit into a loss (§2.2, §2.3).
+/// Per start: one `drain` task per stream into the tail, and `supervise`,
+/// which turns the child's exit into a loss (§2.2, §2.3).
 ///
 /// ponytail: a quarter-second poll for the exit rather than an owned `wait()`,
 /// so the handle can stay in [`Live`] where [`Memory::stop_child`] reaches it
 /// without a second channel. Give the child its own watch channel the day a
 /// quarter second of loss latency matters.
-async fn supervise(context: Supervisor, stdout: Option<tokio::process::ChildStdout>) {
-    let mut stdout = stdout;
+async fn drain(context: Supervisor, mut reader: impl tokio::io::AsyncRead + Unpin) {
     let mut buffer = [0u8; 1024];
     loop {
-        if let Some(reader) = stdout.as_mut() {
-            match tokio::time::timeout(WATCH_POLL, reader.read(&mut buffer)).await {
-                Ok(Ok(0)) | Ok(Err(_)) => stdout = None,
-                Ok(Ok(read)) => {
-                    let mut live = context.live.lock().await;
-                    if live.generation != context.generation {
-                        return;
-                    }
-                    live.push_output(&buffer[..read]);
-                    continue;
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => {
+                let mut live = context.live.lock().await;
+                if live.generation != context.generation {
+                    return;
                 }
-                Err(_elapsed) => {}
+                live.push_output(&buffer[..read]);
             }
-        } else {
-            tokio::time::sleep(WATCH_POLL).await;
         }
+    }
+}
+
+async fn supervise(context: Supervisor) {
+    loop {
+        tokio::time::sleep(WATCH_POLL).await;
         let exit_code = {
             let mut live = context.live.lock().await;
             if live.generation != context.generation {
@@ -1206,11 +1243,10 @@ async fn lose(
         };
         (child, pid, last, losses >= 2)
     };
-    if let Some(mut child) = child {
-        child.terminate().await;
-    }
+    // The record and the event go first: the loss is decided the moment the
+    // state flips, and the grace below is the child's to spend, not a reader's
+    // of `children.json` or of the events.
     crate::daemon::forget_child(roots, pid);
-
     let at_ns = now_ns();
     let recorded = store.unit(move |tx| {
         append_event(
@@ -1239,6 +1275,10 @@ async fn lose(
     if let Err(e) = recorded {
         tracing::error!(error = %e, "recording the memory child's loss failed");
     }
+    if let Some(mut child) = child {
+        child.terminate_gracefully(STOP_GRACE).await;
+    }
+    reap_postgres(roots);
 }
 
 /// The first line of a message the daemon reports (§4.3).
@@ -2258,8 +2298,9 @@ fn fake_hindsight_main() {
             if let Some(after) = exit_after {
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(after)).await;
-                    println!("{FAKE_LAST_LINE}");
-                    let _ = io::stdout().flush();
+                    // Standard error, like a startup failure's traceback.
+                    eprintln!("{FAKE_LAST_LINE}");
+                    let _ = io::stderr().flush();
                     // Straight out, so the harness's own summary is not the
                     // last line of the tail.
                     std::process::exit(1);
@@ -2288,6 +2329,9 @@ fn fake_hindsight_main() {
 /// A launcher that answers the `--help` probe the way the real one does and
 /// otherwise re-executes this test binary as [`fake_hindsight_main`].
 #[cfg(test)]
+/// The launcher script. On unix it mirrors the real one's shape: a grandchild
+/// daemonized into its own session (`pg0`'s PostgreSQL), taken down only by the
+/// launcher's own `TERM` handler, so a stop that skips the signal leaves it.
 fn fake_launcher(
     dir: &Path,
     name: &str,
@@ -2329,9 +2373,14 @@ fn fake_launcher(
                  echo 'sentence-transformers is not installed' >&2\n\
                  exit 0\n\
                  fi\n\
+                 perl -e 'use POSIX; setsid(); exec \"sleep\", \"20\"' & GC=$!\n\
+                 mkdir -p \"$HOME/.pg0/instances/marketrig/data\"\n\
+                 echo $GC > \"$HOME/.pg0/instances/marketrig/data/postmaster.pid\"\n\
+                 trap 'kill $GC $CHILD 2>/dev/null; exit 0' TERM\n\
                  MARKETRIG_FAKE_HEALTH_AFTER_MS={health_after_ms} \
                  MARKETRIG_FAKE_EXIT_AFTER_MS={exit} \
-                 exec '{exe}' 'memory::fake_hindsight_main' --exact --nocapture\n"
+                 '{exe}' 'memory::fake_hindsight_main' --exact --nocapture & CHILD=$!\n\
+                 wait $CHILD\n"
             ),
         )
         .unwrap();
@@ -3241,6 +3290,64 @@ async fn a_starting_child_is_unavailable_not_a_timeout() {
         events(&memory.store)
             .iter()
             .any(|(kind, _)| kind == "MEMORY_STARTED")
+    );
+    memory.stop_child().await;
+}
+
+/// Stopping the child ends the work it daemonized outside its own session,
+/// because the stop is `SIGTERM` first and the group kill after (§2.3; found
+/// by the E5 cells, which left an embedded PostgreSQL behind).
+#[cfg(all(test, unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_the_child_takes_its_daemonized_grandchild() {
+    let (_dir, memory) = scratch();
+    let bin = tempfile::tempdir().unwrap();
+    configured(&memory, &fake_launcher(bin.path(), "pg", 0, None)).await;
+    memory.ensure_ready().await.unwrap();
+    let pid_file = memory
+        .roots
+        .data
+        .join("hindsight/.pg0/instances/marketrig/data/postmaster.pid");
+    let grandchild: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+    assert!(alive(grandchild), "the launcher daemonized a grandchild");
+
+    let began = std::time::Instant::now();
+    memory.stop_child().await;
+    assert!(
+        began.elapsed() < STOP_GRACE,
+        "the child ended on the signal, not the kill"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!alive(grandchild), "the grandchild went with it");
+    assert_eq!(memory.live.lock().await.state, LiveState::NotStarted);
+
+    // A crash never runs the launcher's handler (pg0 stays up after a startup
+    // failure); the loss reaps what `postmaster.pid` names.
+    configured(&memory, &fake_launcher(bin.path(), "crash", 0, Some(2_000))).await;
+    memory.ensure_ready().await.unwrap();
+    let grandchild: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(grandchild));
+    let waited = tokio::time::Instant::now() + Duration::from_secs(5);
+    while memory.live.lock().await.state != LiveState::Lost {
+        assert!(
+            tokio::time::Instant::now() < waited,
+            "the crash never became a loss"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !alive(grandchild),
+        "the loss reaped the orphaned grandchild"
     );
     memory.stop_child().await;
 }
