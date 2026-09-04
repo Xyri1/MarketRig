@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0, R1, R2, and R3 are delivered; Milestone R4's design is next.
+Milestones R0 through R4 are delivered; Milestone R5's design is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -148,9 +148,9 @@ Dependencies: Milestone R2.
 
 ## Milestone R4 — Memory, skills, and the closed loop
 
-**Design complete 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC); the active implementation plan is [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
+**Delivered 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC) and implemented in [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Its eight module checks, the gate's G33–G37, and the static checks are green on macOS (bundle `gate-1788509422`, and the run after the stop fix); Windows CI run 33862124921 is `<pending>`. E5 attended on both macOS cells on 2026-09-04.
 
-This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65.
+This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65, and settles their mechanics as D81. Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
 
 **Goal:** Close the loop — an outcome becomes a retained lesson that a later session reuses.
 
@@ -173,6 +173,8 @@ a realized-P&L evaluation prompt reaches a live session
 -> Hindsight stopped: sessions, triggers, and paper trading continue, and the
    failure is explicit
 ```
+
+**Produced** by the gate's G33–G37 on macOS (bundle `gate-1788509422`, G1–G37) — the provider configured and the key and bearer absent from the database, the log root, and every event; one lesson retained on `alpha` and invisible to `beta`, and a trigger's own script retaining with both identifiers; the `EVALUATION` prompt of a closed cycle read as the stand-in session's own `INPUT` line, followed by the retain and the skill edit the harness performs through public surfaces; a later session recalling that lesson and reading the improved skill through `.claude/skills` after a runtime switch; and the child lost, restarted once, then `UNAVAILABLE` while a firing, an order, and an activation succeed, ending with a hard kill whose child the next start reaps — and by the attended E5 on both macOS cells, on `hindsight-api-slim[embedded-db]==0.9.2` behind OpenRouter (`z-ai/glm-5.3-flash`, `openai/text-embedding-3-small`): a real session closed one AAPL.XNAS cycle, took the `EVALUATION`, retained a lesson tagged `lesson` and the instrument, edited its own improvement skill, and recalled the lesson after an exit and a resume, with the second desk's bank empty and the provider key present only in the relocated credential file (bundles `experiment-e5-codex-1788514468`, Codex CLI 0.153.2, and `experiment-e5-claude-1788515113`, Claude Code 2.1.260).
 
 **Why here:** it is the last piece of the loop, and retention is only meaningful once a realized outcome can actually reach a live session, which needs R1 and R3 both standing. At the end of this milestone the product thesis is proven without a desktop.
 
