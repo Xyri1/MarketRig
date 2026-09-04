@@ -1,6 +1,6 @@
 # Slice 004 — R3 runtime adapters and delivery
 
-**Status:** Active 2026-09-02
+**Status:** Frozen 2026-09-04 — exit checks green on macOS and Windows CI (run 33747939130, commit 3a05223); macOS gate bundle `gate-1788433079` (G1–G32); E4 attended on the macOS cells on 2026-09-03 at 54e5d58 (the bridge-after-`initialized` fix it exposed landed as 9156724) — bundles `experiment-e4-codex-1788411421` and `experiment-e4-claude-1788411080`, codex-cli 0.152.1 and Claude Code 2.1.259 — and on the Windows cells on 2026-09-04 on the tree of 3a05223 — bundles `experiment-e4-codex-1788491136` and `experiment-e4-claude-1788491543`, codex-cli 0.153.0 and Claude Code 2.1.260
 **Implements:** all of [`features/r3-runtime-delivery/`](../features/r3-runtime-delivery/SPEC.md)
 **Exit:** feature SPEC §10 in full — the eight module checks, gate G27–G32 after G26, and the static checks green on macOS and Windows CI, plus E4 attended once per platform-and-runtime cell (agent-behavior aspects end inconclusive rather than failed, root §17).
 

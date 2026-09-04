@@ -1,7 +1,7 @@
 # R3 — Runtime adapters and delivery: Feature PRD
 
 **Milestone:** [R3](../../ROADMAP.md#milestone-r3--runtime-adapters-and-delivery)
-**Status:** Design complete — PRD, DECISIONS, and SPEC accepted 2026-09-02
+**Status:** Design complete — PRD, DECISIONS, and SPEC accepted 2026-09-02; delivered 2026-09-04 through [`slices/004-r3-runtime-delivery.md`](../../slices/004-r3-runtime-delivery.md) (frozen) and merged into the root set as D80
 
 This feature designs Milestone R3: the half of the loop that reaches a real agent. It refines `sdd/SPEC.md` §4.4, §6, §7, §11, §13.1, §15, and §17 and invents nothing beyond them.
 

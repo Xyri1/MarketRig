@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0, R1, and R2 are delivered; Milestone R3's design is next.
+Milestones R0, R1, R2, and R3 are delivered; Milestone R4's design is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -113,9 +113,9 @@ Dependencies: Milestone R1.
 
 ## Milestone R3 — Runtime adapters and delivery
 
-This milestone realizes the choices recorded per D3, D24, D25, D27, D28, D31, D32, D36, and D69.
+**Delivered 2026-09-04** — designed in [`features/r3-runtime-delivery/`](features/r3-runtime-delivery/PRD.md) (PRD, DECISIONS R3-1 … R3-9, SPEC) and implemented in [`slices/004-r3-runtime-delivery.md`](slices/004-r3-runtime-delivery.md). Its eight module checks, the gate's G27–G32, and the static checks are green on macOS and Windows CI (run 33747939130, commit 3a05223); E4 attended on all four cells on 2026-09-03 and 2026-09-04.
 
-**Design complete 2026-09-02** — PRD, DECISIONS (R3-1 … R3-8), and SPEC in [`features/r3-runtime-delivery/`](features/r3-runtime-delivery/PRD.md); implementation planned in [`slices/004-r3-runtime-delivery.md`](slices/004-r3-runtime-delivery.md) (active). Runtime facts verified against Codex CLI 0.152.1 and Claude Code 2.1.258, which become the version floors.
+This milestone realizes the choices recorded per D3, D24, D25, D27, D28, D31, D32, D36, and D69, and settles their mechanics as D80. Runtime facts were verified against Codex CLI 0.152.1 and Claude Code 2.1.258, which are the version floors.
 
 **Goal:** Make the harness reach a real agent, and let it exit and come back.
 
@@ -139,6 +139,8 @@ a trigger fires for a desk with no live session
 -> a queued realized-P&L evaluation waits behind active work and then arrives
 -> the desk switches runtime and keeps its identity, history, and book
 ```
+
+**Produced** by the gate's G28–G32 on both platforms (macOS bundle `gate-1788433079`) — a code-less one-off firing with no session alive, the daemon discovering and launching the stand-in runtime in a daemon-owned terminal, orientation heading the FIFO and the `TRIGGER_RESULT` arriving as `INPUT 2` through `turn/start`; two prompts queued behind a 5-second active turn delivered in order after the next `idle`, then a resume through the same thread pointer; the Claude half over the channel bridge with hooks recorded and Interrupt refused; an activation failure and a dropped app-server socket recorded as `ACTIVATION_FAILED` and `HANDOFF_UNKNOWN`, disclosed once to the next new session; and a hard kill mid-attempt recovered as `sessions_lost` and `prompts_unknown` with the pointer intact — and by the attended E4 on all four cells: with no operator registration, a real Codex CLI and a real Claude Code session were each launched by MarketRig into the operator's console, received a scheduled firing's result as their own input, took a second prompt queued behind a busy turn, and switched runtime with the desk's history intact (macOS bundles `experiment-e4-codex-1788411421` and `experiment-e4-claude-1788411080`, codex-cli 0.152.1 and Claude Code 2.1.259; Windows bundles `experiment-e4-codex-1788491136` and `experiment-e4-claude-1788491543`, codex-cli 0.153.0 and Claude Code 2.1.260).
 
 **Why here:** it is the largest and least testable surface, and it only becomes provable once there is something worth delivering — a trigger result and a queued evaluation both exist by R2.
 
@@ -275,7 +277,6 @@ These are known and unpaid. Each names the milestone that clears it, or the ceil
 
 - **Scale is unmeasured beyond one trading desk per daemon.** R1's gate trades on one desk; isolation across concurrent books, larger fan-out, and per-desk footprint stay open and are deferred rather than designed for.
 - **The deterministic gate is hermetic for equities only** — R1's stand-in feed keeps it off the public market; the crypto milestone owes a stand-in venue speaking the Kraken adapter's protocol before its scenarios join the gate.
-- **There is no Claude Code stand-in that holds a session**, so one delivery scenario takes a skip-with-evidence path in the gate and is proven only in R7's attended cells.
 - **Claude Code exposes no structured interrupt**, so interruption on that runtime is the user's keyboard and the harness records only end-of-turn evidence.
 - **The memory child's credentials reach it through its environment** — a stated, deliberate exception to the credential boundary (per D49) that must be restated wherever that child is specified, not quietly dropped.
 - **The memory child's embedded database ships with default loopback credentials** — an unclosed ceiling with a written upgrade path.
