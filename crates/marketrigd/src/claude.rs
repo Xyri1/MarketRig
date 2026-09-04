@@ -175,13 +175,12 @@ pub fn write_launch_files(
             let path = dir.join("settings.json");
             let hook = json!([{ "hooks": [{
                 "type": "command",
-                // Claude runs hook commands through bash on every platform,
-                // so a backslashed Windows path collapses into one word
-                // (the Windows E5 cell, 2026-09-04): forward slashes, quoted.
-                "command": format!(
-                    "\"{}\" --desk {desk_id} session hook",
-                    cli.to_string_lossy().replace('\\', "/")
-                ),
+                // Exec form: with `args` present Claude spawns `command`
+                // directly, no shell on any platform. The shell form ran
+                // under bash on Windows too and a backslashed path collapsed
+                // into one word (the Windows E5 cell, 2026-09-04).
+                "command": cli.to_string_lossy(),
+                "args": ["--desk", desk_id, "session", "hook"],
             }]}]);
             write_private(
                 &path,
@@ -412,10 +411,10 @@ mod tests {
         let hooks: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
         for event in ["SessionStart", "Notification", "Stop"] {
-            assert_eq!(
-                hooks["hooks"][event][0]["hooks"][0]["command"],
-                json!("\"/bin/marketrig\" --desk d1 session hook")
-            );
+            let hook = &hooks["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["type"], json!("command"));
+            assert_eq!(hook["command"], json!("/bin/marketrig"));
+            assert_eq!(hook["args"], json!(["--desk", "d1", "session", "hook"]));
         }
         #[cfg(unix)]
         {
