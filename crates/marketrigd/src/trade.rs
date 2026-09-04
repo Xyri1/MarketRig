@@ -190,7 +190,7 @@ impl Source {
 }
 
 /// The `trading_actions` row as the routes return it (§7).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ActionRecord {
     pub action_id: String,
     pub id: String,

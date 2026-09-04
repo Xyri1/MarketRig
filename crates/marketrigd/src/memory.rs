@@ -51,7 +51,7 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 const REDACTED: &str = "<redacted>";
 
 /// The child's liveness (§6): memory only, `NOT_STARTED` after every start.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LiveState {
     #[default]
@@ -263,7 +263,7 @@ impl From<StoreError> for MemoryError {
 // ---------------------------------------------------------------------------
 
 /// The `memory_child` row plus the liveness that is never durable (§3).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Child {
     /// `UNCONFIGURED` | `AVAILABLE` | `UNAVAILABLE`.
     pub state: String,
@@ -281,14 +281,14 @@ pub struct Child {
 }
 
 /// `GET /memory` (§3): both installation rows in the order the CLI prints them.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Status {
     pub child: Child,
     pub provider: Provider,
 }
 
 /// The `memory_provider` row, secrets-free by construction (§3).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Provider {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,

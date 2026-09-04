@@ -45,7 +45,7 @@ pub fn read(tx: &Transaction<'_>) -> rusqlite::Result<Policies> {
 // ---------------------------------------------------------------------------
 
 /// The `GET`/`PUT /settings/policies` body (§2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct Resource {
     pub trigger_code_policy: String,
     pub paper_order_policy: String,
@@ -297,7 +297,7 @@ pub const PAPER_ORDER: &str = "PAPER_ORDER";
 /// One gated record of either kind, as `GET /approvals` and the decision route
 /// answer it (§3.1). `id` is the `code_snapshots` or `trading_actions` row's own
 /// UUID; `detail` is the kind's own object.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct Approval {
     pub kind: String,
     pub id: String,

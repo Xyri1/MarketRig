@@ -11,13 +11,13 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Query, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-use crate::api::{ApiState, envelope, unauthorized};
+use crate::api::{ApiState, Envelope, Gate, envelope, ws_gate};
 use crate::store::{Store, StoreError};
 
 /// One page of the tail, and the listing's ceiling (§4.1, §4.3).
@@ -236,6 +236,21 @@ pub async fn run(publisher: Arc<Publisher>, mut shutdown: watch::Receiver<bool>)
 /// ponytail: the route sits outside `api::router`'s bearer layer because the
 /// socket has no header to check; C39's `ws_gate` adds the origin allowlist in
 /// front of both halves.
+#[utoipa::path(
+    get,
+    path = "/events",
+    params(
+        ("desk_id" = Option<String>, Query, description = "Only this desk's rows"),
+        ("before" = Option<String>, Query, description = "Page back from this cursor"),
+        ("limit" = Option<i64>, Query, description = "1 to 500; 100 by omission"),
+    ),
+    responses(
+        (status = 200, description = "One page of the tail, newest first", body = Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 403, body = Envelope),
+    )
+)]
 pub async fn events(
     State(state): State<Arc<ApiState>>,
     query: Result<Query<HashMap<String, String>>, axum::extract::rejection::QueryRejection>,
@@ -243,20 +258,20 @@ pub async fn events(
 ) -> Response {
     use axum::extract::FromRequestParts;
     let (mut parts, _) = request.into_parts();
-    if let Ok(upgrade) =
-        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
-    {
+    // Extracted before the gate but upgraded only after it, so a refused origin
+    // is an envelope and never a socket (§4.4).
+    let upgrade = axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &())
+        .await
+        .ok();
+    // The socket half has no header to require — its credential arrives in
+    // frame 1 — and the listing half takes the bearer like every other route.
+    if let Gate::Refused(refused) = ws_gate(&parts.headers, &state.credential, upgrade.is_none()) {
+        return refused;
+    }
+    if let Some(upgrade) = upgrade {
         return upgrade.on_upgrade(move |socket| tail(socket, state));
     }
 
-    let presented = parts
-        .headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if presented != Some(state.credential.as_str()) {
-        return unauthorized();
-    }
     let Ok(Query(query)) = query else {
         return validation("The query string must be \"key=value\" pairs.");
     };
@@ -364,10 +379,14 @@ async fn tail(mut socket: WebSocket, state: Arc<ApiState>) {
     }
 }
 
-/// Frame 1 (§4.2): `{"bearer": "…", "after": "<cursor>"?}` within 5 s. `None`
-/// means the connection was closed; `Some(after)` carries the replay position,
-/// itself `None` when the client asked for none or named no row.
-async fn handshake(socket: &mut WebSocket, state: &ApiState) -> Option<Option<Cursor>> {
+/// Frame 1's credential (§4.2, §4.4): `{"bearer": "…", …}` as the first text
+/// frame within 5 s. `None` means the socket was closed with its own refusal —
+/// `4401` for no credential, `4400` for a frame that is not that object — and
+/// `Some(body)` is the whole frame, whose other members are the route's.
+///
+/// The one first-frame authentication: the tail takes its `after` from the body
+/// it returns, the terminal takes nothing (§4.4).
+pub(crate) async fn first_frame_auth(socket: &mut WebSocket, credential: &str) -> Option<Value> {
     let first = match tokio::time::timeout(FIRST_FRAME, socket.recv()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
         // No frame in time, a connection that went away, or a frame that is not
@@ -384,18 +403,25 @@ async fn handshake(socket: &mut WebSocket, state: &ApiState) -> Option<Option<Cu
         close(socket, 4400, "VALIDATION").await;
         return None;
     };
-    if bearer != state.credential {
+    if bearer != credential {
         close(socket, 4401, "UNAUTHORIZED").await;
         return None;
     }
+    Some(body)
+}
+
+/// Frame 1 for the tail: the credential, then the replay position, itself
+/// `None` when the client asked for none or named no row (§4.2).
+async fn handshake(socket: &mut WebSocket, state: &ApiState) -> Option<Option<Cursor>> {
+    let body = first_frame_auth(socket, &state.credential).await?;
     // An `after` that names no row is ignored: the connection starts at the
     // tail and the `tail` frame says so (§4.2).
-    let after = body
-        .get("after")
-        .and_then(Value::as_str)
-        .and_then(parse_cursor)
-        .filter(|cursor| exists(&state.store, cursor));
-    Some(after)
+    Some(
+        body.get("after")
+            .and_then(Value::as_str)
+            .and_then(parse_cursor)
+            .filter(|cursor| exists(&state.store, cursor)),
+    )
 }
 
 fn exists(store: &Store, cursor: &Cursor) -> bool {
@@ -417,7 +443,7 @@ async fn send(socket: &mut WebSocket, frame: String) -> Result<(), axum::Error> 
 }
 
 /// Close codes carry the same SCREAMING_SNAKE code as text (§4.4).
-async fn close(socket: &mut WebSocket, code: u16, reason: &str) {
+pub(crate) async fn close(socket: &mut WebSocket, code: u16, reason: &str) {
     let _ = socket
         .send(Message::Close(Some(CloseFrame {
             code,

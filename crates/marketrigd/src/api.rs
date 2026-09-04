@@ -12,9 +12,11 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::desk::{self, Desk, DeskError};
 use crate::memory::{self, MemoryError};
@@ -55,81 +57,194 @@ pub struct ApiState {
     pub events: Arc<crate::events::Publisher>,
 }
 
-/// The whole §6 surface, every route behind the bearer check.
+/// Every path the OpenAPI document describes (§6.1). The two WebSocket-only
+/// routes — the terminal and the Claude Code channel — are absent: utoipa has
+/// no way to describe an upgrade, so they are registered plainly and the
+/// document's `paths` are exactly this list.
+pub const HTTP_PATHS: &[&str] = &[
+    "/health",
+    "/desks",
+    "/desks/{desk_id}",
+    "/desks/{desk_id}/retry",
+    "/desks/{desk_id}/market/instruments",
+    "/desks/{desk_id}/market/quotes",
+    "/desks/{desk_id}/market/book",
+    "/desks/{desk_id}/positions",
+    "/desks/{desk_id}/orders",
+    "/desks/{desk_id}/orders/{client_order_id}/cancel",
+    "/desks/{desk_id}/history/orders",
+    "/desks/{desk_id}/history/fills",
+    "/desks/{desk_id}/history/cycles",
+    "/desks/{desk_id}/history/actions",
+    "/desks/{desk_id}/triggers",
+    "/desks/{desk_id}/triggers/{trigger_id}",
+    "/desks/{desk_id}/triggers/{trigger_id}/firings",
+    "/desks/{desk_id}/firings/{firing_id}",
+    "/desks/{desk_id}/session",
+    "/desks/{desk_id}/session/activate",
+    "/desks/{desk_id}/session/interrupt",
+    "/desks/{desk_id}/session/exit",
+    "/desks/{desk_id}/session/switch",
+    "/desks/{desk_id}/session/hook",
+    "/runtimes",
+    "/runtimes/{runtime}/discover",
+    "/runtimes/{runtime}/retry",
+    "/memory",
+    "/memory/provider",
+    "/memory/provider/models",
+    "/memory/discover",
+    "/memory/retry",
+    "/desks/{desk_id}/memory",
+    "/desks/{desk_id}/memory/retain",
+    "/desks/{desk_id}/memory/recall",
+    "/desks/{desk_id}/memory/reflect",
+    "/desks/{desk_id}/prompts",
+    "/desks/{desk_id}/prompts/{prompt_id}",
+    "/settings/policies",
+    "/approvals",
+    "/approvals/{id}",
+    "/desks/{desk_id}/approvals/{id}",
+    "/quit",
+    "/events",
+];
+
+/// The §6 surface behind the bearer layer. No state is bound and no layer
+/// applied here, so `--openapi` builds the same document without a daemon
+/// behind it (§6.1).
+fn guarded() -> OpenApiRouter<Arc<ApiState>> {
+    // `OpenApiRouter::new()` would title the document from utoipa-axum's own
+    // cargo metadata; the generator's input names this daemon.
+    OpenApiRouter::with_openapi(
+        utoipa::openapi::OpenApiBuilder::new()
+            .info(utoipa::openapi::Info::new(
+                "MarketRig",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .build(),
+    )
+    .routes(routes!(health))
+    .routes(routes!(list, create))
+    .routes(routes!(show))
+    .routes(routes!(retry))
+    .routes(routes!(instruments))
+    .routes(routes!(quotes))
+    .routes(routes!(book))
+    .routes(routes!(positions))
+    .routes(routes!(open_orders, submit_order))
+    .routes(routes!(cancel_order))
+    .routes(routes!(history_orders))
+    .routes(routes!(history_fills))
+    .routes(routes!(history_cycles))
+    .routes(routes!(history_actions))
+    .routes(routes!(list_triggers, create_trigger))
+    .routes(routes!(show_trigger, patch_trigger, delete_trigger))
+    .routes(routes!(trigger_firings))
+    .routes(routes!(show_firing))
+    .routes(routes!(session))
+    .routes(routes!(session_activate))
+    .routes(routes!(session_interrupt))
+    .routes(routes!(session_exit))
+    .routes(routes!(session_switch))
+    .routes(routes!(session_hook))
+    .routes(routes!(runtimes))
+    .routes(routes!(runtime_discover))
+    .routes(routes!(runtime_retry))
+    .routes(routes!(memory_status))
+    .routes(routes!(memory_provider))
+    .routes(routes!(memory_models))
+    .routes(routes!(memory_discover))
+    .routes(routes!(memory_retry))
+    .routes(routes!(desk_memory))
+    .routes(routes!(memory_retain))
+    .routes(routes!(memory_recall))
+    .routes(routes!(memory_reflect))
+    .routes(routes!(list_prompts))
+    .routes(routes!(show_prompt))
+    .routes(routes!(policies, put_policies))
+    .routes(routes!(approvals))
+    .routes(routes!(approval))
+    .routes(routes!(decide_approval))
+    .routes(routes!(quit))
+    // The Claude Code bridge is a header-only WebSocket (§4.4), and an
+    // upgrade is nothing utoipa can describe: a plain route, layered like
+    // every route above it and absent from the document.
+    .route("/desks/{desk_id}/channel", get(channel))
+}
+
+/// The two routes that authenticate themselves: `/events`, whose socket half
+/// carries its credential in frame 1 while its listing half takes the header,
+/// and the terminal, which does whichever the client presents (§4.2, §4.4).
+fn unguarded() -> OpenApiRouter<Arc<ApiState>> {
+    OpenApiRouter::new()
+        .routes(routes!(crate::events::events))
+        .route("/desks/{desk_id}/terminal", get(terminal))
+}
+
+/// The document `marketrigd --openapi` prints, and the frontend generates its
+/// client from (§6.1).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    guarded().merge(unguarded()).split_for_parts().1
+}
+
+/// The whole §6 surface, every route behind the bearer check except the two
+/// that check it themselves.
 pub fn router(state: ApiState) -> Router {
     let state = Arc::new(state);
-    Router::new()
-        .route("/health", get(health))
-        .route("/desks", get(list).post(create))
-        .route("/desks/{desk_id}", get(show))
-        .route("/desks/{desk_id}/retry", post(retry))
-        .route("/desks/{desk_id}/market/instruments", get(instruments))
-        .route("/desks/{desk_id}/market/quotes", get(quotes))
-        .route("/desks/{desk_id}/market/book", get(book))
-        .route("/desks/{desk_id}/positions", get(positions))
-        .route(
-            "/desks/{desk_id}/orders",
-            get(open_orders).post(submit_order),
-        )
-        .route(
-            "/desks/{desk_id}/orders/{client_order_id}/cancel",
-            post(cancel_order),
-        )
-        .route("/desks/{desk_id}/history/orders", get(history_orders))
-        .route("/desks/{desk_id}/history/fills", get(history_fills))
-        .route("/desks/{desk_id}/history/cycles", get(history_cycles))
-        .route("/desks/{desk_id}/history/actions", get(history_actions))
-        .route(
-            "/desks/{desk_id}/triggers",
-            get(list_triggers).post(create_trigger),
-        )
-        .route(
-            "/desks/{desk_id}/triggers/{trigger_id}",
-            get(show_trigger)
-                .patch(patch_trigger)
-                .delete(delete_trigger),
-        )
-        .route(
-            "/desks/{desk_id}/triggers/{trigger_id}/firings",
-            get(trigger_firings),
-        )
-        .route("/desks/{desk_id}/firings/{firing_id}", get(show_firing))
-        .route("/desks/{desk_id}/session", get(session))
-        .route("/desks/{desk_id}/session/activate", post(session_activate))
-        .route(
-            "/desks/{desk_id}/session/interrupt",
-            post(session_interrupt),
-        )
-        .route("/desks/{desk_id}/session/exit", post(session_exit))
-        .route("/desks/{desk_id}/session/switch", post(session_switch))
-        .route("/desks/{desk_id}/terminal", get(terminal))
-        .route("/desks/{desk_id}/channel", get(channel))
-        .route("/desks/{desk_id}/session/hook", post(session_hook))
-        .route("/runtimes", get(runtimes))
-        .route("/runtimes/{runtime}/discover", post(runtime_discover))
-        .route("/runtimes/{runtime}/retry", post(runtime_retry))
-        .route("/memory", get(memory_status))
-        .route("/memory/provider", put(memory_provider))
-        .route("/memory/provider/models", get(memory_models))
-        .route("/memory/discover", post(memory_discover))
-        .route("/memory/retry", post(memory_retry))
-        .route("/desks/{desk_id}/memory", get(desk_memory))
-        .route("/desks/{desk_id}/memory/retain", post(memory_retain))
-        .route("/desks/{desk_id}/memory/recall", post(memory_recall))
-        .route("/desks/{desk_id}/memory/reflect", post(memory_reflect))
-        .route("/desks/{desk_id}/prompts", get(list_prompts))
-        .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
-        .route("/settings/policies", get(policies).put(put_policies))
-        .route("/approvals", get(approvals))
-        .route("/approvals/{id}", get(approval))
-        .route("/desks/{desk_id}/approvals/{id}", post(decide_approval))
-        .route("/quit", post(quit))
+    guarded()
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
-        // `/events` is outside the bearer layer: its socket half has no header
-        // to check and authenticates in its first frame instead, so the handler
-        // owns both checks (R5 feature SPEC §4.2, §4.4).
-        .merge(Router::new().route("/events", get(crate::events::events)))
+        .merge(unguarded())
         .with_state(state)
+        .split_for_parts()
+        .0
+}
+
+/// The WebSocket origin allowlist (§4.4): Tauri's two production origins and
+/// Vite's dev server. A request carrying no `Origin` — every non-browser
+/// client, the harness included — passes to the bearer check.
+const ORIGINS: [&str; 3] = [
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "http://localhost:1420",
+];
+
+/// How a socket presented its credential — or the answer that refuses it
+/// before any upgrade.
+pub(crate) enum Gate {
+    /// The `Authorization` header carried it: the route answers exactly as it
+    /// did before the browser could reach it.
+    Header,
+    /// No header: the credential arrives in the socket's first frame (§4.4).
+    FirstFrame,
+    /// The envelope this request gets instead of a socket.
+    Refused(Response),
+}
+
+/// The one gate in front of `/events`, `/desks/{d}/terminal`, and
+/// `/desks/{d}/channel` (§4.4). A refused origin is `403 ORIGIN_REFUSED` and a
+/// wrong bearer is R0's `401`, both before any upgrade; `header_only` refuses a
+/// missing header too, which is what the channel and the events listing need.
+pub(crate) fn ws_gate(headers: &HeaderMap, credential: &str, header_only: bool) -> Gate {
+    if let Some(origin) = headers.get(header::ORIGIN)
+        && !origin
+            .to_str()
+            .is_ok_and(|origin| ORIGINS.contains(&origin))
+    {
+        return Gate::Refused(envelope(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REFUSED",
+            "This origin may not open a MarketRig socket.".to_string(),
+        ));
+    }
+    match headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        Some(presented) if presented == credential => Gate::Header,
+        Some(_) => Gate::Refused(unauthorized()),
+        None if header_only => Gate::Refused(unauthorized()),
+        None => Gate::FirstFrame,
+    }
 }
 
 /// A JSON request body's content type, checked only after the body has been
@@ -152,11 +267,24 @@ fn is_json(headers: &HeaderMap) -> bool {
 }
 
 /// The one error envelope (§6, per R0-5): a stable SCREAMING_SNAKE code and an
-/// English sentence, and nothing else.
+/// English sentence, and nothing else. One `ToSchema` type that every route
+/// declares for its non-2xx statuses, so a generated client carries the codes
+/// typed (R5 feature SPEC §6.1).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct Envelope {
+    /// The stable SCREAMING_SNAKE code.
+    pub code: String,
+    /// One English sentence.
+    pub message: String,
+}
+
 pub(crate) fn envelope(status: StatusCode, code: &str, message: String) -> Response {
     (
         status,
-        Json(serde_json::json!({ "code": code, "message": message })),
+        Json(Envelope {
+            code: code.to_string(),
+            message,
+        }),
     )
         .into_response()
 }
@@ -302,6 +430,14 @@ pub(crate) fn unauthorized() -> Response {
 // single-user loopback daemon, so no `spawn_blocking` hop; add one here if a
 // desk operation ever grows long enough to starve a worker.
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn health(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "daemon_uuid": state.daemon_uuid,
@@ -310,6 +446,14 @@ async fn health(State(state): State<Arc<ApiState>>) -> Json<serde_json::Value> {
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn list(State(state): State<Arc<ApiState>>) -> Result<Json<serde_json::Value>, DeskError> {
     let desks = desk::list(&state.store)?;
     Ok(Json(serde_json::json!({ "desks": desks })))
@@ -323,6 +467,17 @@ struct NewDesk {
     runtime: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks",
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, body = Desk),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn create(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -364,6 +519,15 @@ async fn create(
     Ok((StatusCode::CREATED, Json(desk)).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}",
+    responses(
+        (status = 200, body = Desk),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn show(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -376,6 +540,15 @@ async fn show(
 // The R3 session and runtime surface (R3 feature SPEC §5.2, §7). The lifecycle
 // controls — activate, interrupt, exit, switch — arrive with the dispatcher.
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/session",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn session(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -393,6 +566,18 @@ struct ActivateBody {
     mode: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/session/activate",
+    request_body = serde_json::Value,
+    responses(
+        (status = 202, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn session_activate(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -446,6 +631,17 @@ async fn session_activate(
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/session/interrupt",
+    responses(
+        (status = 202, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+    )
+)]
 async fn session_interrupt(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -484,6 +680,17 @@ async fn session_interrupt(
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/session/exit",
+    responses(
+        (status = 202, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+    )
+)]
 async fn session_exit(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -513,6 +720,19 @@ struct SwitchBody {
     runtime: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/session/switch",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+    )
+)]
 async fn session_switch(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -587,6 +807,17 @@ async fn session_switch(
 
 /// Claude Code's hook ingress (§5.2). Well-formed objects are always `202`;
 /// only an unparseable body is refused, and the CLI swallows that too.
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/session/hook",
+    request_body = serde_json::Value,
+    responses(
+        (status = 202, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn session_hook(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -623,8 +854,13 @@ async fn channel(
     request: Request,
 ) -> Result<Response, DeskError> {
     use axum::extract::FromRequestParts;
-    let desk = desk::get(&state.store, &desk_id)?;
     let (mut parts, _) = request.into_parts();
+    // Header-only, and the bearer layer has already checked it; the gate is
+    // here for the origin allowlist (§4.4).
+    if let Gate::Refused(refused) = ws_gate(&parts.headers, &state.credential, true) {
+        return Ok(refused);
+    }
+    let desk = desk::get(&state.store, &desk_id)?;
     let Ok(upgrade) =
         axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
     else {
@@ -687,46 +923,88 @@ async fn bridged(mut socket: axum::extract::ws::WebSocket, state: Arc<ApiState>,
     state.channels.disconnect(&desk_id, generation);
 }
 
-/// `GET /desks/{desk_id}/terminal` (R3 feature SPEC §3): the attachment socket.
-/// The bearer is the same header every route takes — checked by `authorize`
-/// before the upgrade — and `Sec-WebSocket-Protocol` is not used.
+/// `GET /desks/{desk_id}/terminal` (R3 feature SPEC §3, R5 feature SPEC §4.4):
+/// the attachment socket. With an `Authorization` header it is R3's route
+/// unchanged — the two envelopes, then the upgrade, then the attachment. With
+/// no header the same checks become close codes after a first-frame bearer, so
+/// an unauthenticated or refused connection never supersedes a live viewer.
 async fn terminal(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
     request: Request,
-) -> Result<Response, DeskError> {
+) -> Response {
     use axum::extract::FromRequestParts;
-    desk::get(&state.store, &desk_id)?;
-    // Answered before the attachment is taken, so a request that never upgrades
-    // cannot supersede a live one (§3).
-    if state.terminals.size(&desk_id).is_none() {
-        return Ok(envelope(
-            StatusCode::CONFLICT,
-            "NO_LIVE_SESSION",
-            format!("Desk {desk_id:?} has no live terminal."),
-        ));
-    }
-    // The upgrade is extracted by hand rather than in the signature so that the
-    // two answers above still cross as the one envelope (root §4.3) instead of
-    // the framework's own rejection.
     let (mut parts, _) = request.into_parts();
-    let Ok(upgrade) =
-        axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
-    else {
-        return Ok(envelope(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION",
-            "This route serves a WebSocket upgrade.".to_string(),
-        ));
-    };
+    match ws_gate(&parts.headers, &state.credential, false) {
+        Gate::Refused(refused) => refused,
+        // R3 §3 unchanged: both answers cross as the one envelope before any
+        // upgrade, so a request that never upgrades cannot supersede a live
+        // attachment. The upgrade is extracted by hand rather than in the
+        // signature so those answers are not the framework's own rejection.
+        Gate::Header => {
+            if let Err(e) = desk::get(&state.store, &desk_id) {
+                return e.into_response();
+            }
+            if state.terminals.size(&desk_id).is_none() {
+                return no_live_terminal(&desk_id);
+            }
+            let Ok(upgrade) =
+                axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+            else {
+                return envelope(
+                    StatusCode::BAD_REQUEST,
+                    "VALIDATION",
+                    "This route serves a WebSocket upgrade.".to_string(),
+                );
+            };
+            let Some(attachment) = state.terminals.attach(&desk_id) else {
+                return no_live_terminal(&desk_id);
+            };
+            upgrade.on_upgrade(move |socket| attached(socket, state, desk_id, attachment))
+        }
+        Gate::FirstFrame => {
+            // No header and no socket to send a first frame on: no credential
+            // was presented at all, which is R0's `401`, not a shape complaint.
+            let Ok(upgrade) =
+                axum::extract::ws::WebSocketUpgrade::from_request_parts(&mut parts, &()).await
+            else {
+                return unauthorized();
+            };
+            upgrade.on_upgrade(move |socket| attach_after_first_frame(socket, state, desk_id))
+        }
+    }
+}
+
+fn no_live_terminal(desk_id: &str) -> Response {
+    envelope(
+        StatusCode::CONFLICT,
+        "NO_LIVE_SESSION",
+        format!("Desk {desk_id:?} has no live terminal."),
+    )
+}
+
+/// The header-free attachment (§4.4): the credential in frame 1, then R3's two
+/// checks as close codes, and only then the attachment generation.
+async fn attach_after_first_frame(
+    mut socket: axum::extract::ws::WebSocket,
+    state: Arc<ApiState>,
+    desk_id: String,
+) {
+    if crate::events::first_frame_auth(&mut socket, &state.credential)
+        .await
+        .is_none()
+    {
+        return;
+    }
+    // ponytail: any desk read that fails is `4404`; on a loopback SQLite read
+    // the only realistic failure is the desk not existing.
+    if desk::get(&state.store, &desk_id).is_err() {
+        return crate::events::close(&mut socket, 4404, "DESK_NOT_FOUND").await;
+    }
     let Some(attachment) = state.terminals.attach(&desk_id) else {
-        return Ok(envelope(
-            StatusCode::CONFLICT,
-            "NO_LIVE_SESSION",
-            format!("Desk {desk_id:?} has no live terminal."),
-        ));
+        return crate::events::close(&mut socket, 4409, "NO_LIVE_SESSION").await;
     };
-    Ok(upgrade.on_upgrade(move |socket| attached(socket, state, desk_id, attachment)))
+    attached(socket, state, desk_id, attachment).await
 }
 
 /// One attachment's life: the ring as one binary frame, then live bytes out and
@@ -807,6 +1085,14 @@ fn parse_resize(text: &str) -> Option<(u16, u16)> {
     Some((cols, rows))
 }
 
+#[utoipa::path(
+    get,
+    path = "/runtimes",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn runtimes(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<serde_json::Value>, DeskError> {
@@ -819,6 +1105,17 @@ struct DiscoverRequest {
     executable: Option<PathBuf>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/runtimes/{runtime}/discover",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = crate::runtime::Runtime),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn runtime_discover(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -868,6 +1165,15 @@ async fn runtime_discover(
     Ok(Json(row).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/runtimes/{runtime}/retry",
+    responses(
+        (status = 200, body = crate::runtime::Runtime),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn runtime_retry(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -900,6 +1206,15 @@ fn memory_request<T: serde::de::DeserializeOwned>(
         })
 }
 
+#[utoipa::path(
+    get,
+    path = "/memory",
+    responses(
+        (status = 200, body = memory::Status),
+        (status = 401, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn memory_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<memory::Status>, MemoryError> {
@@ -911,6 +1226,17 @@ struct MemoryDiscoverRequest {
     executable: PathBuf,
 }
 
+#[utoipa::path(
+    post,
+    path = "/memory/discover",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = memory::Child),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn memory_discover(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -927,12 +1253,34 @@ async fn memory_discover(
     Ok(Json(state.memory.discover(&request.executable).await?).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/memory/retry",
+    responses(
+        (status = 200, body = memory::Child),
+        (status = 401, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn memory_retry(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<memory::Child>, MemoryError> {
     Ok(Json(state.memory.retry().await?))
 }
 
+#[utoipa::path(
+    put,
+    path = "/memory/provider",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = memory::Provider),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn memory_provider(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -946,6 +1294,18 @@ async fn memory_provider(
     Ok(Json(state.memory.put_provider(request).await?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/memory/provider/models",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+        (status = 504, body = Envelope),
+    )
+)]
 async fn memory_models(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<serde_json::Value>, MemoryError> {
@@ -959,6 +1319,17 @@ async fn memory_models(
 // are the order routes' own checks, carried into `MemoryError` so both shapes
 // answer through the maps they already have.
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/memory",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn desk_memory(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -967,6 +1338,22 @@ async fn desk_memory(
     Ok(Json(state.memory.desk_status(&desk_id).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/memory/retain",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 422, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+        (status = 504, body = Envelope),
+    )
+)]
 async fn memory_retain(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -986,6 +1373,22 @@ async fn memory_retain(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/memory/recall",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 422, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+        (status = 504, body = Envelope),
+    )
+)]
 async fn memory_recall(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1001,6 +1404,22 @@ async fn memory_recall(
     Ok(Json(state.memory.recall_op(&desk_id, request).await?))
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/memory/reflect",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 422, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+        (status = 504, body = Envelope),
+    )
+)]
 async fn memory_reflect(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1020,6 +1439,16 @@ fn unknown_runtime(name: &str) -> Response {
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/retry",
+    responses(
+        (status = 200, body = Desk),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn retry(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1033,6 +1462,16 @@ async fn retry(
 // `MARKET_UNAVAILABLE` when it cannot. The market plane needs a READY desk, the
 // same rule the order routes carry (§4.2).
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/market/instruments",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn instruments(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1043,6 +1482,17 @@ async fn instruments(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/market/quotes",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn quotes(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1053,6 +1503,17 @@ async fn quotes(
     Ok(Json(serde_json::json!({ "quotes": quotes })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/market/book",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn book(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1063,6 +1524,17 @@ async fn book(
     Ok(Json(serde_json::json!({ "book": book })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/positions",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn positions(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1074,6 +1546,17 @@ async fn positions(
     ))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/orders",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn open_orders(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1088,6 +1571,15 @@ async fn open_orders(
 // The history group (§7): complete newest-first projections over the desk's own
 // event tables, which exist whatever the desk's state.
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/history/orders",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn history_orders(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1097,6 +1589,15 @@ async fn history_orders(
     Ok(Json(serde_json::json!({ "orders": orders })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/history/fills",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn history_fills(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1106,6 +1607,15 @@ async fn history_fills(
     Ok(Json(serde_json::json!({ "fills": fills })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/history/cycles",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn history_cycles(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1116,6 +1626,15 @@ async fn history_cycles(
 }
 
 /// The desk's trading actions with their approval state (R5 feature SPEC §3.3).
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/history/actions",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn history_actions(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1177,6 +1696,21 @@ fn attribution(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/orders",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = trade::ActionRecord),
+        (status = 201, body = trade::ActionRecord),
+        (status = 202, body = trade::ActionRecord),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn submit_order(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1195,6 +1729,19 @@ async fn submit_order(
     Ok((status, Json(record)).into_response())
 }
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/orders/{client_order_id}/cancel",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = trade::ActionRecord),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn cancel_order(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, client_order_id)): Path<(String, String)>,
@@ -1217,6 +1764,18 @@ async fn cancel_order(
 // `TRIGGER_INVALID` like any other form failure. Every accepted mutation wakes
 // the scheduler once its unit has committed (§3.1).
 
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/triggers",
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn create_trigger(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1227,6 +1786,15 @@ async fn create_trigger(
     Ok((StatusCode::CREATED, Json(created)).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/triggers",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn list_triggers(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1235,6 +1803,15 @@ async fn list_triggers(
     Ok(Json(serde_json::json!({ "triggers": triggers })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/triggers/{trigger_id}",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn show_trigger(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, trigger_id)): Path<(String, String)>,
@@ -1242,6 +1819,18 @@ async fn show_trigger(
     Ok(Json(trigger::get(&state.store, &desk_id, &trigger_id)?))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/desks/{desk_id}/triggers/{trigger_id}",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn patch_trigger(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, trigger_id)): Path<(String, String)>,
@@ -1252,6 +1841,15 @@ async fn patch_trigger(
     Ok(Json(patched))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/desks/{desk_id}/triggers/{trigger_id}",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn delete_trigger(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, trigger_id)): Path<(String, String)>,
@@ -1261,6 +1859,15 @@ async fn delete_trigger(
     Ok(Json(deleted))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/triggers/{trigger_id}/firings",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn trigger_firings(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, trigger_id)): Path<(String, String)>,
@@ -1269,6 +1876,15 @@ async fn trigger_firings(
     Ok(Json(serde_json::json!({ "firings": firings })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/firings/{firing_id}",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn show_firing(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, firing_id)): Path<(String, String)>,
@@ -1276,6 +1892,15 @@ async fn show_firing(
     Ok(Json(trigger::firing(&state.store, &desk_id, &firing_id)?))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/prompts",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn list_prompts(
     State(state): State<Arc<ApiState>>,
     Path(desk_id): Path<String>,
@@ -1284,6 +1909,15 @@ async fn list_prompts(
     Ok(Json(serde_json::json!({ "prompts": prompts })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/desks/{desk_id}/prompts/{prompt_id}",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn show_prompt(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, prompt_id)): Path<(String, String)>,
@@ -1294,12 +1928,31 @@ async fn show_prompt(
 // The installation policies (R5 feature SPEC §2). Nothing here decides an
 // approval; a policy change affects only records created after it.
 
+#[utoipa::path(
+    get,
+    path = "/settings/policies",
+    responses(
+        (status = 200, body = policy::Resource),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn policies(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<policy::Resource>, PolicyError> {
     Ok(Json(policy::get(&state.store)?))
 }
 
+#[utoipa::path(
+    put,
+    path = "/settings/policies",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = policy::Resource),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
 async fn put_policies(
     State(state): State<Arc<ApiState>>,
     headers: HeaderMap,
@@ -1317,11 +1970,21 @@ async fn put_policies(
 
 /// `?state=PENDING|DECIDED|ALL`; absent is `PENDING`, and `policy::approvals`
 /// owns which words are words.
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::IntoParams)]
 struct StateQuery {
     state: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/approvals",
+    params(StateQuery),
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn approvals(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<StateQuery>,
@@ -1330,6 +1993,15 @@ async fn approvals(
     Ok(Json(serde_json::json!({ "approvals": approvals })))
 }
 
+#[utoipa::path(
+    get,
+    path = "/approvals/{id}",
+    responses(
+        (status = 200, body = policy::Approval),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
 async fn approval(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
@@ -1340,6 +2012,19 @@ async fn approval(
 /// The one decision route. A body that is not a decision is `VALIDATION`, which
 /// is `PolicyError`'s status, so the two failures are mapped one by one rather
 /// than through a third error type.
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/approvals/{id}",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = policy::Approval),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
 async fn decide_approval(
     State(state): State<Arc<ApiState>>,
     Path((desk_id, id)): Path<(String, String)>,
@@ -1366,6 +2051,14 @@ async fn decide_approval(
 
 /// Answers, then asks the daemon to shut down (§4.2). A full or closed channel
 /// means a stop is already under way, so a second `/quit` is a no-op.
+#[utoipa::path(
+    post,
+    path = "/quit",
+    responses(
+        (status = 202, body = serde_json::Value),
+        (status = 401, body = Envelope),
+    )
+)]
 async fn quit(State(state): State<Arc<ApiState>>) -> Response {
     let _ = state.quit.try_send(());
     (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
@@ -1395,6 +2088,7 @@ pub(crate) struct Served {
     registry: Arc<crate::node::Registry>,
     channels: Arc<crate::claude::Channels>,
     memory: Arc<crate::memory::Memory>,
+    pub(crate) terminals: Arc<crate::terminal::Manager>,
     pub(crate) events: Arc<crate::events::Publisher>,
     /// Dropping it stops the events publisher with the test.
     _shutdown: tokio::sync::watch::Sender<bool>,
@@ -1429,9 +2123,11 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(crate::events::run(events.clone(), shutdown_rx));
     let published = events.clone();
+    // The exits receiver is dropped: nothing here closes `agent_processes`.
+    let terminals = crate::terminal::Manager::new().0;
     let state = ApiState {
         search_path: String::new(),
-        terminals: crate::terminal::Manager::new().0,
+        terminals: terminals.clone(),
         channels: channels.clone(),
         store: store.clone(),
         desks_home: desks_home.clone(),
@@ -1458,6 +2154,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         registry,
         channels,
         memory,
+        terminals,
         events: published,
         _shutdown: shutdown,
     }
@@ -3504,5 +4201,312 @@ async fn approval_routes() {
     assert_eq!(
         json(&call_get(url("/approvals?state=ALL"), ok).1)["approvals"][0]["id"],
         snapshot.as_str()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// api::sockets and api::openapi (R5 feature SPEC §8 check 6)
+// ---------------------------------------------------------------------------
+
+/// A refused origin, one every socket must turn away (§4.4).
+#[cfg(test)]
+const FOREIGN: &str = "https://example.com";
+
+/// One WebSocket handshake: the socket when it upgrades, the HTTP status and
+/// body when the gate answered instead — which is how "no upgrade" is read.
+#[cfg(test)]
+async fn dial_ws(
+    base: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    (u16, String),
+> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("{base}{path}").replacen("http://", "ws://", 1);
+    let mut request = url.into_client_request().unwrap();
+    for (name, value) in headers {
+        request.headers_mut().insert(
+            name.parse::<tokio_tungstenite::tungstenite::http::HeaderName>()
+                .expect("a header name"),
+            value.parse().expect("a header value"),
+        );
+    }
+    match tokio_tungstenite::connect_async(request).await {
+        Ok((socket, _)) => Ok(socket),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let (parts, body) = (*response).into_parts();
+            Err((
+                parts.status.as_u16(),
+                String::from_utf8(body.unwrap_or_default()).unwrap_or_default(),
+            ))
+        }
+        Err(e) => panic!("expected an HTTP answer, got {e:?}"),
+    }
+}
+
+/// The close code, past any frames still in flight.
+#[cfg(test)]
+async fn ws_closed(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> u16 {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Close(Some(close)))) => return u16::from(close.code),
+            Some(Ok(_)) => {}
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    }
+}
+
+/// Sends one text frame.
+#[cfg(test)]
+async fn ws_send(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    text: String,
+) {
+    use futures_util::SinkExt;
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(text.into()))
+        .await
+        .unwrap();
+}
+
+/// A child that outlives the check and dies on its own if anything leaks it.
+#[cfg(test)]
+fn idle_terminal() -> crate::terminal::Spawn {
+    let argv = if cfg!(windows) {
+        vec![
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "ping -n 31 127.0.0.1 >NUL".to_string(),
+        ]
+    } else {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 30".to_string(),
+        ]
+    };
+    crate::terminal::Spawn {
+        argv,
+        cwd: std::env::temp_dir(),
+        env: Vec::new(),
+        cols: 80,
+        rows: 24,
+    }
+}
+
+/// The origin allowlist in front of all three sockets, and the channel's
+/// header-only rule (§4.4).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sockets_refuse_a_foreign_origin() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let ok = Some(CREDENTIAL);
+    let bearer = format!("Bearer {CREDENTIAL}");
+    let created = call_post(
+        format!("{base}/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"origin-desk"}"#)),
+    );
+    let desk_id = json(&created.1)["id"].as_str().unwrap().to_string();
+    let terminal = format!("/desks/{desk_id}/terminal");
+    let channel = format!("/desks/{desk_id}/channel");
+
+    // A foreign origin is turned away before any upgrade, header or no header.
+    for path in ["/events", terminal.as_str(), channel.as_str()] {
+        let refused = dial_ws(
+            &base,
+            path,
+            &[("origin", FOREIGN), ("authorization", &bearer)],
+        )
+        .await
+        .expect_err("a foreign origin never upgrades");
+        expect_envelope(refused, 403, "ORIGIN_REFUSED");
+    }
+    // …and the listing half of `/events` is refused the same way.
+    let listing = agent()
+        .get(format!("{base}/events"))
+        .header("Authorization", &bearer)
+        .header("Origin", FOREIGN)
+        .call();
+    expect_envelope(read(listing), 403, "ORIGIN_REFUSED");
+
+    // Every allowed origin passes to the bearer check, which each socket then
+    // answers in its own way: the tail upgrades and waits for frame 1, the
+    // terminal answers R3's `409` before the upgrade, the bridge upgrades and
+    // closes `4002` because the desk has no open process.
+    for origin in [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "http://localhost:1420",
+    ] {
+        let mut tail = dial_ws(&base, "/events", &[("origin", origin)])
+            .await
+            .expect("an allowed origin upgrades");
+        ws_send(&mut tail, r#"{"bearer":"nope"}"#.to_string()).await;
+        assert_eq!(ws_closed(&mut tail).await, 4401, "origin {origin}");
+
+        let refused = dial_ws(
+            &base,
+            &terminal,
+            &[("origin", origin), ("authorization", &bearer)],
+        )
+        .await
+        .expect_err("no live terminal");
+        expect_envelope(refused, 409, "NO_LIVE_SESSION");
+
+        let mut bridge = dial_ws(
+            &base,
+            &channel,
+            &[("origin", origin), ("authorization", &bearer)],
+        )
+        .await
+        .expect("an allowed origin upgrades");
+        assert_eq!(ws_closed(&mut bridge).await, 4002, "origin {origin}");
+    }
+
+    // The tail waits for frame 1 even when the header carried the credential:
+    // frame 1 is the only carrier of `after`, so the header cannot skip it.
+    let mut headed = dial_ws(&base, "/events", &[("authorization", &bearer)])
+        .await
+        .expect("a header-authenticated tail upgrades");
+    ws_send(&mut headed, r#"{"bearer":"nope"}"#.to_string()).await;
+    assert_eq!(
+        ws_closed(&mut headed).await,
+        4401,
+        "the header did not short-circuit frame 1"
+    );
+
+    // The bridge stays header-only: no header is `401`, never an upgrade.
+    let refused = dial_ws(&base, &channel, &[("origin", "tauri://localhost")])
+        .await
+        .expect_err("the channel takes no first frame");
+    expect_envelope(refused, 401, "UNAUTHORIZED");
+    expect_envelope(
+        call_get(format!("{base}{channel}"), None),
+        401,
+        "UNAUTHORIZED",
+    );
+}
+
+/// The header-free terminal (§4.4): frame 1, then R3's two checks as close
+/// codes, and only then the attachment — so a refused connection never
+/// supersedes the live viewer.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_socket_authenticates_in_its_first_frame() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let ok = Some(CREDENTIAL);
+    let bearer = format!("Bearer {CREDENTIAL}");
+    let created = call_post(
+        format!("{base}/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"first-frame-desk"}"#)),
+    );
+    let desk_id = json(&created.1)["id"].as_str().unwrap().to_string();
+    let path = format!("/desks/{desk_id}/terminal");
+    let first = |text: &str| format!(r#"{{"bearer":"{text}"}}"#);
+
+    // A wrong credential closes `4401`, and the desk was never even read.
+    let mut wrong = dial_ws(&base, &path, &[])
+        .await
+        .expect("no header upgrades");
+    ws_send(&mut wrong, first("nope")).await;
+    assert_eq!(ws_closed(&mut wrong).await, 4401);
+
+    // The checks R3 answers as envelopes are close codes here.
+    let unknown = format!("/desks/{}/terminal", uuid::Uuid::now_v7());
+    let mut absent = dial_ws(&base, &unknown, &[]).await.expect("upgrades");
+    ws_send(&mut absent, first(CREDENTIAL)).await;
+    assert_eq!(ws_closed(&mut absent).await, 4404);
+
+    let mut idle = dial_ws(&base, &path, &[]).await.expect("upgrades");
+    ws_send(&mut idle, first(CREDENTIAL)).await;
+    assert_eq!(ws_closed(&mut idle).await, 4409);
+
+    // With a live terminal, a refused connection leaves the header-authenticated
+    // viewer attached: only the next accepted attachment supersedes it (`4001`).
+    served
+        .terminals
+        .spawn(&desk_id, idle_terminal())
+        .expect("a terminal starts");
+    let mut viewer = dial_ws(&base, &path, &[("authorization", &bearer)])
+        .await
+        .expect("the header path attaches");
+    let mut refused = dial_ws(&base, &path, &[]).await.expect("upgrades");
+    ws_send(&mut refused, first("nope")).await;
+    assert_eq!(ws_closed(&mut refused).await, 4401);
+    {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let quiet = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+            while let Some(Ok(message)) = viewer.next().await {
+                if let Message::Close(_) = message {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert!(
+            matches!(quiet, Err(_) | Ok(false)),
+            "the live viewer was closed by a refused connection"
+        );
+    }
+    let _newer = dial_ws(&base, &path, &[("authorization", &bearer)])
+        .await
+        .expect("the header path attaches");
+    assert_eq!(ws_closed(&mut viewer).await, 4001, "the viewer was live");
+    served.terminals.shutdown(&desk_id);
+}
+
+/// The document `--openapi` prints describes every HTTP route and nothing
+/// else, and the two upgrade-only routes stay out of it (§6.1).
+#[cfg(test)]
+#[test]
+fn openapi_describes_every_http_route() {
+    let document = openapi();
+    let paths: Vec<&str> = document.paths.paths.keys().map(String::as_str).collect();
+    assert_eq!(
+        paths.len(),
+        HTTP_PATHS.len(),
+        "the document's paths are exactly HTTP_PATHS: {paths:?}"
+    );
+    for path in HTTP_PATHS {
+        assert!(paths.contains(path), "{path} is not described");
+    }
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.ends_with("/terminal") || path.ends_with("/channel")),
+        "utoipa cannot describe an upgrade: {paths:?}"
+    );
+    // `/events` is one GET: the listing, whose socket half shares the path.
+    let events = document.paths.paths.get("/events").expect("/events");
+    assert!(events.get.is_some() && events.post.is_none());
+
+    let json = document.to_pretty_json().expect("the document serializes");
+    let value: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(value["info"]["title"], "MarketRig");
+    assert_eq!(
+        value["components"]["schemas"]["Envelope"]["required"],
+        serde_json::json!(["code", "message"]),
+        "the one envelope every non-2xx status declares"
+    );
+    assert_eq!(
+        value["paths"]["/approvals/{id}"]["get"]["responses"]["404"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/Envelope"
     );
 }

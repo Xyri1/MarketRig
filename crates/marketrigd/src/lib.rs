@@ -26,6 +26,21 @@ use std::time::Duration;
 
 /// The daemon entry point: §4.1 startup, serve the §6 routes, §4.2 shutdown.
 pub fn run() -> ExitCode {
+    // `--openapi` is the frontend's generator input and nothing else: the
+    // document, then exit, before startup has touched a data root, a lock, or a
+    // log file (R5 feature SPEC §6.1). Every other argument is startup's.
+    if std::env::args().nth(1).as_deref() == Some("--openapi") {
+        return match api::openapi().to_pretty_json() {
+            Ok(document) => {
+                println!("{document}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: INTERNAL: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let mut startup = match start() {
         Ok(s) => s,
         Err((code, message)) => {

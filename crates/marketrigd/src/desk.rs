@@ -94,7 +94,7 @@ impl From<StoreError> for DeskError {
 
 /// One desk row plus the read-time workspace derivation (§7.5). Field names and
 /// omit-when-null behavior are the §6 `Desk` resource.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Desk {
     pub id: String,
     pub name: String,

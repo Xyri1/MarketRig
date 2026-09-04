@@ -26,7 +26,7 @@ const FLOORS: [(&str, (u64, u64, u64)); 2] = [("codex", (0, 152, 1)), ("claude",
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One `runtimes` row (§8), secrets-free by construction.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct Runtime {
     pub runtime: String,
     /// `UNDISCOVERED` | `AVAILABLE` | `UNAVAILABLE`.
