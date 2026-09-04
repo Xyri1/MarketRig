@@ -516,10 +516,27 @@ impl Memory {
 /// cannot leave the child's last line unredacted.
 fn redact_key(key: &str, message: &str) -> String {
     if key.is_empty() {
-        message.to_string()
-    } else {
-        message.replace(key, REDACTED)
+        return message.to_string();
     }
+    let message = message.replace(key, REDACTED);
+    // A provider quotes the key masked (`sk-smoke**********-123`): any token
+    // opening with the key's first characters goes the same way. Eight is short
+    // enough to catch a masked prefix and long enough not to hit plain words.
+    let prefix: String = key.chars().take(8).collect();
+    if key.chars().count() < 12 {
+        return message;
+    }
+    message
+        .split_inclusive(|c: char| c.is_whitespace() || "'\"`,;()[]{}".contains(c))
+        .map(|token| {
+            let word = token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '*');
+            if word.starts_with(&prefix) && word != REDACTED {
+                token.replacen(word, REDACTED, 1)
+            } else {
+                token.to_string()
+            }
+        })
+        .collect()
 }
 
 fn seam_map(path: &Path) -> Result<BTreeMap<String, String>, MemoryError> {
@@ -1977,6 +1994,16 @@ async fn provider_settings() {
         format!("Incorrect API key provided: {REDACTED}.")
     );
     assert_eq!(memory.redact("nothing to hide"), "nothing to hide");
+    // A provider masks the middle of the key; the masked form is still the key.
+    let masked = format!(
+        "{}**********{}",
+        &FAKE_KEY[..8],
+        &FAKE_KEY[FAKE_KEY.len() - 4..]
+    );
+    assert_eq!(
+        memory.redact(&format!("provided: {masked}. Next")),
+        format!("provided: {REDACTED}. Next")
+    );
 }
 
 /// A credential store that cannot take the key writes nothing at all (§3).
