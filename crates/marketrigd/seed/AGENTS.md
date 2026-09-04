@@ -30,6 +30,11 @@ at each market's declared per-side rate. Not simulated: T+1 settlement, daily pr
 halts, opening and closing auctions, and holiday calendars — a quote may read stale on a holiday. A
 position cycle (open to flat in one instrument) is the unit of realized P&L and of evaluation.
 
+The user may require approval of paper orders and of trigger code. A gated order answers
+`approval: PENDING` with no order and reaches the sandbox only once approved in the MarketRig
+desktop; read its state with `marketrig history actions <name>`. A gated trigger is never due
+until approved (`marketrig trigger show`). You cannot approve, deny, or change the policy.
+
 ## Evaluate and learn
 
 Every closed cycle queues one `EVALUATION` prompt naming the cycle, the instrument, the net realized

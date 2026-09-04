@@ -76,6 +76,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/desks/{desk_id}/history/orders", get(history_orders))
         .route("/desks/{desk_id}/history/fills", get(history_fills))
         .route("/desks/{desk_id}/history/cycles", get(history_cycles))
+        .route("/desks/{desk_id}/history/actions", get(history_actions))
         .route(
             "/desks/{desk_id}/triggers",
             get(list_triggers).post(create_trigger),
@@ -178,7 +179,9 @@ impl IntoResponse for TradeError {
             TradeError::InstrumentUnknown(_) | TradeError::OrderNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
-            TradeError::Rejected(_) | TradeError::NotReady(_) => StatusCode::CONFLICT,
+            TradeError::Rejected(_) | TradeError::NotReady(_) | TradeError::PendingApproval(_) => {
+                StatusCode::CONFLICT
+            }
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
         envelope(status, self.code(), self.to_string())
@@ -1080,6 +1083,16 @@ async fn history_cycles(
     Ok(Json(serde_json::json!({ "cycles": cycles })))
 }
 
+/// The desk's trading actions with their approval state (R5 feature SPEC §3.3).
+async fn history_actions(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<serde_json::Value>, DeskError> {
+    desk::get(&state.store, &desk_id)?;
+    let actions = trade::history_actions(&state.store, &desk_id)?;
+    Ok(Json(serde_json::json!({ "actions": actions })))
+}
+
 // The two mutating market-plane routes (R1 feature SPEC §7). The body arrives as
 // text so the `trading_actions` row keeps the caller's own request verbatim
 // (§5); `trade` owns every rule about its content.
@@ -1139,12 +1152,13 @@ async fn submit_order(
     body: String,
 ) -> Result<Response, TradeError> {
     let source = attribution(&state, &headers, &desk_id)?;
-    let (record, replayed) =
+    let (record, submitted) =
         trade::submit(&state.store, &state.registry, &desk_id, &body, &source)?;
-    let status = if replayed {
-        StatusCode::OK
-    } else {
-        StatusCode::CREATED
+    let status = match submitted {
+        trade::Submitted::Placed => StatusCode::CREATED,
+        trade::Submitted::Replay => StatusCode::OK,
+        // Recorded and awaiting approval; the sandbox has seen nothing (R5 §3.3).
+        trade::Submitted::Pending => StatusCode::ACCEPTED,
     };
     Ok((status, Json(record)).into_response())
 }
@@ -1620,7 +1634,9 @@ async fn action_replay() {
         record.as_object().unwrap().keys().collect::<Vec<_>>(),
         [
             "action_id",
+            "approval",
             "created_at_ns",
+            "decided_at_ns",
             "id",
             "kind",
             "outcome",
@@ -1705,6 +1721,44 @@ async fn action_replay() {
     assert_eq!(json(&body)["outcome"]["status"], "ACCEPTED");
     assert_eq!(orders_placed(&served), 2);
 
+    // Under REQUIRE_APPROVAL the same route records the order and answers 202
+    // without an outcome; the sandbox sees nothing, and a cancel naming it says
+    // so (R5 feature SPEC §3.3).
+    served
+        .store
+        .unit(|tx| {
+            tx.execute(
+                "UPDATE installation_settings SET paper_order_policy = 'REQUIRE_APPROVAL' \
+                 WHERE id = 1",
+                [],
+            )
+        })
+        .unwrap();
+    let (status, body) = call_post(
+        url(&format!("/desks/{desk_id}/orders")),
+        ok,
+        Some((
+            "application/json",
+            r#"{"action_id":"buy-aapl-3","instrument_id":"AAPL.XNAS",
+                "side":"BUY","type":"MARKET","quantity":"1","price":null}"#,
+        )),
+    );
+    assert_eq!(status, 202, "{body}");
+    let pending = json(&body);
+    assert_eq!(pending["approval"], "PENDING");
+    assert!(pending.get("outcome").is_none(), "{pending}");
+    assert_eq!(orders_placed(&served), 3);
+    assert_eq!(sandbox_orders(&served), 2, "the sandbox saw nothing new");
+    expect_envelope(
+        call_post(
+            url(&format!("/desks/{desk_id}/orders/buy-aapl-3/cancel")),
+            ok,
+            Some(("application/json", r#"{"action_id":"cancel-aapl-3"}"#)),
+        ),
+        409,
+        "ORDER_PENDING_APPROVAL",
+    );
+
     served.registry.stop_all();
 }
 
@@ -1763,6 +1817,7 @@ async fn market_codes() {
         "/history/orders",
         "/history/fills",
         "/history/cycles",
+        "/history/actions",
     ];
     let paths: Vec<&str> = live.iter().chain(local.iter()).copied().collect();
 
@@ -1810,7 +1865,7 @@ async fn market_codes() {
         "DESK_NOT_READY",
     );
     // History is daemon-local and answers a FAILED desk its (empty) rows.
-    for what in ["orders", "fills", "cycles"] {
+    for what in ["orders", "fills", "cycles", "actions"] {
         let (status, body) = call_get(url(&format!("/desks/{beta}/history/{what}")), ok);
         assert_eq!(status, 200, "{body}");
         assert_eq!(json(&body)[what].as_array().map(Vec::len), Some(0));

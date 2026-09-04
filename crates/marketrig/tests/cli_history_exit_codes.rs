@@ -14,6 +14,10 @@ const DESK: &str = "01997f00-0000-7000-8000-00000000000a";
 
 const FILLS: &str = r#"{"fills":[{"id":"f2","client_order_id":"o-2","trade_id":"t2","instrument_id":"0700.XHKG","side":"SELL","quantity":"100","price":"301.00","commission":"33.11","currency":"HKD","occurred_at_ns":400},{"id":"f1","client_order_id":"o-1","trade_id":"t1","instrument_id":"AAPL.XNAS","side":"BUY","quantity":"1","price":"191.20","commission":"0","currency":"USD","occurred_at_ns":300}]}"#;
 
+/// Newest first: one order still awaiting approval, one denied, one filled
+/// (R5 feature SPEC §3.3).
+const ACTIONS: &str = r#"{"actions":[{"action_id":"a-3","id":"01997f00-0000-7000-8000-0000000000c3","kind":"SUBMIT","source":"SESSION","approval":"PENDING","created_at_ns":500},{"action_id":"a-2","id":"01997f00-0000-7000-8000-0000000000c2","kind":"SUBMIT","source":"SESSION","approval":"DENIED","decided_at_ns":450,"created_at_ns":400,"outcome":{"failure_code":"DENIED"}},{"action_id":"a-1","id":"01997f00-0000-7000-8000-0000000000c1","kind":"SUBMIT","source":"TRIGGER","approval":"APPROVED","decided_at_ns":350,"created_at_ns":300,"outcome":{"client_order_id":"a-1","status":"FILLED"}}]}"#;
+
 fn stdout(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).expect("utf-8 stdout")
 }
@@ -32,6 +36,7 @@ fn history_exit_codes_zero_on_success() {
             200,
             r#"{"orders":[{"client_order_id":"o-2","instrument_id":"0700.XHKG","side":"BUY","type":"LIMIT","quantity":"100","price":"300.00","status":"ACCEPTED"},{"client_order_id":"o-1","instrument_id":"AAPL.XNAS","side":"BUY","type":"MARKET","quantity":"1","price":null,"kind":"OrderFilled"}]}"#,
         ),
+        "GET /desks/01997f00-0000-7000-8000-00000000000a/history/actions" => (200, ACTIONS),
         "GET /desks/01997f00-0000-7000-8000-00000000000a/history/cycles" => (
             200,
             r#"{"cycles":[{"id":"c1","position_id":"p1","instrument_id":"AAPL.XNAS","opened_at_ns":1,"closed_at_ns":2,"realized_pnl":"-93.71","currency":"USD"}]}"#,
@@ -75,6 +80,21 @@ fn history_exit_codes_zero_on_success() {
             "o-1\tAAPL.XNAS\tBUY\tMARKET\t1\t\tOrderFilled",
         ],
         "order rows"
+    );
+
+    // An action's approval state, and the outcome's status or failure code —
+    // or `-` while there is no outcome at all (R5 feature SPEC §3.3).
+    let actions = marketrig(root.path(), &["history", "actions", DESK]);
+    assert_eq!(code(&actions), 0, "{actions:?}");
+    let lines: Vec<String> = stdout(&actions).lines().map(str::to_string).collect();
+    assert_eq!(
+        lines,
+        [
+            "500\tSUBMIT\ta-3\tPENDING\t-",
+            "400\tSUBMIT\ta-2\tDENIED\tDENIED",
+            "300\tSUBMIT\ta-1\tAPPROVED\tFILLED",
+        ],
+        "action rows"
     );
 
     let cycles = marketrig(root.path(), &["history", "cycles", DESK]);

@@ -182,6 +182,8 @@ enum HistoryRecord {
     Orders,
     Fills,
     Cycles,
+    /// The desk's own submits and cancels with their approval state (R5 §3.3).
+    Actions,
 }
 
 #[derive(Subcommand)]
@@ -406,6 +408,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 HistoryRecord::Orders => "orders",
                 HistoryRecord::Fills => "fills",
                 HistoryRecord::Cycles => "cycles",
+                HistoryRecord::Actions => "actions",
             };
             endpoint.get(&format!("/desks/{id}/history/{segment}"))
         }
@@ -726,9 +729,10 @@ fn resolve(endpoint: &Endpoint, route: &str, noun: &str, token: &str) -> Result<
 ///
 /// `a|b` prints the first field present: a history order carries the sandbox's
 /// `status`, or its latest event `kind` before a status exists. `a.b` reads one
-/// level down. The daemon owns every shape, so a missing or unknown field
-/// prints blank and never panics.
-const LISTS: [(&str, &[&str]); 7] = [
+/// level down, and a `-` alternative is the literal placeholder a row with none
+/// of the preceding fields prints. The daemon owns every shape, so a missing or
+/// unknown field prints blank and never panics.
+const LISTS: [(&str, &[&str]); 8] = [
     ("desks", &["name", "state", "id"]),
     (
         "orders",
@@ -757,6 +761,16 @@ const LISTS: [(&str, &[&str]); 7] = [
     (
         "cycles",
         &["closed_at_ns", "instrument_id", "realized_pnl", "currency"],
+    ),
+    (
+        "actions",
+        &[
+            "created_at_ns",
+            "kind",
+            "action_id",
+            "approval",
+            "outcome.status|outcome.failure_code|-",
+        ],
     ),
     (
         "triggers",
@@ -909,11 +923,16 @@ fn emit_memory(command: &MemoryCommand, body: &str) {
 }
 
 fn cell(row: &serde_json::Value, column: &str) -> String {
-    column
-        .split('|')
-        .map(|field| field.split('.').fold(row, |value, key| &value[key]))
-        .find(|value| !value.is_null())
-        .map_or(String::new(), text)
+    for field in column.split('|') {
+        if field == "-" {
+            return field.to_string();
+        }
+        let value = field.split('.').fold(row, |value, key| &value[key]);
+        if !value.is_null() {
+            return text(value);
+        }
+    }
+    String::new()
 }
 
 fn text(value: &serde_json::Value) -> String {

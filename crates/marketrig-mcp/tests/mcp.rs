@@ -1,5 +1,6 @@
-//! `mcp::resources_and_freshness` and `mcp::server_side_validation` — feature
-//! SPEC `r1-equity-paper-trading` §8 driven end to end.
+//! `mcp::resources_and_freshness`, `mcp::server_side_validation`, and
+//! `mcp::pending_order_is_a_tool_result` — feature SPEC
+//! `r1-equity-paper-trading` §8 driven end to end, with R5 §3.3's gated answer.
 //!
 //! The real adapter binary is spawned over stdio and driven by rmcp's own MCP
 //! client; behind it a plain `TcpListener` plays the daemon, exactly as
@@ -237,6 +238,50 @@ async fn server_side_validation() {
         text.contains("An order needs six fields; received: action_id,side."),
         "the tool error carries the daemon's own message, proving the two \
          fields were forwarded verbatim: {text}"
+    );
+
+    let _ = service.cancel().await;
+}
+
+/// `mcp::pending_order_is_a_tool_result` — a gated order answers `202`, which
+/// the adapter hands back as the tool's successful record, not an error (R5
+/// feature SPEC §3.3).
+#[tokio::test]
+async fn pending_order_is_a_tool_result() {
+    const PENDING: &str = r#"{"action_id":"buy-tencent-1","id":"01997f00-0000-7000-8000-0000000000c1","kind":"SUBMIT","source":"SESSION","approval":"PENDING","created_at_ns":300}"#;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let port = fake_daemon(|route, _| match route {
+        "GET /health" => (200, health_ok()),
+        "GET /desks" => (200, desks()),
+        _ if route == format!("POST /desks/{DESK_ID}/orders") => (202, PENDING.to_string()),
+        _ => (
+            404,
+            r#"{"code":"NOT_FOUND","message":"Unexpected route."}"#.to_string(),
+        ),
+    });
+    write_endpoint(root.path(), port);
+    let service = adapter(root.path()).await;
+
+    let arguments = serde_json::json!({
+        "action_id": "buy-tencent-1", "instrument_id": "0700.XHKG",
+        "side": "BUY", "type": "MARKET", "quantity": "100"
+    })
+    .as_object()
+    .expect("object")
+    .clone();
+    let result = service
+        .call_tool(CallToolRequestParams::new("submit_order").with_arguments(arguments))
+        .await
+        .expect("the call itself is routed");
+    assert_ne!(result.is_error, Some(true), "{result:?}");
+    assert_eq!(
+        result.content[0]
+            .as_text()
+            .expect("a text content block")
+            .text,
+        PENDING,
+        "the pending record reaches the agent verbatim"
     );
 
     let _ = service.cancel().await;

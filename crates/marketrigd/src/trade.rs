@@ -45,8 +45,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::catalog::{self, Entry};
-use crate::desk::{self, DeskError};
+use crate::desk::{self, DeskError, append_event};
 use crate::node::{Node, NodeContext, NodeError, Registry};
+use crate::policy::{self, DecideError, Decision};
 use crate::store::{Store, StoreError, now_ns};
 
 /// The version stamped on every payload this build writes and the only one it
@@ -84,6 +85,9 @@ pub enum TradeError {
     /// The attribution headers do not name a firing of this desk under that
     /// trigger (R2 feature SPEC §6).
     Attribution(String),
+    /// The cancel names an order whose submit is still awaiting approval, so
+    /// there is nothing in the sandbox to cancel (R5 §3.3).
+    PendingApproval(String),
     Desk(DeskError),
 }
 
@@ -97,6 +101,7 @@ impl TradeError {
             TradeError::NotReady(_) => "DESK_NOT_READY",
             TradeError::Unavailable(_) => "MARKET_UNAVAILABLE",
             TradeError::Attribution(_) => "ATTRIBUTION_INVALID",
+            TradeError::PendingApproval(_) => "ORDER_PENDING_APPROVAL",
             TradeError::Desk(e) => e.code(),
         }
     }
@@ -128,6 +133,10 @@ impl fmt::Display for TradeError {
             TradeError::Attribution(why) => {
                 write!(f, "The action's trigger attribution is unusable: {why}.")
             }
+            TradeError::PendingApproval(id) => write!(
+                f,
+                "The order {id:?} is still awaiting approval and has not reached the paper book."
+            ),
             TradeError::Desk(e) => write!(f, "{e}"),
         }
     }
@@ -193,8 +202,15 @@ pub struct ActionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub firing_id: Option<String>,
     pub created_at_ns: i64,
-    /// The response record, set when the command answers. `null` only while a
-    /// concurrent duplicate of the same `action_id` is still in flight.
+    /// `ALWAYS_ALLOW`, `PENDING`, `APPROVED`, or `DENIED` (R5 §3.3).
+    pub approval: String,
+    /// Null exactly while `PENDING`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at_ns: Option<i64>,
+    /// The response record, set when the command answers. Absent while the
+    /// order is pending approval, and `null` only while a concurrent duplicate
+    /// of the same `action_id` is still in flight.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Value>,
 }
 
@@ -240,39 +256,93 @@ struct Settled {
 // Submit and cancel (§4.2, §6)
 // ---------------------------------------------------------------------------
 
-/// `POST /desks/{desk_id}/orders` (§7). The `bool` is "this was a replay", which
-/// the route turns into `200` instead of `201` (R1-8).
+/// What a submit did, which the route turns into its status (R1-8, R5 §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Submitted {
+    /// `201` — the sandbox has answered.
+    Placed,
+    /// `200` — the stored record of an earlier submit under this `action_id`.
+    Replay,
+    /// `202` — recorded, awaiting approval, the sandbox untouched.
+    Pending,
+}
+
+/// `POST /desks/{desk_id}/orders` (§7, R5 §3.3).
 pub fn submit(
     store: &Store,
     registry: &Registry,
     desk_id: &str,
     body: &str,
     source: &Source,
-) -> Result<(ActionRecord, bool), TradeError> {
+) -> Result<(ActionRecord, Submitted), TradeError> {
     require_ready(store, desk_id)?;
     let (action_id, form) = validate(body)?;
     if let Some(record) = stored(store, desk_id, &action_id)? {
-        return Ok((record, true));
+        return Ok((record, Submitted::Replay));
     }
 
-    // The node before the row: a node that will not start leaves no action
-    // behind, so the same `action_id` stays retryable (§4.3).
-    let node = registry.ensure(desk_id)?;
-
-    let mut record = match begin(store, desk_id, "SUBMIT", &action_id, body, source)? {
-        Begun::Replay(record) => return Ok((record, true)),
-        Begun::New(record) => record,
+    // The node before the row on the ungated path: a node that will not start
+    // leaves no action behind, so the same `action_id` stays retryable (§4.3).
+    // Under `REQUIRE_APPROVAL` the node is neither started nor consulted (R5
+    // §3.3), so the policy is read first here; `begin` reads it again inside
+    // its own unit and that read is the one that decides the row. The two can
+    // disagree only if a `PUT` lands between them, and then the row is ungated
+    // with no node yet — which is why the node is ensured again below.
+    let started = if gated(store)? {
+        None
+    } else {
+        Some(registry.ensure(desk_id)?)
     };
 
-    let client_order_id = ClientOrderId::from(action_id.as_str());
+    let mut record = match begin(store, desk_id, "SUBMIT", &action_id, body, source)? {
+        Begun::Replay(record) => return Ok((record, Submitted::Replay)),
+        Begun::New(record) => record,
+    };
+    if record.approval == policy::PENDING {
+        return Ok((record, Submitted::Pending));
+    }
+
+    let node = match started {
+        Some(node) => node,
+        None => registry.ensure(desk_id)?,
+    };
+    record.outcome = Some(place_and_settle(store, &node, desk_id, &action_id, form)?);
+    Ok((record, Submitted::Placed))
+}
+
+/// Reads the order policy outside any unit, to decide whether the node is
+/// wanted at all (R5 §3.3). The authoritative read is [`begin`]'s, in the unit
+/// that writes the row.
+fn gated(store: &Store) -> Result<bool, TradeError> {
+    let policy: String = store.call(|conn| {
+        conn.query_row(
+            "SELECT paper_order_policy FROM installation_settings WHERE id = 1",
+            [],
+            |r| r.get(0),
+        )
+    })?;
+    Ok(policy == policy::REQUIRE_APPROVAL)
+}
+
+/// The half of a submit that runs once the row exists and the order is allowed
+/// to reach the sandbox: place, wait, land the outcome on the row. `submit`
+/// runs it inline; [`decide`] re-runs it from the stored request once the order
+/// is approved (R5 §3.3), which is why it is one function and not two.
+fn place_and_settle(
+    store: &Store,
+    node: &Node,
+    desk_id: &str,
+    action_id: &str,
+    form: Form,
+) -> Result<Value, TradeError> {
+    let client_order_id = ClientOrderId::from(action_id);
     node.call(move |context| place(context, form, client_order_id))?;
-    let settled = settle(&node, client_order_id, settled_submit)?;
-    finish(store, desk_id, &action_id, &settled.projection)?;
-    record.outcome = Some(settled.projection);
+    let settled = settle(node, client_order_id, settled_submit)?;
+    finish(store, desk_id, action_id, &settled.projection)?;
 
     match settled.refusal {
         Some(reason) => Err(TradeError::Rejected(reason)),
-        None => Ok((record, false)),
+        None => Ok(settled.projection),
     }
 }
 
@@ -294,6 +364,12 @@ pub fn cancel(
     }
     if let Some(record) = stored(store, desk_id, &action_id)? {
         return Ok(record);
+    }
+    // A cancel is never gated, but an order still awaiting approval has never
+    // reached the sandbox, so the honest answer names that state — before the
+    // node is consulted, and recording nothing (R5 §3.3).
+    if awaiting_approval(store, desk_id, client_order_id)? {
+        return Err(TradeError::PendingApproval(client_order_id.to_string()));
     }
 
     let node = registry.ensure(desk_id)?;
@@ -347,6 +423,118 @@ pub fn cancel(
     match settled.refusal {
         Some(reason) => Err(TradeError::Rejected(reason)),
         None => Ok(record),
+    }
+}
+
+/// Is this desk's `client_order_id` the action id of a submit that is still
+/// pending approval? The client order id *is* the action id (§4.3), so one
+/// lookup answers it (R5 §3.3).
+fn awaiting_approval(
+    store: &Store,
+    desk_id: &str,
+    client_order_id: &str,
+) -> Result<bool, StoreError> {
+    let (desk, action) = (desk_id.to_owned(), client_order_id.to_owned());
+    store.call(move |conn| {
+        conn.query_row(
+            "SELECT 1 FROM trading_actions WHERE desk_id = ?1 AND action_id = ?2 \
+             AND kind = 'SUBMIT' AND approval = 'PENDING'",
+            params![desk, action],
+            |_| Ok(true),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+    })
+}
+
+/// The `PAPER_ORDER` half of `POST /desks/{desk_id}/approvals/{id}` (R5 §3.1,
+/// §3.3), where `id` is `trading_actions.id`.
+///
+/// `APPROVE` starts the desk's node lazily — a node that will not start answers
+/// `MARKET_UNAVAILABLE` and leaves the row `PENDING` — then writes `APPROVED`
+/// and re-enters acceptance from the stored request, re-validated through the
+/// same [`validate`] the submit used. A sandbox refusal lands in the outcome and
+/// is not a failure of the decision. `DENY` writes `DENIED` and the terminal
+/// outcome, and the sandbox never sees the order.
+pub fn decide(
+    store: &Store,
+    registry: &Registry,
+    desk_id: &str,
+    row_id: &str,
+    decision: Decision,
+) -> Result<(), DecideError> {
+    let (action_id, request) = pending_action(store, desk_id, row_id)?;
+    let node = match decision {
+        Decision::Approve => Some(registry.ensure(desk_id).map_err(TradeError::from)?),
+        Decision::Deny => None,
+    };
+
+    let (approval, outcome) = match decision {
+        Decision::Approve => ("APPROVED", None),
+        Decision::Deny => (
+            "DENIED",
+            Some(json!({ "failure_code": "DENIED" }).to_string()),
+        ),
+    };
+    let now = now_ns();
+    let (desk, row) = (desk_id.to_owned(), row_id.to_owned());
+    let changed = store.unit(move |tx| {
+        // Guarded on `PENDING`, so a second decision writes nothing.
+        let changed = tx.execute(
+            "UPDATE trading_actions SET approval = ?3, decided_at_ns = ?4, \
+             outcome = coalesce(?5, outcome) \
+             WHERE desk_id = ?1 AND id = ?2 AND approval = 'PENDING'",
+            params![desk, row, approval, now, outcome],
+        )?;
+        if changed == 1 {
+            append_event(
+                tx,
+                "APPROVAL_DECIDED",
+                Some(&desk),
+                now,
+                json!({ "kind": "PAPER_ORDER", "id": row, "decision": decision.as_str() }),
+            )?;
+        }
+        Ok(changed)
+    })?;
+    if changed == 0 {
+        // Another decision won the race; the state it wrote is the answer.
+        return Err(pending_action(store, desk_id, row_id)
+            .err()
+            .unwrap_or_else(|| DecideError::NotFound(row_id.to_string())));
+    }
+
+    let Some(node) = node else { return Ok(()) };
+    let (_, form) = validate(&request)?;
+    match place_and_settle(store, &node, desk_id, &action_id, form) {
+        Ok(_) | Err(TradeError::Rejected(_)) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The desk's `PENDING` action row by its UUID, or why it cannot be decided
+/// (§3.1). Answers `(action_id, request)`.
+fn pending_action(
+    store: &Store,
+    desk_id: &str,
+    row_id: &str,
+) -> Result<(String, String), DecideError> {
+    let (desk, row) = (desk_id.to_owned(), row_id.to_owned());
+    let found: Option<(String, String, String)> = store.call(move |conn| {
+        conn.query_row(
+            "SELECT action_id, request, approval FROM trading_actions \
+             WHERE desk_id = ?1 AND id = ?2",
+            params![desk, row],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+    })?;
+    match found {
+        None => Err(DecideError::NotFound(row_id.to_string())),
+        Some((_, _, approval)) if approval != policy::PENDING => {
+            Err(DecideError::AlreadyDecided { approval })
+        }
+        Some((action_id, request, _)) => Ok((action_id, request)),
     }
 }
 
@@ -852,30 +1040,58 @@ fn stored(
     let action = action_id.to_owned();
     store.call(move |conn| {
         conn.query_row(
-            "SELECT action_id, id, kind, source, trigger_id, firing_id, created_at_ns, outcome \
-             FROM trading_actions WHERE desk_id = ?1 AND action_id = ?2",
+            &format!("SELECT {RECORD} FROM trading_actions WHERE desk_id = ?1 AND action_id = ?2"),
             params![desk, action],
-            |r| {
-                Ok(ActionRecord {
-                    action_id: r.get(0)?,
-                    id: r.get(1)?,
-                    kind: r.get(2)?,
-                    source: r.get(3)?,
-                    trigger_id: r.get(4)?,
-                    firing_id: r.get(5)?,
-                    created_at_ns: r.get(6)?,
-                    outcome: r
-                        .get::<_, Option<String>>(7)?
-                        .and_then(|outcome| serde_json::from_str(&outcome).ok()),
-                })
-            },
+            record,
         )
         .optional()
     })
 }
 
+/// `GET /desks/{desk_id}/history/actions` (R5 §3.3): every trading action of
+/// the desk, newest first, whatever the desk's state — which is how an agent
+/// learns why its order has not filled.
+pub fn history_actions(store: &Store, desk_id: &str) -> Result<Vec<ActionRecord>, StoreError> {
+    let desk = desk_id.to_owned();
+    store.call(move |conn| {
+        conn.prepare(&format!(
+            "SELECT {RECORD} FROM trading_actions \
+             WHERE desk_id = ?1 ORDER BY created_at_ns DESC, id DESC"
+        ))?
+        .query_map([desk], record)?
+        .collect()
+    })
+}
+
+/// The `trading_actions` columns an [`ActionRecord`] is read from, and the
+/// projection that reads them.
+const RECORD: &str = "action_id, id, kind, source, trigger_id, firing_id, created_at_ns, \
+                      approval, decided_at_ns, outcome";
+
+fn record(r: &rusqlite::Row<'_>) -> rusqlite::Result<ActionRecord> {
+    Ok(ActionRecord {
+        action_id: r.get(0)?,
+        id: r.get(1)?,
+        kind: r.get(2)?,
+        source: r.get(3)?,
+        trigger_id: r.get(4)?,
+        firing_id: r.get(5)?,
+        created_at_ns: r.get(6)?,
+        approval: r.get(7)?,
+        decided_at_ns: r.get(8)?,
+        outcome: r
+            .get::<_, Option<String>>(9)?
+            .and_then(|outcome| serde_json::from_str(&outcome).ok()),
+    })
+}
+
 /// Records the action **before** the sandbox sees the command, in its own unit
 /// (§6). Losing the race on the same identity is a replay, not a failure.
+///
+/// The unit reads `paper_order_policy` itself, which is what keeps the gate
+/// honest under a concurrent `PUT` (R5 §2): a gated submit is inserted `PENDING`
+/// with a null `decided_at_ns` and its `APPROVAL_REQUESTED`, and the caller
+/// answers `202` without touching the node. A cancel is never gated (R5 §3.3).
 fn begin(
     store: &Store,
     desk_id: &str,
@@ -885,7 +1101,7 @@ fn begin(
     source: &Source,
 ) -> Result<Begun, TradeError> {
     let (source, trigger_id, firing_id) = source.parts();
-    let record = ActionRecord {
+    let mut record = ActionRecord {
         action_id: action_id.to_owned(),
         id: Uuid::now_v7().to_string(),
         kind: kind.to_owned(),
@@ -893,17 +1109,27 @@ fn begin(
         trigger_id: trigger_id.map(str::to_owned),
         firing_id: firing_id.map(str::to_owned),
         created_at_ns: now_ns(),
+        approval: policy::ALWAYS_ALLOW.to_owned(),
+        decided_at_ns: None,
         outcome: None,
     };
     let row = record.clone();
     let desk = desk_id.to_owned();
     let request = request.to_owned();
     let inserted = store.unit(move |tx| {
+        let pending =
+            kind == "SUBMIT" && policy::read(tx)?.paper_order_policy == policy::REQUIRE_APPROVAL;
+        let approval = if pending {
+            policy::PENDING
+        } else {
+            policy::ALWAYS_ALLOW
+        };
+        let decided_at_ns = (!pending).then_some(row.created_at_ns);
         tx.execute(
             "INSERT INTO trading_actions \
              (desk_id, action_id, id, kind, source, trigger_id, firing_id, request, \
               approval, decided_at_ns, created_at_ns) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'ALWAYS_ALLOW', ?9, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 desk,
                 row.action_id,
@@ -913,12 +1139,31 @@ fn begin(
                 row.trigger_id,
                 row.firing_id,
                 request,
+                approval,
+                decided_at_ns,
                 row.created_at_ns
             ],
-        )
+        )?;
+        if pending {
+            append_event(
+                tx,
+                "APPROVAL_REQUESTED",
+                Some(&desk),
+                row.created_at_ns,
+                requested(&row, &request),
+            )?;
+        }
+        Ok(pending)
     });
     match inserted {
-        Ok(_) => Ok(Begun::New(record)),
+        Ok(pending) => {
+            if pending {
+                record.approval = policy::PENDING.to_owned();
+            } else {
+                record.decided_at_ns = Some(record.created_at_ns);
+            }
+            Ok(Begun::New(record))
+        }
         Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)))
             if f.code == ErrorCode::ConstraintViolation =>
         {
@@ -931,6 +1176,26 @@ fn begin(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// The `APPROVAL_REQUESTED` payload of a gated order (R5 §3.3): the row's
+/// identity and the terms the user is being asked about, read from the request
+/// the caller's own body already passed [`validate`].
+fn requested(row: &ActionRecord, request: &str) -> Value {
+    let body: Value = serde_json::from_str(request).unwrap_or(Value::Null);
+    let mut payload = json!({
+        "kind": "PAPER_ORDER",
+        "id": row.id,
+        "action_id": row.action_id,
+        "instrument_id": body["instrument_id"],
+        "side": body["side"],
+        "type": body["type"],
+        "quantity": body["quantity"],
+    });
+    if let Some(price) = body.get("price").filter(|price| !price.is_null()) {
+        payload["price"] = price.clone();
+    }
+    payload
 }
 
 /// The outcome lands on the row when the command answers (§6).
@@ -1369,7 +1634,9 @@ fn apply(context: &NodeContext, snapshot: BookSnapshot) -> Result<(), String> {
 
 // ---------------------------------------------------------------------------
 // trade::cycle_and_prompt_atomic, trade::snapshot_restores_book
-// (feature SPEC §11)
+// (feature SPEC §11); trade::pending_order_approval,
+// trade::constitution_names_the_approval_boundary
+// (R5 feature SPEC §8 check 3)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1582,7 +1849,7 @@ fn snapshot_restores_book() {
         &Source::Session,
     )
     .expect("the market buy is accepted");
-    assert!(!replayed);
+    assert_eq!(replayed, Submitted::Placed);
     let outcome = bought.outcome.clone().unwrap();
     assert_eq!(outcome["status"], "FILLED", "{outcome}");
     assert_eq!(outcome["client_order_id"], "buy-aapl-1");
@@ -1730,4 +1997,374 @@ fn book_balances(cache: &Cache) -> Vec<(String, String)> {
         .collect();
     balances.sort();
     balances
+}
+
+/// Every operational event of one desk, in the table's own order.
+#[cfg(test)]
+fn desk_events(store: &Store, desk_id: &str) -> Vec<(String, Value)> {
+    let desk = desk_id.to_owned();
+    store
+        .call(move |conn| {
+            conn.prepare(
+                "SELECT kind, payload FROM operational_events WHERE desk_id = ?1 \
+                 ORDER BY occurred_at_ns, id",
+            )?
+            .query_map([desk], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or(Value::Null),
+                ))
+            })?
+            .collect()
+        })
+        .unwrap()
+}
+
+/// The gated order path end to end (R5 feature SPEC §3.3, §8 check 3): the
+/// pending insert the node never sees, the replay, the request event, approval
+/// re-entering acceptance for a fill and for a refusal, denial, the two cancel
+/// answers, the actions listing, a `TRIGGER` source, and a node that will not
+/// start leaving the row decidable.
+#[cfg(test)]
+#[test]
+fn pending_order_approval() {
+    use std::sync::Arc;
+
+    use crate::feed::{FeedBase, MarketState};
+
+    let aapl = catalog::find("AAPL.XNAS").unwrap();
+    let (_dir, store) = crate::store::open_temp();
+    let (base, _hits) = crate::feed::scripted_server(vec![(
+        200,
+        crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let desk = crate::node::seeded_desk(&store, "alpha");
+    let registry = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(FeedBase::standin(base)),
+    );
+    // The policy a `PUT /settings/policies` would have written.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "UPDATE installation_settings SET paper_order_policy = 'REQUIRE_APPROVAL' \
+                 WHERE id = 1",
+                [],
+            )
+        })
+        .unwrap();
+    let market = |action_id: &str, quantity: &str| {
+        format!(
+            r#"{{"action_id":"{action_id}","instrument_id":"AAPL.XNAS",
+                 "side":"BUY","type":"MARKET","quantity":"{quantity}","price":null}}"#
+        )
+    };
+
+    // --- The pending record, written without the node ----------------------
+    let (pending, submitted) = submit(
+        &store,
+        &registry,
+        &desk,
+        &market("buy-1", "10"),
+        &Source::Session,
+    )
+    .expect("a gated order is recorded, not refused");
+    assert_eq!(submitted, Submitted::Pending);
+    assert_eq!(pending.approval, "PENDING");
+    assert_eq!(pending.decided_at_ns, None);
+    let serialized = serde_json::to_value(&pending).unwrap();
+    assert_eq!(
+        serialized.as_object().unwrap().keys().collect::<Vec<_>>(),
+        [
+            "action_id",
+            "approval",
+            "created_at_ns",
+            "id",
+            "kind",
+            "source"
+        ],
+        "no outcome and no decision instant while pending: {serialized}"
+    );
+    // The only thing that happened is the request: no node was started, and
+    // therefore none was consulted (§3.3).
+    assert_eq!(
+        desk_events(&store, &desk),
+        vec![(
+            "APPROVAL_REQUESTED".to_string(),
+            json!({
+                "kind": "PAPER_ORDER",
+                "id": pending.id,
+                "action_id": "buy-1",
+                "instrument_id": "AAPL.XNAS",
+                "side": "BUY",
+                "type": "MARKET",
+                "quantity": "10",
+            })
+        )]
+    );
+
+    // A repeated action_id replays the same record.
+    let (replay, submitted) = submit(
+        &store,
+        &registry,
+        &desk,
+        &market("buy-1", "10"),
+        &Source::Session,
+    )
+    .unwrap();
+    assert_eq!(submitted, Submitted::Replay);
+    assert_eq!(serde_json::to_value(&replay).unwrap(), serialized);
+
+    // A cancel naming it says so, records nothing, and consults no node.
+    let refused = cancel(
+        &store,
+        &registry,
+        &desk,
+        "buy-1",
+        r#"{"action_id":"cancel-1"}"#,
+        &Source::Session,
+    )
+    .expect_err("a pending submit has nothing to cancel");
+    assert_eq!(refused.code(), "ORDER_PENDING_APPROVAL");
+    assert_eq!(
+        count(
+            &store,
+            "SELECT count(*) FROM trading_actions WHERE kind = 'CANCEL'"
+        ),
+        0
+    );
+    assert_eq!(desk_events(&store, &desk).len(), 1);
+
+    // --- Approval re-enters acceptance -------------------------------------
+    // The book must be observed before a market order can match it.
+    registry.ensure(&desk).expect("the node starts");
+    crate::node::within(10, "the first observation", || {
+        registry.market().read(aapl, now_ns()).sequence == 1
+    });
+
+    decide(&store, &registry, &desk, &pending.id, Decision::Approve)
+        .expect("the approval re-enters acceptance");
+    let approved = stored(&store, &desk, "buy-1").unwrap().unwrap();
+    assert_eq!(approved.approval, "APPROVED");
+    assert!(approved.decided_at_ns.is_some());
+    let outcome = approved.outcome.clone().unwrap();
+    assert_eq!(outcome["status"], "FILLED", "{outcome}");
+    assert_eq!(outcome["client_order_id"], "buy-1");
+    assert!(count(&store, "SELECT count(*) FROM fills") >= 1);
+    assert!(
+        desk_events(&store, &desk).contains(&(
+            "APPROVAL_DECIDED".to_string(),
+            json!({ "kind": "PAPER_ORDER", "id": pending.id, "decision": "APPROVE" })
+        )),
+        "the decision is on the desk's own tail"
+    );
+
+    // A decided row is decided; another desk's path never finds it.
+    assert_eq!(
+        decide(&store, &registry, &desk, &pending.id, Decision::Deny)
+            .unwrap_err()
+            .code(),
+        "APPROVAL_DECIDED"
+    );
+    let beta = crate::node::seeded_desk(&store, "beta");
+    assert_eq!(
+        decide(&store, &registry, &beta, &pending.id, Decision::Approve)
+            .unwrap_err()
+            .code(),
+        "APPROVAL_NOT_FOUND"
+    );
+
+    // --- Denial is terminal, and the sandbox never sees the order ----------
+    let (resting, submitted) = submit(
+        &store,
+        &registry,
+        &desk,
+        r#"{"action_id":"rest-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"LIMIT","quantity":"5","price":"200.00"}"#,
+        &Source::Session,
+    )
+    .unwrap();
+    assert_eq!(submitted, Submitted::Pending);
+    assert!(
+        desk_events(&store, &desk).contains(&(
+            "APPROVAL_REQUESTED".to_string(),
+            json!({
+                "kind": "PAPER_ORDER",
+                "id": resting.id,
+                "action_id": "rest-1",
+                "instrument_id": "AAPL.XNAS",
+                "side": "BUY",
+                "type": "LIMIT",
+                "quantity": "5",
+                "price": "200.00",
+            })
+        )),
+        "a limit order's price is part of what is being approved"
+    );
+    let events_before = count(&store, "SELECT count(*) FROM order_events");
+    decide(&store, &registry, &desk, &resting.id, Decision::Deny).expect("a denial is a write");
+    let denied = stored(&store, &desk, "rest-1").unwrap().unwrap();
+    assert_eq!(denied.approval, "DENIED");
+    assert!(denied.decided_at_ns.is_some());
+    assert_eq!(denied.outcome.unwrap(), json!({ "failure_code": "DENIED" }));
+    assert_eq!(
+        count(&store, "SELECT count(*) FROM order_events"),
+        events_before,
+        "the denied order never reached the sandbox"
+    );
+    // A cancel of a denied order is an ordinary unknown order.
+    assert_eq!(
+        cancel(
+            &store,
+            &registry,
+            &desk,
+            "rest-1",
+            r#"{"action_id":"cancel-2"}"#,
+            &Source::Session,
+        )
+        .unwrap_err()
+        .code(),
+        "ORDER_NOT_FOUND"
+    );
+
+    // --- A refusal after approval is still a record ------------------------
+    let (too_big, _) = submit(
+        &store,
+        &registry,
+        &desk,
+        // Far beyond the desk's 100,000 USD.
+        &market("buy-big", "1000"),
+        &Source::Session,
+    )
+    .unwrap();
+    decide(&store, &registry, &desk, &too_big.id, Decision::Approve)
+        .expect("a sandbox refusal is the outcome, not a failure of the decision");
+    let refused = stored(&store, &desk, "buy-big").unwrap().unwrap();
+    assert_eq!(refused.approval, "APPROVED");
+    let status = refused.outcome.clone().unwrap()["status"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        matches!(status.as_str(), "DENIED" | "REJECTED"),
+        "the sandbox's own refusal is the outcome: {:?}",
+        refused.outcome
+    );
+
+    // --- A trigger's order is gated the same way and keeps its attribution --
+    let (trigger_id, firing_id) = (Uuid::now_v7().to_string(), Uuid::now_v7().to_string());
+    let (t, f, d) = (trigger_id.clone(), firing_id.clone(), desk.clone());
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                 enabled, revision, created_at_ns, updated_at_ns) \
+                 VALUES (?1, ?2, 'noon', 'SCHEDULED', 'ONE_OFF', 'trade', 1, 1, 1, 1, 1)",
+                params![t, d],
+            )?;
+            tx.execute(
+                "INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+                 trigger_revision, brief) VALUES (?1, ?2, ?3, 1, 1, 1, 'trade')",
+                params![f, d, t],
+            )
+        })
+        .unwrap();
+    let (_, submitted) = submit(
+        &store,
+        &registry,
+        &desk,
+        &market("buy-trigger", "1"),
+        &Source::Trigger {
+            trigger_id: trigger_id.clone(),
+            firing_id: firing_id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(submitted, Submitted::Pending);
+    let fired = stored(&store, &desk, "buy-trigger").unwrap().unwrap();
+    assert_eq!(
+        (
+            fired.source.as_str(),
+            fired.trigger_id.as_deref(),
+            fired.firing_id.as_deref(),
+            fired.approval.as_str()
+        ),
+        (
+            "TRIGGER",
+            Some(trigger_id.as_str()),
+            Some(firing_id.as_str()),
+            "PENDING"
+        )
+    );
+
+    // --- The listing: newest first, with the state the agent reads ---------
+    let actions = history_actions(&store, &desk).unwrap();
+    assert_eq!(
+        actions
+            .iter()
+            .map(|a| (a.action_id.as_str(), a.kind.as_str(), a.approval.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("buy-trigger", "SUBMIT", "PENDING"),
+            ("buy-big", "SUBMIT", "APPROVED"),
+            ("rest-1", "SUBMIT", "DENIED"),
+            ("buy-1", "SUBMIT", "APPROVED"),
+        ]
+    );
+
+    // --- A node that will not start leaves the row PENDING ------------------
+    let gamma = crate::node::seeded_desk(&store, "gamma");
+    let poisoned = gamma.clone();
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO book_snapshots VALUES (?1, 99, '{}', 3000)",
+                [poisoned],
+            )
+        })
+        .unwrap();
+    let (stuck, submitted) = submit(
+        &store,
+        &registry,
+        &gamma,
+        &market("buy-stuck", "1"),
+        &Source::Session,
+    )
+    .expect("the gated path never touches the node");
+    assert_eq!(submitted, Submitted::Pending);
+    let unavailable = decide(&store, &registry, &gamma, &stuck.id, Decision::Approve)
+        .expect_err("the node cannot start");
+    assert_eq!(unavailable.code(), "MARKET_UNAVAILABLE");
+    let still = stored(&store, &gamma, "buy-stuck").unwrap().unwrap();
+    assert_eq!(
+        (still.approval.as_str(), still.decided_at_ns),
+        ("PENDING", None),
+        "an approval that could not reach the sandbox is still decidable"
+    );
+
+    registry.stop_all();
+}
+
+/// The seeded constitution carries §3.3's paragraph byte for byte, so a desk
+/// created from R5 on is told where the boundary is (R5 feature SPEC §3.3).
+#[cfg(test)]
+#[test]
+fn constitution_names_the_approval_boundary() {
+    let spec = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdd/features/r5-desktop-approval-controls/SPEC.md"),
+    )
+    .unwrap();
+    let open = "```markdown\n";
+    let body = &spec[spec.find(open).expect("the §3.3 fence") + open.len()..];
+    let paragraph = &body[..body.find("\n```").expect("the closing fence") + 1];
+    assert!(
+        paragraph.contains("marketrig history actions"),
+        "{paragraph}"
+    );
+    assert!(
+        include_str!("../seed/AGENTS.md").contains(paragraph),
+        "the seeded constitution must carry §3.3's paragraph byte for byte:\n{paragraph}"
+    );
 }
