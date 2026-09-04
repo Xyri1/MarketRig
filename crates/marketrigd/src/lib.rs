@@ -5,6 +5,7 @@ pub mod codex;
 pub mod daemon;
 pub mod desk;
 pub mod dispatch;
+pub mod events;
 pub mod exec;
 pub mod feed;
 pub mod log;
@@ -136,6 +137,11 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             },
             startup.daemon_uuid.clone(),
         );
+        // The events tail's one publisher, started before the routes it serves
+        // (R5 feature SPEC §4.1).
+        let events = events::Publisher::new(startup.store.clone())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let events_task = tokio::spawn(events::run(events.clone(), shut_rx.clone()));
         let router = api::router(api::ApiState {
             store: startup.store.clone(),
             desks_home: startup.roots.desks.clone(),
@@ -150,6 +156,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             channels,
             dispatch: dispatcher.clone(),
             memory: memory.clone(),
+            events,
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -192,6 +199,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
         // The dispatcher stops before the terminals do, so their exits are the
         // Quit path's to record, not an activation failure's (§6.2, §7).
         let _ = tokio::time::timeout_at(deadline, dispatcher_task).await;
+        let _ = tokio::time::timeout_at(deadline, events_task).await;
         // Terminals first, then the app-server, then the desks' trading nodes
         // (§4.1, §4.2); every row that was still open ends `QUIT`.
         let _ = tokio::time::timeout_at(

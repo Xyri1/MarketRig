@@ -4,7 +4,7 @@
 //! root `sdd/SPEC.md` §15.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fmt, io, thread};
 
@@ -185,6 +185,9 @@ type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 #[derive(Debug, Clone)]
 pub struct Store {
     jobs: mpsc::Sender<Job>,
+    /// Pulsed after every committed unit; the events publisher wakes on it
+    /// (R5 feature SPEC §4.1, per R5-5). Shared by every clone.
+    commits: Arc<tokio::sync::Notify>,
 }
 
 impl Store {
@@ -211,7 +214,15 @@ impl Store {
                 }
             })?;
         opened.recv().map_err(|_| StoreError::Closed)??;
-        Ok(Store { jobs })
+        Ok(Store {
+            jobs,
+            commits: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
+    /// The post-commit signal (R5 feature SPEC §4.1).
+    pub fn commits(&self) -> Arc<tokio::sync::Notify> {
+        self.commits.clone()
     }
 
     /// Runs a read or single statement on the database thread.
@@ -230,12 +241,17 @@ impl Store {
         T: Send + 'static,
         F: FnOnce(&Transaction<'_>) -> rusqlite::Result<T> + Send + 'static,
     {
-        self.submit(move |conn| {
+        let value = self.submit(move |conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let value = f(&tx)?;
             tx.commit()?;
             Ok(value)
-        })
+        })?;
+        // Waiters first, then a permit for a publisher that is between waits,
+        // so no commit can pass unnoticed (R5 feature SPEC §4.1).
+        self.commits.notify_waiters();
+        self.commits.notify_one();
+        Ok(value)
     }
 
     fn submit<T, F>(&self, f: F) -> Result<T, StoreError>

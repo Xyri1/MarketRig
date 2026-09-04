@@ -506,6 +506,7 @@ async fn serve(rig: Rig) -> Served {
         channels: Arc::new(crate::claude::Channels::default()),
         dispatch: rig.dispatcher.clone(),
         memory: Arc::new(crate::memory::seam_memory(rig.store.clone(), roots)),
+        events: crate::events::Publisher::new(rig.store.clone()).unwrap(),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
