@@ -486,6 +486,8 @@ struct Served {
 }
 
 async fn serve(rig: Rig) -> Served {
+    let roots = crate::store::Roots::resolve(Some(rig._dir.path())).unwrap();
+    roots.create_dirs().unwrap();
     let state = crate::api::ApiState {
         store: rig.store.clone(),
         desks_home: std::path::PathBuf::from("/desks"),
@@ -503,6 +505,7 @@ async fn serve(rig: Rig) -> Served {
         terminals: crate::terminal::Manager::new().0,
         channels: Arc::new(crate::claude::Channels::default()),
         dispatch: rig.dispatcher.clone(),
+        memory: Arc::new(crate::memory::seam_memory(rig.store.clone(), roots)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

@@ -93,4 +93,60 @@ fn secret_free() {
             .unwrap()
             .contains(&startup.credential)
     );
+
+    // R4 feature SPEC §8 check 7: the provider key reaches the credential store
+    // and nothing else — not the database file, not the log root, not an event.
+    const PROVIDER_KEY: &str = "sk-marketrig-fake-secrets-check-0123456789";
+    let memory = crate::memory::seam_memory(startup.store.clone(), roots.clone());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(memory.put_provider(crate::memory::ProviderRequest {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: Some(PROVIDER_KEY.to_string()),
+            llm_model: "llm-1".to_string(),
+            embedding_model: "emb-1".to_string(),
+        }))
+        .unwrap();
+    tracing::info!("the provider was configured");
+
+    assert!(
+        !log_text(&roots.logs).contains(PROVIDER_KEY),
+        "the provider key must never reach the log root"
+    );
+    for entry in std::fs::read_dir(&roots.data).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.starts_with("marketrig.sqlite3") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            !bytes
+                .windows(PROVIDER_KEY.len())
+                .any(|w| w == PROVIDER_KEY.as_bytes()),
+            "the provider key must never reach {name}"
+        );
+    }
+    let payloads: String = startup
+        .store
+        .call(|c| {
+            c.prepare("SELECT payload FROM operational_events")?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+        .concat();
+    assert!(
+        !payloads.contains(PROVIDER_KEY),
+        "no event payload may carry the provider key"
+    );
+
+    // The seam credential store is the one place it lives (per D49, R4-2).
+    assert!(
+        std::fs::read_to_string(roots.runtime().join("credentials.json"))
+            .unwrap()
+            .contains(PROVIDER_KEY)
+    );
 }

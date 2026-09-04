@@ -121,6 +121,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/002_r1.sql"),
     include_str!("store/003_r2.sql"),
     include_str!("store/004_r3.sql"),
+    include_str!("store/005_r4.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -336,6 +337,8 @@ fn migrations_apply_and_stamp() {
             "executions",
             "fills",
             "firings",
+            "memory_child",
+            "memory_provider",
             "native_sessions",
             "operational_events",
             "order_events",
@@ -902,5 +905,151 @@ fn session_migration_applies() {
             ))
             .is_err(),
         "a second open process on the same desk must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// store (R4 feature SPEC §8 check 6)
+// ---------------------------------------------------------------------------
+
+/// Migration 5 (feature SPEC `r4-memory-skills-loop` §6): a fresh database
+/// carries the two seeded memory rows, and a migration-4 database upgrades in
+/// place with every row intact and the six memory event kinds accepted.
+#[cfg(test)]
+#[test]
+fn memory_migration_applies() {
+    let (_dir, store) = open_temp();
+    for name in ["memory_child", "memory_provider"] {
+        let strict = store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [name],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap_or_else(|e| panic!("{name} must exist: {e}"));
+        assert_eq!(strict, 1, "{name} must be STRICT");
+    }
+    // One row each, seeded (§6).
+    let seeded: (i64, String, i64, i64) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT count(*) FROM memory_child), (SELECT state FROM memory_child), \
+                 (SELECT count(*) FROM memory_provider), (SELECT updated_at_ns FROM memory_provider)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(seeded, (1, "UNCONFIGURED".to_string(), 1, 0));
+    // A second row of either is refused, and so is a failure code without the
+    // state that must carry it.
+    for sql in [
+        "INSERT INTO memory_child (id, state) VALUES (2, 'UNCONFIGURED')",
+        "UPDATE memory_child SET failure_code = 'NOT_FOUND' WHERE id = 1",
+        "UPDATE memory_child SET state = 'UNAVAILABLE' WHERE id = 1",
+        "UPDATE memory_child SET state = 'WOBBLED' WHERE id = 1",
+    ] {
+        assert!(
+            store.unit(move |tx| tx.execute(sql, [])).is_err(),
+            "{sql} must be rejected"
+        );
+    }
+    drop(store);
+
+    // A migration-4 database upgrades in place: every row survives.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..4] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+               VALUES ('p0','0199','EVALUATION','QUEUED','{\"a\":1}',1100);
+             UPDATE runtimes SET state = 'AVAILABLE', executable_path = '/x/codex', \
+               version = '99.0.0', validated_at_ns = 1200 WHERE runtime = 'codex';
+             INSERT INTO operational_events VALUES ('e0','SESSION_STARTED','0199',1300,'{}');
+             INSERT INTO operational_events VALUES ('e1','RUNTIME_SWITCHED','0199',1400,'{}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4i64).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        MIGRATIONS.len() as i64
+    );
+    let carried: (String, String, String, i64, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT name FROM desks), (SELECT payload FROM prompts), \
+                 (SELECT executable_path FROM runtimes WHERE runtime = 'codex'), \
+                 (SELECT count(*) FROM operational_events), \
+                 (SELECT group_concat(kind, ',') FROM (SELECT kind FROM operational_events \
+                    ORDER BY occurred_at_ns))",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        (
+            "alpha".to_string(),
+            "{\"a\":1}".to_string(),
+            "/x/codex".to_string(),
+            2,
+            "SESSION_STARTED,RUNTIME_SWITCHED".to_string(),
+        )
+    );
+    // The tail index is back on the rebuilt table.
+    let index: String = store
+        .call(|c| {
+            c.query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'operational_events' AND sql IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(index, "operational_events_tail");
+
+    // The widened vocabulary accepts the six memory kinds and still refuses the rest.
+    for (n, kind) in [
+        "MEMORY_CONFIGURED",
+        "MEMORY_STARTED",
+        "MEMORY_LOST",
+        "MEMORY_UNAVAILABLE",
+        "MEMORY_RETAINED",
+        "MEMORY_RECALLED",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .unit(move |tx| {
+                tx.execute(
+                    "INSERT INTO operational_events VALUES (?1, ?2, NULL, ?3, '{}')",
+                    rusqlite::params![format!("m{n}"), kind, 2000 + n as i64],
+                )
+            })
+            .unwrap_or_else(|e| panic!("{kind} must be accepted: {e}"));
+    }
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO operational_events VALUES ('m9','MEMORY_WOBBLED',NULL,3000,'{}')",
+                [],
+            ))
+            .is_err(),
+        "an unknown memory kind must be rejected"
     );
 }

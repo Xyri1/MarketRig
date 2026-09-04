@@ -12,11 +12,12 @@ use axum::extract::{Path, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 
 use crate::desk::{self, Desk, DeskError};
+use crate::memory::{self, MemoryError};
 use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
 use crate::trigger::{self, TriggerError};
@@ -46,6 +47,9 @@ pub struct ApiState {
     /// Activation policy and the delivery queue, shared with the dispatcher
     /// task so a route and the queue start sessions exactly one way (§6, §7).
     pub dispatch: Arc<crate::dispatch::Dispatcher>,
+    /// The memory child, its provider settings, and the desk-scoped operations
+    /// (R4 feature SPEC §2, §3, §4).
+    pub memory: Arc<crate::memory::Memory>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -100,6 +104,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/runtimes", get(runtimes))
         .route("/runtimes/{runtime}/discover", post(runtime_discover))
         .route("/runtimes/{runtime}/retry", post(runtime_retry))
+        .route("/memory", get(memory_status))
+        .route("/memory/provider", put(memory_provider))
+        .route("/memory/provider/models", get(memory_models))
+        .route("/memory/discover", post(memory_discover))
+        .route("/memory/retry", post(memory_retry))
         .route("/desks/{desk_id}/prompts", get(list_prompts))
         .route("/desks/{desk_id}/prompts/{prompt_id}", get(show_prompt))
         .route("/quit", post(quit))
@@ -182,6 +191,24 @@ impl IntoResponse for TriggerError {
             TriggerError::Invalid(_) => StatusCode::BAD_REQUEST,
             TriggerError::NameTaken(_) | TriggerError::NotReady(_) => StatusCode::CONFLICT,
             _ => StatusCode::NOT_FOUND,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The R4 §3 and §4.3 code-to-status map, appended the same way.
+/// `MemoryError::code()` owns the code; this owns the status.
+impl IntoResponse for MemoryError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            MemoryError::Validation(_) => StatusCode::BAD_REQUEST,
+            MemoryError::Unconfigured | MemoryError::EmbeddingModelLocked => StatusCode::CONFLICT,
+            MemoryError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            MemoryError::Unavailable(_) | MemoryError::CredentialStoreUnavailable(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            MemoryError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            MemoryError::Error(_) | MemoryError::ProviderUnreachable(_) => StatusCode::BAD_GATEWAY,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -795,6 +822,74 @@ async fn runtime_retry(
     Ok(Json(row).into_response())
 }
 
+// The memory installation routes (R4 feature SPEC §2.1, §3). The desk-scoped
+// operations are C31's; nothing here starts the child.
+
+async fn memory_status(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<memory::Status>, MemoryError> {
+    Ok(Json(state.memory.status().await?))
+}
+
+#[derive(Deserialize)]
+struct MemoryDiscoverRequest {
+    executable: PathBuf,
+}
+
+async fn memory_discover(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, MemoryError> {
+    let Some(request) = is_json(&headers)
+        .then(|| serde_json::from_str::<MemoryDiscoverRequest>(&body).ok())
+        .flatten()
+    else {
+        return Err(MemoryError::Validation(
+            r#"The request body must be a JSON object with an "executable" path."#.to_string(),
+        ));
+    };
+    if !request.executable.is_absolute() {
+        return Err(MemoryError::Validation(format!(
+            "The executable path {} must be absolute.",
+            request.executable.display()
+        )));
+    }
+    Ok(Json(state.memory.discover(&request.executable).await?).into_response())
+}
+
+async fn memory_retry(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<memory::Child>, MemoryError> {
+    Ok(Json(state.memory.retry().await?))
+}
+
+async fn memory_provider(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<memory::Provider>, MemoryError> {
+    let Some(request) = is_json(&headers)
+        .then(|| serde_json::from_str::<memory::ProviderRequest>(&body).ok())
+        .flatten()
+    else {
+        return Err(MemoryError::Validation(
+            "The request body must be a JSON object with base_url, llm_model, embedding_model, \
+             and an optional api_key."
+                .to_string(),
+        ));
+    };
+    Ok(Json(state.memory.put_provider(request).await?))
+}
+
+async fn memory_models(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<serde_json::Value>, MemoryError> {
+    Ok(Json(
+        serde_json::json!({ "models": state.memory.models().await? }),
+    ))
+}
+
 fn unknown_runtime(name: &str) -> Response {
     envelope(
         StatusCode::NOT_FOUND,
@@ -1107,6 +1202,8 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
     let desks_home = dir.path().join("desks");
     std::fs::create_dir_all(&desks_home).unwrap();
+    let roots = crate::store::Roots::resolve(Some(dir.path())).unwrap();
+    roots.create_dirs().unwrap();
     let (quit, quit_rx) = tokio::sync::mpsc::channel(1);
     let registry = Arc::new(crate::node::Registry::new(
         store.clone(),
@@ -1127,6 +1224,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         registry: registry.clone(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
         dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
+        memory: Arc::new(crate::memory::seam_memory(store.clone(), roots)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

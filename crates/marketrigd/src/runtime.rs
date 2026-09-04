@@ -381,8 +381,9 @@ fn accepts(executable: &Path, flag: &str) -> bool {
 }
 
 /// A probe command: the executable directly, or `%ComSpec% /d /c` in front of a
-/// Windows batch launcher (§2).
-fn probe(executable: &Path, args: &[&str]) -> Command {
+/// Windows batch launcher (§2). Shared with the memory launcher's own `--help`
+/// probe (R4 feature SPEC §2.1), which has the same shape and the same bound.
+pub(crate) fn probe(executable: &Path, args: &[&str]) -> Command {
     let batch = executable
         .extension()
         .and_then(|e| e.to_str())
@@ -403,7 +404,7 @@ fn probe(executable: &Path, args: &[&str]) -> Command {
 
 /// Runs a probe with the §2 timeout, answering `(exit succeeded, stdout,
 /// stderr)` or `None` when it could not be started or did not finish in time.
-fn run(mut command: Command) -> Option<(bool, String, String)> {
+pub(crate) fn run(mut command: Command) -> Option<(bool, String, String)> {
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
