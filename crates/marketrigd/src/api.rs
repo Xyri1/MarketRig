@@ -51,6 +51,8 @@ pub struct ApiState {
     /// The memory child, its provider settings, and the desk-scoped operations
     /// (R4 feature SPEC §2, §3, §4).
     pub memory: Arc<crate::memory::Memory>,
+    /// The events tail's one publisher (R5 feature SPEC §4.1).
+    pub events: Arc<crate::events::Publisher>,
 }
 
 /// The whole §6 surface, every route behind the bearer check.
@@ -119,6 +121,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/settings/policies", get(policies).put(put_policies))
         .route("/quit", post(quit))
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+        // `/events` is outside the bearer layer: its socket half has no header
+        // to check and authenticates in its first frame instead, so the handler
+        // owns both checks (R5 feature SPEC §4.2, §4.4).
+        .merge(Router::new().route("/events", get(crate::events::events)))
         .with_state(state)
 }
 
@@ -143,7 +149,7 @@ fn is_json(headers: &HeaderMap) -> bool {
 
 /// The one error envelope (§6, per R0-5): a stable SCREAMING_SNAKE code and an
 /// English sentence, and nothing else.
-fn envelope(status: StatusCode, code: &str, message: String) -> Response {
+pub(crate) fn envelope(status: StatusCode, code: &str, message: String) -> Response {
     (
         status,
         Json(serde_json::json!({ "code": code, "message": message })),
@@ -251,13 +257,18 @@ async fn authorize(State(state): State<Arc<ApiState>>, request: Request, next: N
     if presented == Some(state.credential.as_str()) {
         next.run(request).await
     } else {
-        envelope(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "This request needs the daemon's bearer credential from runtime/endpoint.json."
-                .to_string(),
-        )
+        unauthorized()
     }
+}
+
+/// The one `401` answer, shared with `/events`, which checks the header itself
+/// (R5 feature SPEC §4.2).
+pub(crate) fn unauthorized() -> Response {
+    envelope(
+        StatusCode::UNAUTHORIZED,
+        "UNAUTHORIZED",
+        "This request needs the daemon's bearer credential from runtime/endpoint.json.".to_string(),
+    )
 }
 
 // Handlers are thin: parse, call `desk::*`, map to a status.
@@ -1281,25 +1292,29 @@ async fn quit(State(state): State<Arc<ApiState>>) -> Response {
 use serde_json::Value;
 
 #[cfg(test)]
-const CREDENTIAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub(crate) const CREDENTIAL: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[cfg(test)]
 const DAEMON_UUID: &str = "01999999-0000-7000-8000-000000000001";
 
 #[cfg(test)]
-struct Served {
+pub(crate) struct Served {
     _dir: tempfile::TempDir,
     desks_home: PathBuf,
-    base: String,
+    pub(crate) base: String,
     quit: tokio::sync::mpsc::Receiver<()>,
-    store: Store,
+    pub(crate) store: Store,
     registry: Arc<crate::node::Registry>,
     channels: Arc<crate::claude::Channels>,
     memory: Arc<crate::memory::Memory>,
+    pub(crate) events: Arc<crate::events::Publisher>,
+    /// Dropping it stops the events publisher with the test.
+    _shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 #[cfg(test)]
-async fn serve() -> Served {
+pub(crate) async fn serve() -> Served {
     // No feed base: these routes never start a node, and nothing may reach the
     // public endpoint from a test.
     serve_with(None).await
@@ -1321,6 +1336,12 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     ));
     let channels = Arc::new(crate::claude::Channels::default());
     let memory = Arc::new(crate::memory::seam_memory(store.clone(), roots));
+    // The events publisher the daemon spawns in `lib.rs::serve`, so `/events`
+    // is live here too (R5 feature SPEC §4.1).
+    let events = crate::events::Publisher::new(store.clone()).unwrap();
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(crate::events::run(events.clone(), shutdown_rx));
+    let published = events.clone();
     let state = ApiState {
         search_path: String::new(),
         terminals: crate::terminal::Manager::new().0,
@@ -1335,6 +1356,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
         dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
         memory: memory.clone(),
+        events,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1349,6 +1371,8 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         registry,
         channels,
         memory,
+        events: published,
+        _shutdown: shutdown,
     }
 }
 
@@ -1369,7 +1393,7 @@ fn read(response: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> (u16
 }
 
 #[cfg(test)]
-fn call_get(url: String, bearer: Option<&str>) -> (u16, String) {
+pub(crate) fn call_get(url: String, bearer: Option<&str>) -> (u16, String) {
     let mut request = agent().get(url);
     if let Some(token) = bearer {
         request = request.header("Authorization", format!("Bearer {token}"));
@@ -1390,7 +1414,7 @@ fn call_post(url: String, bearer: Option<&str>, body: Option<(&str, &str)>) -> (
 }
 
 #[cfg(test)]
-fn json(body: &str) -> Value {
+pub(crate) fn json(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{body:?} is not JSON: {e}"))
 }
 
@@ -1398,7 +1422,7 @@ fn json(body: &str) -> Value {
 /// and an English sentence.
 #[cfg(test)]
 #[track_caller]
-fn expect_envelope(answer: (u16, String), status: u16, code: &str) {
+pub(crate) fn expect_envelope(answer: (u16, String), status: u16, code: &str) {
     let (got, body) = answer;
     assert_eq!(got, status, "status for {code}; body {body}");
     let value = json(&body);

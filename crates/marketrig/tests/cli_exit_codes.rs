@@ -8,7 +8,7 @@ use std::net::TcpListener;
 
 mod common;
 
-use common::{code, fake_daemon, health_ok, marketrig, write_endpoint};
+use common::{Requests, code, fake_daemon, health_ok, marketrig, write_endpoint};
 
 #[test]
 fn success_exits_zero() {
@@ -206,4 +206,61 @@ fn bearer_credential_is_sent_and_never_printed() {
         !printed.contains(&"a".repeat(64)),
         "the credential must never reach CLI output"
     );
+}
+
+/// `desk events` reads the installation listing scoped to the desk and prints
+/// instant, kind, and the payload as one-line JSON (R5 feature SPEC §4.3).
+#[test]
+fn desk_events_lists_the_desks_own_rows() {
+    const DESK: &str = "01997f00-0000-7000-8000-00000000000a";
+    const EVENTS: &str = r#"{"events":[{"id":"e2","kind":"APPROVAL_DECIDED","desk_id":"01997f00-0000-7000-8000-00000000000a","occurred_at_ns":200,"payload":{"kind":"PAPER_ORDER","decision":"APPROVE"}},{"id":"e1","kind":"DESK_READY","desk_id":"01997f00-0000-7000-8000-00000000000a","occurred_at_ns":100,"payload":{"name":"alpha"}}],"next_before":"100:e1"}"#;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, requests) = fake_daemon(|route, _| match route {
+        "GET /health" => (200, health_ok()),
+        "GET /desks" => (
+            200,
+            r#"{"desks":[{"id":"01997f00-0000-7000-8000-00000000000a","name":"alpha","state":"READY"}]}"#,
+        ),
+        _ if route.starts_with("GET /events?desk_id=") => (200, EVENTS),
+        _ => (500, r#"{"code":"INTERNAL","message":"Unexpected route."}"#),
+    });
+    write_endpoint(root.path(), port);
+
+    let output = marketrig(root.path(), &["desk", "events", "alpha", "--limit", "2"]);
+    assert_eq!(code(&output), 0, "{output:?}");
+    assert_eq!(
+        routes(&requests),
+        [
+            "GET /health".to_string(),
+            "GET /desks".to_string(),
+            format!("GET /events?desk_id={DESK}&limit=2"),
+        ]
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8 stdout"),
+        "200\tAPPROVAL_DECIDED\t{\"decision\":\"APPROVE\",\"kind\":\"PAPER_ORDER\"}\n\
+         100\tDESK_READY\t{\"name\":\"alpha\"}\n"
+    );
+
+    // Without `--limit` the daemon's own default stands, so the CLI sends none.
+    let all = marketrig(root.path(), &["desk", "events", DESK]);
+    assert_eq!(code(&all), 0, "{all:?}");
+    assert_eq!(
+        routes(&requests),
+        [
+            "GET /health".to_string(),
+            format!("GET /events?desk_id={DESK}"),
+        ],
+        "a UUID is never resolved through the desk listing"
+    );
+}
+
+fn routes(requests: &Requests) -> Vec<String> {
+    requests
+        .lock()
+        .expect("request log")
+        .drain(..)
+        .map(|(route, _)| route)
+        .collect()
 }

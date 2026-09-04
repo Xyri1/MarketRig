@@ -93,14 +93,14 @@ Scenarios:
 
 ### 4.1 Publisher
 
-The store's database thread pulses one `Notify` after each committed unit. One publisher task per daemon holds `cursor = (occurred_at_ns, id)` initialised to the table's last row at start (so a subscriber with no `after` sees only rows committed after it connects), wakes on the pulse or after 5 s, reads `WHERE (occurred_at_ns, id) > cursor ORDER BY occurred_at_ns, id LIMIT 500` until short, and pushes each row to every subscriber queue (1 000 frames); a push that finds a queue full closes that subscriber `4408` and drops it.
+The store's database thread pulses one `Notify` after each committed unit. One publisher task per daemon holds `cursor = (occurred_at_ns, id)` initialised to the table's last row at start (so a subscriber with no `after` sees only rows committed after it connects), wakes on the pulse or after 5 s, reads `WHERE (occurred_at_ns, id) > cursor ORDER BY occurred_at_ns, id LIMIT 500` until short, and pushes each row to every subscriber queue (1 000 frames); a push that finds a queue full closes that subscriber `4408 SLOW_CONSUMER` and drops it.
 
 ### 4.2 `WS /events`
 
 ```text
 handshake   Origin (if present) ∈ allowlist else 403 ORIGIN_REFUSED; upgrade
 frame 1 ←   {"bearer": "<credential>", "after": "<occurred_at_ns>:<id>"?}   within 5 s, else close 4401
-            wrong bearer → close 4401; unparseable → close 4400
+            wrong bearer → close 4401 UNAUTHORIZED; unparseable → close 4400 VALIDATION
 subscribe   register the queue, take tail = publisher cursor
 replay      rows > after and ≤ tail, in pages of 500, as ordinary event frames
 frame →     {"tail": "<cursor>"}          -- the position live frames continue from

@@ -194,6 +194,14 @@ enum DeskCommand {
     Show { desk: String },
     /// Retry a failed desk creation.
     Retry { desk: String },
+    /// This desk's operational events, newest first (R5 feature SPEC §4.3).
+    Events {
+        /// Desk name or UUID.
+        desk: String,
+        /// How many rows, 1 to 500; 100 by omission.
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -398,6 +406,11 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             DeskCommand::Retry { desk } => {
                 let id = resolve(&endpoint, "/desks", "desk", desk)?;
                 endpoint.post(&format!("/desks/{id}/retry"), None)
+            }
+            DeskCommand::Events { desk, limit } => {
+                let id = resolve(&endpoint, "/desks", "desk", desk)?;
+                let limit = limit.map(|n| format!("&limit={n}")).unwrap_or_default();
+                endpoint.get(&format!("/events?desk_id={id}{limit}"))
             }
         },
         Group::History { record, desk } => {
@@ -728,8 +741,10 @@ fn resolve(endpoint: &Endpoint, route: &str, noun: &str, token: &str) -> Result<
 /// `status`, or its latest event `kind` before a status exists. `a.b` reads one
 /// level down. The daemon owns every shape, so a missing or unknown field
 /// prints blank and never panics.
-const LISTS: [(&str, &[&str]); 7] = [
+const LISTS: [(&str, &[&str]); 8] = [
     ("desks", &["name", "state", "id"]),
+    // The payload is an object, which `text` renders as one-line JSON (R5 §4.3).
+    ("events", &["occurred_at_ns", "kind", "payload"]),
     (
         "orders",
         &[
