@@ -669,7 +669,9 @@ fn delivery(scenario: &str, cell: &str, runtime: &str, other: &str) {
          5. The harness then switches the desk to {other} and stops. The desk's\n\
          \x20  history and pointers must survive that.\n\
          \n\
-         The harness waits up to {patience} minutes per step; ^C stops the run.\n\
+         The harness waits up to {patience} minutes per step. While this console is\n\
+         \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
+         \x20  terminal with `pkill -f deps/experiment-`, then `stty sane` here.\n\
          ===========================================================================\n",
         version = row["version"].as_str().unwrap_or_default(),
         path = row["executable_path"].as_str().unwrap_or_default(),
@@ -1071,7 +1073,9 @@ fn closed_loop(scenario: &str, cell: &str, runtime: &str) {
          \x20  the same thread. Ask that session what this desk learned about the\n\
          \x20  instrument — it must reach for `marketrig memory recall`.\n\
          \n\
-         The harness waits up to {patience} minutes per step; ^C stops the run.\n\
+         The harness waits up to {patience} minutes per step. While this console is\n\
+         \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
+         \x20  terminal with `pkill -f deps/experiment-`, then `stty sane` here.\n\
          ===========================================================================\n",
         version = row["version"].as_str().unwrap_or_default(),
         path = row["executable_path"].as_str().unwrap_or_default(),
