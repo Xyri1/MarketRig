@@ -28,7 +28,7 @@ Reading order for any task: `PRD.md` → `DECISIONS.md` → `SPEC.md` → `ROADM
 
 1. Create `sdd/features/<slug>/` only when real content exists; never scaffold empty templates.
 2. Write the feature PRD (motivation, outcome, scope, non-goals, success criteria), then DECISIONS, then SPEC with concrete scenarios and a closing **Required checks** section.
-3. Implementation proceeds in slices: `sdd/slices/NNN-<slug>.md`, numbered sequentially, each the implementation plan for one or more features (or part of one), created only when that implementation is about to start. An active slice is the working plan; drift discovered during implementation is corrected in the feature docs in the same change — `sdd/features/` stays canonical, a slice never does. When a slice's exit checks are green, freeze it (status line; never edited again), then merge durable spec changes into `sdd/SPEC.md`, durable decisions into `sdd/DECISIONS.md`, and refresh `sdd/ROADMAP.md`.
+3. Implementation proceeds in slices: `sdd/slices/NNN-<slug>.md`, numbered sequentially, each the implementation plan for one or more features (or part of one), sized to one agent session's worth of work, created only when that implementation is about to start. An active slice is the working plan; drift discovered during implementation is corrected in the feature docs in the same change — `sdd/features/` stays canonical, a slice never does. When a slice's exit checks are green, freeze it (status line; never edited again), then merge durable spec changes into `sdd/SPEC.md`, durable decisions into `sdd/DECISIONS.md`, and refresh `sdd/ROADMAP.md`.
 4. Mark a roadmap item "design complete" only once its feature folder has all three documents.
 
 Decision rules:
