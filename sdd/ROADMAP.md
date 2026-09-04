@@ -148,7 +148,7 @@ Dependencies: Milestone R2.
 
 ## Milestone R4 — Memory, skills, and the closed loop
 
-**Design complete 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC); no slice yet. Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
+**Design complete 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC); the active implementation plan is [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
 
 This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65.
 

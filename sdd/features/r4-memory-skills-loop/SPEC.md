@@ -7,7 +7,7 @@
 - `crates/marketrigd/src/memory.rs` (the child, the provider rows, the bank routes; R4-1 … R4-3), `desk.rs` grows the seeds and the link reconciliation (R4-4); `store/005_r4.sql` (R4-5).
 - `crates/marketrig` gains the `memory` group (R4-3).
 - `crates/marketrig-acceptance/src/bin/memory-standin.rs` (R4-6).
-- New pins at plan time: `keyring =4.2.0` with `default-features = false` and the platform features `apple-native` (macOS) and `windows-native` (Windows), the one new crate; `hindsight-api-slim[embedded-db]==0.9.2`, the wheel every launcher must carry, recorded here and installed by R6's bundle. The daemon's Hindsight client is `reqwest`, already pinned. No other crate.
+- New pins at plan time: the credential store as `keyring-core =1.0.0` plus one store crate per platform — `apple-native-keyring-store =1.0.2` (macOS) and `windows-native-keyring-store =1.1.0` (Windows) — set as the default store explicitly at daemon start, skipping the `keyring` facade and its CLI dependencies; those are the new crates; `hindsight-api-slim[embedded-db]==0.9.2`, the wheel every launcher must carry, recorded here and installed by R6's bundle. The daemon's Hindsight client is `reqwest`, already pinned. No other crate.
 
 ## 2. The memory child (R4-1)
 
