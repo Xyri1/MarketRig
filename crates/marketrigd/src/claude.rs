@@ -175,7 +175,13 @@ pub fn write_launch_files(
             let path = dir.join("settings.json");
             let hook = json!([{ "hooks": [{
                 "type": "command",
-                "command": format!("{} --desk {desk_id} session hook", cli.to_string_lossy()),
+                // Claude runs hook commands through bash on every platform,
+                // so a backslashed Windows path collapses into one word
+                // (the Windows E5 cell, 2026-09-04): forward slashes, quoted.
+                "command": format!(
+                    "\"{}\" --desk {desk_id} session hook",
+                    cli.to_string_lossy().replace('\\', "/")
+                ),
             }]}]);
             write_private(
                 &path,
@@ -408,7 +414,7 @@ mod tests {
         for event in ["SessionStart", "Notification", "Stop"] {
             assert_eq!(
                 hooks["hooks"][event][0]["hooks"][0]["command"],
-                json!("/bin/marketrig --desk d1 session hook")
+                json!("\"/bin/marketrig\" --desk d1 session hook")
             );
         }
         #[cfg(unix)]
