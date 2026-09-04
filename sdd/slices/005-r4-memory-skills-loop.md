@@ -2,6 +2,8 @@
 
 **Status:** Active — created 2026-09-04
 **Implements:** all of [`features/r4-memory-skills-loop/`](../features/r4-memory-skills-loop/SPEC.md)
+**Evidence so far (2026-09-04, macOS arm64, commit 604a19b):** module checks and the gate G1–G37 green (`target/acceptance/gate-1788509422`); E5 codex cell complete on Codex CLI 0.153.2 and `hindsight-api-slim[embedded-db]==0.9.2` via OpenRouter (`z-ai/glm-5.3-flash`, `openai/text-embedding-3-small`) — `experiment-e5-codex-1788514468`: one AAPL.XNAS cycle, `EVALUATION` delivered, `MEMORY_RETAINED` (tags `lesson`, `AAPL.XNAS`), the improvement skill edited by the session, `MEMORY_RECALLED` from the resumed session, the second desk's bank empty; the key present only in the relocated `credentials.json`. Pending: E5 claude cell, Windows CI.
+
 **Exit:** feature SPEC §8 in full — the eight module checks, gate G33–G37 after G32, and the static checks green on macOS and Windows CI, plus E5 attended once per platform-and-runtime cell (agent-behavior aspects end inconclusive rather than failed, root §17).
 
 The feature docs are the contract; this slice only pins, names, and orders. On any conflict discovered while implementing, fix the feature docs in the same change and continue — this file is corrected only while Active and never after freeze.
