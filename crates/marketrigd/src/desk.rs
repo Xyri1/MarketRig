@@ -3,8 +3,8 @@
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §7,
 //! root `sdd/SPEC.md` §5.1 and §5.2.
 
-use std::path::Path;
-use std::{fmt, io};
+use std::path::{Path, PathBuf};
+use std::{fmt, fs, io};
 
 use rusqlite::{ErrorCode, Row, Transaction, params};
 use serde::Serialize;
@@ -15,6 +15,11 @@ use crate::store::{Store, StoreError, now_ns};
 
 /// The MarketRig-owned Claude Code compatibility shim, exactly (§7.2, per D20).
 const SHIM: &str = "@AGENTS.md\n";
+
+/// The seeded constitution and improvement skill, byte-identical to the R4
+/// feature SPEC §5.1 and §5.2 blocks. `<name>` is the desk name.
+const SEED_AGENTS: &str = include_str!("../seed/AGENTS.md");
+const SEED_SKILL: &str = include_str!("../seed/desk-improvement.SKILL.md");
 
 /// The one `failure_code` R0 records: every bootstrap step fails the same way.
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
@@ -116,28 +121,75 @@ pub struct Desk {
     pub native_sessions: Option<Value>,
 }
 
-/// The R0 `AGENTS.md` seed (§7.6). Agent-owned from the moment it is written.
+/// The `AGENTS.md` seed (R4 §5.1). Agent-owned from the moment it is written.
 fn agents_seed(name: &str) -> String {
-    format!(
-        "# {name}\n\
-         \n\
-         This desk's constitution. MarketRig seeded it at desk creation and never\n\
-         rewrites it; its full content arrives with later MarketRig milestones.\n"
-    )
+    SEED_AGENTS.replace("<name>", name)
 }
 
-/// Creation step 2 (§7.2): idempotent, so a half-written workspace completes.
+/// The desk's one canonical skills tree (R4 §5, per D21).
+fn skills_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".agents").join("skills")
+}
+
+/// Claude Code's view of that same tree: a relative symlink on macOS, a
+/// directory junction on Windows (R4 §5, per D21).
+fn skills_link(workspace: &Path) -> PathBuf {
+    workspace.join(".claude").join("skills")
+}
+
+/// Creation step 2 (§7.2, R4 §5): the four artifacts in order, each only when
+/// absent, so a half-written workspace completes and a retry rewrites nothing.
 fn bootstrap(workspace: &Path, name: &str) -> io::Result<()> {
-    std::fs::create_dir_all(workspace)?;
+    fs::create_dir_all(workspace)?;
     let agents = workspace.join("AGENTS.md");
     if !agents.exists() {
-        std::fs::write(&agents, agents_seed(name))?;
+        fs::write(&agents, agents_seed(name))?;
     }
+    reconcile_shim(workspace)?;
+    let skill = skills_dir(workspace)
+        .join("desk-improvement")
+        .join("SKILL.md");
+    if !skill.exists() {
+        fs::create_dir_all(skill.parent().expect("the seeded skill has a parent"))?;
+        fs::write(&skill, SEED_SKILL)?;
+    }
+    reconcile_link(workspace)
+}
+
+/// The one file inside a desk workspace MarketRig owns (§7.2, per D20).
+fn reconcile_shim(workspace: &Path) -> io::Result<()> {
     let shim = workspace.join("CLAUDE.md");
-    if std::fs::read(&shim).ok().as_deref() != Some(SHIM.as_bytes()) {
-        std::fs::write(&shim, SHIM)?;
+    if fs::read(&shim).ok().as_deref() != Some(SHIM.as_bytes()) {
+        fs::write(&shim, SHIM)?;
     }
     Ok(())
+}
+
+/// Reconciles `.claude/skills` (R4 §5): a missing link is created after
+/// `.agents/skills/` is created empty if absent, a link naming anything but
+/// this desk's tree is replaced, and an ordinary file or directory is left in
+/// place (per D21) for the read-time status to report.
+fn reconcile_link(workspace: &Path) -> io::Result<()> {
+    let link = skills_link(workspace);
+    match skills_link_target(workspace)? {
+        Some(target) if resolves_to_skills(workspace, &target) => return Ok(()),
+        Some(_) => remove_link(&link)?,
+        None if fs::symlink_metadata(&link).is_ok() => return Ok(()),
+        None => {}
+    }
+    fs::create_dir_all(skills_dir(workspace))?;
+    link_skills(workspace)
+}
+
+/// Whether a link target — relative to `.claude/`, or absolute — is this desk's
+/// `.agents/skills`. A target that cannot be resolved counts as not it.
+fn resolves_to_skills(workspace: &Path, target: &Path) -> bool {
+    // `join` on an absolute target discards the prefix, so one line covers both.
+    let resolved = workspace.join(".claude").join(target);
+    matches!(
+        (fs::canonicalize(resolved), fs::canonicalize(skills_dir(workspace))),
+        (Ok(link), Ok(skills)) if link == skills
+    )
 }
 
 /// Creates a desk synchronously (§7.2): the returned row is `READY` or `FAILED`.
@@ -221,6 +273,23 @@ pub fn complete_interrupted(store: &Store) -> Result<usize, DeskError> {
         finish(store, desk)?;
     }
     Ok(count)
+}
+
+/// Startup validation (§7.5, R4 §5): for every `READY` desk, reconcile the two
+/// things MarketRig owns — the `CLAUDE.md` shim and the `.claude/skills` link —
+/// and nothing else. A workspace that will not reconcile is logged and left
+/// alone: it blocks neither another desk nor startup.
+pub fn validate_ready(store: &Store) -> Result<(), DeskError> {
+    for desk in query(store, "WHERE state = 'READY' ORDER BY created_at_ns, id")? {
+        let workspace = Path::new(&desk.workspace_path);
+        if !workspace.is_dir() {
+            continue;
+        }
+        if let Err(e) = reconcile_shim(workspace).and_then(|()| reconcile_link(workspace)) {
+            tracing::warn!(desk = desk.name, "workspace reconciliation failed: {e}");
+        }
+    }
+    Ok(())
 }
 
 /// Retry (§7.4): only a `FAILED` desk, on the same UUID, name, and path.
@@ -327,13 +396,24 @@ fn derive_status(desk: &mut Desk) {
             "UNAVAILABLE",
             Some("Workspace directory is missing.".into()),
         )
-    } else if let Err(e) = std::fs::File::open(workspace.join("AGENTS.md")) {
+    } else if let Err(e) = fs::File::open(workspace.join("AGENTS.md")) {
         (
             "UNAVAILABLE",
             Some(format!("AGENTS.md is unreadable: {e}.")),
         )
     } else {
-        ("OK", None)
+        // An ordinary file or directory at `.claude/skills` is left in place
+        // (per D21) and named here; the desk stays `OK` (R4 §5).
+        let obstructed = matches!(skills_link_target(workspace), Ok(None))
+            && fs::symlink_metadata(skills_link(workspace)).is_ok();
+        (
+            "OK",
+            obstructed.then(|| {
+                ".claude/skills is an ordinary file or directory, not the link to \
+                 .agents/skills, so Claude Code does not see this desk's skills."
+                    .to_string()
+            }),
+        )
     };
     desk.workspace_status = Some(status);
     desk.workspace_status_reason = reason;
@@ -401,10 +481,195 @@ pub(crate) fn append_event(
     Ok(())
 }
 
-#[cfg(test)]
-use std::fs;
-#[cfg(test)]
-use std::path::PathBuf;
+// ---------------------------------------------------------------------------
+// The `.claude/skills` link (R4 §5, per D21)
+// ---------------------------------------------------------------------------
+
+/// Points `.claude/skills` at `../.agents/skills`, exactly.
+#[cfg(unix)]
+pub fn link_skills(desk_dir: &Path) -> io::Result<()> {
+    let link = skills_link(desk_dir);
+    fs::create_dir_all(link.parent().expect("the link has a parent"))?;
+    std::os::unix::fs::symlink("../.agents/skills", link)
+}
+
+/// The `.claude/skills` link's target, or `None` when nothing is there or what
+/// is there is an ordinary file or directory.
+#[cfg(unix)]
+pub fn skills_link_target(desk_dir: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::read_link(skills_link(desk_dir)) {
+        Ok(target) => Ok(Some(target)),
+        // `EINVAL`: there is something there, and it is not a symlink.
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(unix)]
+fn remove_link(link: &Path) -> io::Result<()> {
+    fs::remove_file(link)
+}
+
+/// `IO_REPARSE_TAG_MOUNT_POINT`. The `windows` crate carries it only inside the
+/// whole `Win32_System_SystemServices` module, which nothing else here needs.
+#[cfg(windows)]
+const MOUNT_POINT: u32 = 0xa000_0003;
+
+/// A mount-point `REPARSE_DATA_BUFFER`, sized to the largest one Windows takes.
+#[cfg(windows)]
+#[repr(C)]
+struct MountPoint {
+    tag: u32,
+    data_len: u16,
+    reserved: u16,
+    substitute_offset: u16,
+    substitute_len: u16,
+    print_offset: u16,
+    print_len: u16,
+    path: [u16; (windows::Win32::Storage::FileSystem::MAXIMUM_REPARSE_DATA_BUFFER_SIZE as usize
+        - 16)
+        / 2],
+}
+
+/// Opens the link itself — never what it points at — for one reparse-point ioctl.
+#[cfg(windows)]
+fn open_reparse(path: &Path, access: u32) -> io::Result<windows::Win32::Foundation::HANDLE> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        CreateFileW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Makes `.claude/skills` a directory junction to the absolute `.agents/skills`.
+#[cfg(windows)]
+pub fn link_skills(desk_dir: &Path) -> io::Result<()> {
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE};
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+    // A junction is the empty directory itself carrying a reparse point.
+    let link = skills_link(desk_dir);
+    fs::create_dir_all(&link)?;
+    let target = fs::canonicalize(skills_dir(desk_dir))?;
+    let target = target.to_string_lossy();
+    let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+
+    let substitute: Vec<u16> = format!(r"\??\{target}").encode_utf16().collect();
+    let print: Vec<u16> = target.encode_utf16().collect();
+    let mut buffer: Box<MountPoint> = Box::new(unsafe { std::mem::zeroed() });
+    let words = substitute.len() + print.len() + 2; // both names are NUL-terminated
+    if words > buffer.path.len() {
+        return Err(io::Error::other(format!(
+            "The skills path {target} is too long for a junction."
+        )));
+    }
+    buffer.tag = MOUNT_POINT;
+    buffer.data_len = (8 + words * 2) as u16;
+    buffer.substitute_offset = 0;
+    buffer.substitute_len = (substitute.len() * 2) as u16;
+    buffer.print_offset = (substitute.len() * 2 + 2) as u16;
+    buffer.print_len = (print.len() * 2) as u16;
+    buffer.path[..substitute.len()].copy_from_slice(&substitute);
+    let print_at = substitute.len() + 1;
+    buffer.path[print_at..print_at + print.len()].copy_from_slice(&print);
+
+    let handle = open_reparse(&link, GENERIC_WRITE.0)?;
+    let set = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            Some((&raw const *buffer).cast()),
+            8 + u32::from(buffer.data_len),
+            None,
+            0,
+            None,
+            None,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    set.map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// The junction's target, or `None` when nothing is there, what is there is an
+/// ordinary file or directory, or the reparse point is not a mount point.
+#[cfg(windows)]
+pub fn skills_link_target(desk_dir: &Path) -> io::Result<Option<PathBuf>> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ};
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+
+    let link = skills_link(desk_dir);
+    let metadata = match fs::symlink_metadata(&link) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+        return Ok(None);
+    }
+    let handle = open_reparse(&link, GENERIC_READ.0)?;
+    let mut buffer: Box<MountPoint> = Box::new(unsafe { std::mem::zeroed() });
+    let read = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_GET_REPARSE_POINT,
+            None,
+            0,
+            Some((&raw mut *buffer).cast()),
+            MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+            None,
+            None,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    read.map_err(|e| io::Error::other(e.to_string()))?;
+    if buffer.tag != MOUNT_POINT {
+        return Ok(None);
+    }
+    let at = buffer.substitute_offset as usize / 2;
+    let Some(name) = buffer.path.get(at..at + buffer.substitute_len as usize / 2) else {
+        return Ok(None);
+    };
+    let name = String::from_utf16_lossy(name);
+    Ok(Some(PathBuf::from(
+        name.strip_prefix(r"\??\").unwrap_or(&name),
+    )))
+}
+
+#[cfg(windows)]
+fn remove_link(link: &Path) -> io::Result<()> {
+    // The junction is a directory; removing it leaves what it names untouched.
+    fs::remove_dir(link)
+}
 
 #[cfg(test)]
 fn scratch() -> (tempfile::TempDir, Store, PathBuf) {
@@ -463,11 +728,42 @@ fn name_grammar() {
     }
 }
 
+/// One fenced block of the R4 feature SPEC, read at test time so the seeds
+/// cannot drift from the contract (R4 §5.1, §5.2).
+#[cfg(test)]
+fn spec_block(heading: &str) -> String {
+    let spec = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../sdd/features/r4-memory-skills-loop/SPEC.md"),
+    )
+    .unwrap();
+    let section = &spec[spec.find(heading).expect("the heading")..];
+    let open = "```markdown\n";
+    let body = &section[section.find(open).expect("the fence") + open.len()..];
+    body[..body.find("\n```").expect("the closing fence") + 1].to_string()
+}
+
+#[cfg(test)]
+#[test]
+fn seeds_are_the_spec_blocks() {
+    assert_eq!(SEED_AGENTS, spec_block("### 5.1 `AGENTS.md`"));
+    assert_eq!(
+        SEED_SKILL,
+        spec_block("### 5.2 `.agents/skills/desk-improvement/SKILL.md`")
+    );
+    assert_eq!(agents_seed("alpha"), SEED_AGENTS.replace("<name>", "alpha"));
+    assert!(agents_seed("alpha").starts_with("# alpha\n"));
+    assert!(!agents_seed("alpha").contains("<name>"));
+}
+
 #[cfg(test)]
 #[test]
 fn bootstrap_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("alpha");
+    let skill = skills_dir(&workspace)
+        .join("desk-improvement")
+        .join("SKILL.md");
 
     bootstrap(&workspace, "alpha").unwrap();
     let seeded = fs::read(workspace.join("AGENTS.md")).unwrap();
@@ -475,11 +771,28 @@ fn bootstrap_idempotent() {
         String::from_utf8(seeded.clone()).unwrap(),
         agents_seed("alpha")
     );
-    assert!(agents_seed("alpha").starts_with("# alpha\n"));
     assert_eq!(
         fs::read(workspace.join("CLAUDE.md")).unwrap(),
         b"@AGENTS.md\n"
     );
+    assert_eq!(fs::read_to_string(&skill).unwrap(), SEED_SKILL);
+    assert!(resolves_to_skills(
+        &workspace,
+        &skills_link_target(&workspace).unwrap().unwrap()
+    ));
+
+    // One physical directory, reachable through both paths (R4 §5).
+    assert_eq!(
+        fs::read_to_string(
+            skills_link(&workspace)
+                .join("desk-improvement")
+                .join("SKILL.md")
+        )
+        .unwrap(),
+        SEED_SKILL
+    );
+    fs::write(skills_link(&workspace).join("through-the-link"), "x").unwrap();
+    assert!(skills_dir(&workspace).join("through-the-link").is_file());
 
     // Byte-identical on a second run.
     bootstrap(&workspace, "alpha").unwrap();
@@ -489,9 +802,10 @@ fn bootstrap_idempotent() {
         b"@AGENTS.md\n"
     );
 
-    // The agent-owned constitution survives; the MarketRig-owned shim is reconciled.
+    // Agent-owned files survive; the MarketRig-owned shim is reconciled.
     fs::write(workspace.join("AGENTS.md"), "# alpha\n\nmine now\n").unwrap();
     fs::write(workspace.join("CLAUDE.md"), "@SOMETHING-ELSE.md\n").unwrap();
+    fs::write(&skill, "mine now\n").unwrap();
     bootstrap(&workspace, "alpha").unwrap();
     assert_eq!(
         fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
@@ -500,6 +814,121 @@ fn bootstrap_idempotent() {
     assert_eq!(
         fs::read_to_string(workspace.join("CLAUDE.md")).unwrap(),
         "@AGENTS.md\n"
+    );
+    assert_eq!(fs::read_to_string(&skill).unwrap(), "mine now\n");
+}
+
+#[cfg(test)]
+#[test]
+fn startup_reconciles_the_shim_and_the_link() {
+    let (_dir, store, desks_home) = scratch();
+    let alpha = create(&store, &desks_home, "alpha", "codex").unwrap();
+    let workspace = desks_home.join("alpha");
+    let link = skills_link(&workspace);
+
+    // A missing link is recreated over a recreated empty tree, and nothing else:
+    // startup never re-seeds the skill.
+    fs::remove_dir_all(workspace.join(".claude")).unwrap();
+    fs::remove_dir_all(workspace.join(".agents")).unwrap();
+    fs::write(workspace.join("CLAUDE.md"), "@SOMETHING-ELSE.md\n").unwrap();
+    validate_ready(&store).unwrap();
+    assert!(skills_dir(&workspace).is_dir());
+    assert!(
+        !skills_dir(&workspace)
+            .join("desk-improvement")
+            .join("SKILL.md")
+            .exists()
+    );
+    assert!(resolves_to_skills(
+        &workspace,
+        &skills_link_target(&workspace).unwrap().unwrap()
+    ));
+    assert_eq!(
+        fs::read_to_string(workspace.join("CLAUDE.md")).unwrap(),
+        SHIM
+    );
+
+    // A link naming anything but this desk's tree is replaced. On macOS that is
+    // a symlink pointing elsewhere; on Windows, where MarketRig only ever makes
+    // a junction, it is a junction whose target has gone.
+    let elsewhere = desks_home.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    #[cfg(unix)]
+    {
+        remove_link(&link).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+    }
+    #[cfg(windows)]
+    fs::remove_dir_all(skills_dir(&workspace)).unwrap();
+    assert!(!resolves_to_skills(
+        &workspace,
+        &skills_link_target(&workspace).unwrap().unwrap()
+    ));
+    validate_ready(&store).unwrap();
+    assert!(resolves_to_skills(
+        &workspace,
+        &skills_link_target(&workspace).unwrap().unwrap()
+    ));
+    assert!(elsewhere.is_dir(), "the old target is untouched");
+
+    // An ordinary directory is left in place and named in the status reason.
+    remove_link(&link).unwrap();
+    fs::create_dir_all(&link).unwrap();
+    fs::write(link.join("mine"), "x").unwrap();
+    validate_ready(&store).unwrap();
+    assert!(link.join("mine").is_file());
+    assert!(skills_link_target(&workspace).unwrap().is_none());
+    let row = get(&store, &alpha.id).unwrap();
+    assert_eq!(row.workspace_status, Some("OK"));
+    assert!(
+        row.workspace_status_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains(".claude/skills") && reason.ends_with('.')),
+        "{:?}",
+        row.workspace_status_reason
+    );
+}
+
+/// A desk created before R4 keeps its constitution and gains only the tree and
+/// the link (R4 §5).
+#[cfg(test)]
+#[test]
+fn pre_r4_desk_gains_only_the_tree_and_the_link() {
+    let (_dir, store, desks_home) = scratch();
+    let workspace = desks_home.join("legacy");
+    fs::create_dir_all(&workspace).unwrap();
+    let placeholder = "# legacy\n\nseeded before R4\n";
+    fs::write(workspace.join("AGENTS.md"), placeholder).unwrap();
+    fs::write(workspace.join("CLAUDE.md"), SHIM).unwrap();
+    let path = workspace.to_str().unwrap().to_string();
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES ('0199-legacy', 'legacy', 'READY', ?1, 1000, 1000)",
+                [path],
+            )
+        })
+        .unwrap();
+
+    validate_ready(&store).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
+        placeholder
+    );
+    assert!(resolves_to_skills(
+        &workspace,
+        &skills_link_target(&workspace).unwrap().unwrap()
+    ));
+    assert_eq!(
+        fs::read_dir(skills_dir(&workspace)).unwrap().count(),
+        0,
+        "the tree is empty: the improvement skill is never seeded here"
+    );
+    assert_eq!(
+        get(&store, "0199-legacy").unwrap().workspace_status,
+        Some("OK")
     );
 }
 
