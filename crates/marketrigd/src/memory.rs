@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
@@ -139,7 +139,18 @@ pub struct Memory {
     /// Shared with each start's supervisor task, which outlives the call that
     /// started the child.
     pub live: Arc<Mutex<Live>>,
+    /// §4.3's per-operation budgets, which a `STARTING` child's readiness wait
+    /// spends too: retain and reflect share [`LONG_TIMEOUT`], recall has
+    /// [`RECALL_TIMEOUT`]. Fields rather than constants so a check can reach the
+    /// timeout path in milliseconds instead of a minute.
+    pub long_timeout: Duration,
+    pub recall_timeout: Duration,
 }
+
+/// Retain and reflect (§4.3).
+const LONG_TIMEOUT: Duration = Duration::from_secs(180);
+/// Recall (§4.3).
+const RECALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Memory {
     pub fn new(store: Store, roots: Roots, daemon_uuid: String) -> io::Result<Memory> {
@@ -155,6 +166,8 @@ impl Memory {
             daemon_uuid,
             ready_deadline: READY_DEADLINE,
             live: Arc::new(Mutex::new(Live::default())),
+            long_timeout: LONG_TIMEOUT,
+            recall_timeout: RECALL_TIMEOUT,
         })
     }
 }
@@ -175,6 +188,10 @@ pub enum MemoryError {
     EmbeddingModelLocked,
     CredentialStoreUnavailable(String),
     ProviderUnreachable(String),
+    /// The desk's own refusal on a desk-scoped route — `DESK_NOT_FOUND`,
+    /// `DESK_NOT_READY`, or `ATTRIBUTION_INVALID` (§4.3), all decided by the
+    /// order routes' own checks and answered through their own map.
+    Desk(crate::trade::TradeError),
 }
 
 impl MemoryError {
@@ -189,6 +206,7 @@ impl MemoryError {
             MemoryError::EmbeddingModelLocked => "EMBEDDING_MODEL_LOCKED",
             MemoryError::CredentialStoreUnavailable(_) => "CREDENTIAL_STORE_UNAVAILABLE",
             MemoryError::ProviderUnreachable(_) => "PROVIDER_UNREACHABLE",
+            MemoryError::Desk(e) => e.code(),
         }
     }
 }
@@ -213,6 +231,7 @@ impl fmt::Display for MemoryError {
                 write!(f, "The credential store is unavailable: {m}")
             }
             MemoryError::ProviderUnreachable(m) => write!(f, "The provider did not answer: {m}"),
+            MemoryError::Desk(e) => write!(f, "{e}"),
         }
     }
 }
@@ -223,6 +242,12 @@ impl std::error::Error for MemoryError {}
 /// this group no internal code and the daemon's SQLite is in-process and
 /// single-writer, so this path is unreachable in practice. Give it its own
 /// variant the day a memory route can genuinely fail on the store.
+impl From<crate::trade::TradeError> for MemoryError {
+    fn from(e: crate::trade::TradeError) -> Self {
+        MemoryError::Desk(e)
+    }
+}
+
 impl From<StoreError> for MemoryError {
     fn from(e: StoreError) -> Self {
         MemoryError::Error(e.to_string())
@@ -1197,31 +1222,414 @@ pub fn bank(desk_id: &str) -> String {
     format!("desk-{}", desk_id.replace('-', ""))
 }
 
-/// The stubbed half of the seam: C31 fills the three Hindsight calls.
-/// Answering `MEMORY_UNCONFIGURED` is what a daemon that cannot start a child
-/// would answer anyway.
-fn pending<T>() -> Result<T, MemoryError> {
-    Err(MemoryError::Unconfigured)
+/// The §4.3 limits. `content`, `context`, and `query` are byte bounds; a tag is
+/// counted in characters.
+const CONTENT_MAX: usize = 64 * 1024;
+const CONTEXT_MAX: usize = 4 * 1024;
+const QUERY_MAX: usize = 8 * 1024;
+const TAGS_MAX: usize = 16;
+const TAG_MAX: usize = 64;
+
+/// `POST /desks/{d}/memory/retain`'s body (§4.2).
+#[derive(Debug, Default, Deserialize)]
+pub struct RetainRequest {
+    pub content: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// `POST /desks/{d}/memory/recall`'s body (§4.2).
+#[derive(Debug, Default, Deserialize)]
+pub struct RecallRequest {
+    pub query: String,
+    #[serde(default)]
+    pub budget: Option<String>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// `POST /desks/{d}/memory/reflect`'s body (§4.2).
+#[derive(Debug, Default, Deserialize)]
+pub struct ReflectRequest {
+    pub query: String,
+    #[serde(default)]
+    pub budget: Option<String>,
+}
+
+/// One bounded text field (§4.3); `min` is `1` for a field that must carry
+/// something and `0` for one that may be empty.
+fn bounded(field: &str, value: &str, min: usize, max: usize) -> Result<(), MemoryError> {
+    if value.len() < min || value.len() > max {
+        return Err(MemoryError::Validation(format!(
+            "The field {field} must be {min} to {max} bytes; this one is {}.",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+/// At most sixteen tags of at most sixty-four characters each, or none (§4.3).
+fn checked_tags(raw: Option<Vec<String>>) -> Result<Vec<String>, MemoryError> {
+    let tags = raw.unwrap_or_default();
+    if tags.len() > TAGS_MAX {
+        return Err(MemoryError::Validation(format!(
+            "At most {TAGS_MAX} tags are allowed; this request carries {}.",
+            tags.len()
+        )));
+    }
+    if tags
+        .iter()
+        .any(|tag| tag.is_empty() || tag.chars().count() > TAG_MAX)
+    {
+        return Err(MemoryError::Validation(format!(
+            "Each tag must be 1 to {TAG_MAX} characters."
+        )));
+    }
+    Ok(tags)
+}
+
+/// `low | mid | high`, `mid` by omission (§4.3).
+fn checked_budget(raw: Option<String>) -> Result<String, MemoryError> {
+    let budget = raw.unwrap_or_else(|| "mid".to_string());
+    if !["low", "mid", "high"].contains(&budget.as_str()) {
+        return Err(MemoryError::Validation(
+            "The budget must be low, mid, or high.".to_string(),
+        ));
+    }
+    Ok(budget)
+}
+
+/// What the daemon reads back from the child. Only the fields §4.2 answers are
+/// named, so Hindsight's own API never becomes product contract (root §3);
+/// every one defaults to `null`, so a thinner answer is still readable.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RetainAnswer {
+    items_count: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RecallAnswer {
+    results: Vec<Remembered>,
+}
+
+/// One recall result, exactly the eight fields §4.2 answers.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct Remembered {
+    id: Value,
+    text: Value,
+    #[serde(rename = "type")]
+    kind: Value,
+    context: Value,
+    tags: Value,
+    metadata: Value,
+    occurred_start: Value,
+    mentioned_at: Value,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ReflectAnswer {
+    text: Value,
+    based_on: BasedOn,
+}
+
+/// The child nests its citations under `memories`; §4.2 answers the list itself.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BasedOn {
+    memories: Vec<Cited>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+struct Cited {
+    id: Value,
+    text: Value,
+    #[serde(rename = "type")]
+    kind: Value,
+}
+
+/// One English sentence carrying the child's own words, whose full stop the
+/// child may already have written.
+fn sentence(prefix: &str, detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        return format!("{prefix}.");
+    }
+    let stop = if detail.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    format!("{prefix}: {detail}{stop}")
+}
+
+/// Who a retain is attributed to (§4.2). The order routes' own header
+/// validation decides; a session's retain is called `INTERACTIVE`.
+fn attribution(source: &crate::trade::Source) -> (&'static str, Option<&str>, Option<&str>) {
+    match source {
+        crate::trade::Source::Session => ("INTERACTIVE", None, None),
+        crate::trade::Source::Trigger {
+            trigger_id,
+            firing_id,
+        } => ("TRIGGER", Some(trigger_id), Some(firing_id)),
+    }
+}
+
+/// The child's own route (§4.2): one tenant, the derived bank, the suffix.
+fn route(port: u16, bank: &str, suffix: &str) -> String {
+    format!("http://127.0.0.1:{port}/v1/default/banks/{bank}{suffix}")
 }
 
 impl Memory {
+    /// The endpoint one operation talks to. A child that is already ready
+    /// answers straight away and a row the loss rule has failed refuses here
+    /// (§4.3); starting one is [`Self::ensure_ready`]'s, inside the caller's own
+    /// budget.
+    async fn endpoint(&self) -> Result<(u16, String), MemoryError> {
+        {
+            let live = self.live.lock().await;
+            if live.state == LiveState::Ready
+                && let (Some(port), Some(bearer)) = (live.port, live.bearer.clone())
+            {
+                return Ok((port, bearer));
+            }
+        }
+        let row = child_row(&self.store)?;
+        if row.state == "UNAVAILABLE" {
+            return Err(MemoryError::Unavailable(sentence(
+                "The memory child is unavailable",
+                row.failure_message
+                    .as_deref()
+                    .or(row.failure_code.as_deref())
+                    .unwrap_or("no reason was recorded"),
+            )));
+        }
+        self.ensure_ready().await
+    }
+
+    /// One call to the child (§4.2). The readiness wait and the request share
+    /// the operation's own budget (§4.3), and every message lifted out of the
+    /// answer is redacted before it can leave.
+    async fn call(
+        &self,
+        bank: &str,
+        suffix: &str,
+        body: Value,
+        budget: Duration,
+    ) -> Result<Value, MemoryError> {
+        let attempt = async {
+            let (port, bearer) = self.endpoint().await?;
+            let response = self
+                .http
+                .post(route(port, bank, suffix))
+                .bearer_auth(bearer)
+                .timeout(budget)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    if e.is_timeout() {
+                        MemoryError::Timeout
+                    } else {
+                        MemoryError::Error(self.redact(&sentence(
+                            "The memory child could not be reached",
+                            &first_line(&e.to_string()),
+                        )))
+                    }
+                })?;
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            if status.is_success() {
+                return serde_json::from_str(&text).map_err(|e| {
+                    MemoryError::Error(sentence(
+                        "The memory child answered a body MarketRig cannot read",
+                        &e.to_string(),
+                    ))
+                });
+            }
+            // FastAPI's own failure shape; anything else leaves the status.
+            let detail = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|body| Some(body.get("detail")?.as_str()?.to_string()));
+            Err(if status.is_client_error() {
+                MemoryError::Rejected(self.redact(&sentence(
+                    "The memory child refused the operation",
+                    &detail.unwrap_or_else(|| format!("HTTP {status}")),
+                )))
+            } else {
+                MemoryError::Error(self.redact(&sentence(
+                    &format!("The memory child answered HTTP {status}"),
+                    &first_line(detail.as_deref().unwrap_or(&text)),
+                )))
+            })
+        };
+        tokio::time::timeout(budget, attempt)
+            .await
+            .unwrap_or(Err(MemoryError::Timeout))
+    }
+
     /// C31 (§4.2): `POST /v1/default/banks/<bank>/memories`.
     pub async fn retain(&self, bank: &str, body: Value) -> Result<Value, MemoryError> {
-        let _ = (bank, body);
-        pending()
+        self.call(bank, "/memories", body, self.long_timeout).await
     }
 
     /// C31 (§4.2): `POST /v1/default/banks/<bank>/memories/recall`.
     pub async fn recall(&self, bank: &str, body: Value) -> Result<Value, MemoryError> {
-        let _ = (bank, body);
-        pending()
+        self.call(bank, "/memories/recall", body, self.recall_timeout)
+            .await
     }
 
     /// C31 (§4.2): `POST /v1/default/banks/<bank>/reflect`.
     pub async fn reflect(&self, bank: &str, body: Value) -> Result<Value, MemoryError> {
-        let _ = (bank, body);
-        pending()
+        self.call(bank, "/reflect", body, self.long_timeout).await
     }
+
+    /// `GET /desks/{d}/memory` (§4.2): the installation status plus the desk.
+    pub async fn desk_status(&self, desk_id: &str) -> Result<Value, MemoryError> {
+        let status = self.status().await?;
+        Ok(json!({
+            "child": status.child,
+            "provider": status.provider,
+            "desk_id": desk_id,
+        }))
+    }
+
+    /// `POST /desks/{d}/memory/retain` (§4.2): one item, synchronous, the
+    /// agent's own `context` and `tags` verbatim, and the attribution metadata
+    /// the request's headers decided. The answer's unit appends
+    /// `MEMORY_RETAINED` and, on the first retain ever, locks the embedding
+    /// model (§3).
+    pub async fn retain_op(
+        &self,
+        desk_id: &str,
+        request: RetainRequest,
+        source: &crate::trade::Source,
+    ) -> Result<Value, MemoryError> {
+        bounded("content", &request.content, 1, CONTENT_MAX)?;
+        if let Some(context) = &request.context {
+            bounded("context", context, 0, CONTEXT_MAX)?;
+        }
+        let tags = checked_tags(request.tags)?;
+        let (source_name, trigger_id, firing_id) = attribution(source);
+
+        let mut item = Map::new();
+        item.insert("content".to_string(), json!(request.content));
+        if let Some(context) = &request.context {
+            item.insert("context".to_string(), json!(context));
+        }
+        if !tags.is_empty() {
+            item.insert("tags".to_string(), json!(tags));
+        }
+        let mut metadata = Map::new();
+        metadata.insert("source".to_string(), json!(source_name));
+        metadata.insert("desk_id".to_string(), json!(desk_id));
+        if let (Some(trigger_id), Some(firing_id)) = (trigger_id, firing_id) {
+            metadata.insert("trigger_id".to_string(), json!(trigger_id));
+            metadata.insert("firing_id".to_string(), json!(firing_id));
+        }
+        item.insert("metadata".to_string(), Value::Object(metadata));
+        let answer: RetainAnswer = read(
+            self.retain(
+                &bank(desk_id),
+                json!({ "items": [Value::Object(item)], "async": false }),
+            )
+            .await?,
+        )?;
+
+        let at_ns = now_ns();
+        let desk = desk_id.to_string();
+        let payload = json!({
+            "source": source_name,
+            "trigger_id": trigger_id,
+            "firing_id": firing_id,
+            "items_count": answer.items_count,
+            "tags": tags,
+        });
+        self.store.unit(move |tx| {
+            tx.execute(
+                "UPDATE memory_provider SET embedding_locked_at_ns = ?1 \
+                 WHERE id = 1 AND embedding_locked_at_ns IS NULL",
+                params![at_ns],
+            )?;
+            append_event(tx, "MEMORY_RETAINED", Some(&desk), at_ns, payload)
+        })?;
+        Ok(json!({ "items_count": answer.items_count }))
+    }
+
+    /// `POST /desks/{d}/memory/recall` (§4.2).
+    pub async fn recall_op(
+        &self,
+        desk_id: &str,
+        request: RecallRequest,
+    ) -> Result<Value, MemoryError> {
+        bounded("query", &request.query, 1, QUERY_MAX)?;
+        let tags = checked_tags(request.tags)?;
+        let budget = checked_budget(request.budget)?;
+
+        let mut body = Map::new();
+        body.insert("query".to_string(), json!(request.query));
+        body.insert("budget".to_string(), json!(budget));
+        if !tags.is_empty() {
+            body.insert("tags".to_string(), json!(tags));
+            body.insert("tags_match".to_string(), json!("any"));
+        }
+        let answer: RecallAnswer = read(self.recall(&bank(desk_id), Value::Object(body)).await?)?;
+        self.recalled(desk_id, "recall", answer.results.len())?;
+        Ok(json!({ "results": answer.results }))
+    }
+
+    /// `POST /desks/{d}/memory/reflect` (§4.2).
+    pub async fn reflect_op(
+        &self,
+        desk_id: &str,
+        request: ReflectRequest,
+    ) -> Result<Value, MemoryError> {
+        bounded("query", &request.query, 1, QUERY_MAX)?;
+        let budget = checked_budget(request.budget)?;
+        let answer: ReflectAnswer = read(
+            self.reflect(
+                &bank(desk_id),
+                json!({ "query": request.query, "budget": budget }),
+            )
+            .await?,
+        )?;
+        self.recalled(desk_id, "reflect", answer.based_on.memories.len())?;
+        Ok(json!({ "text": answer.text, "based_on": answer.based_on.memories }))
+    }
+
+    /// `MEMORY_RECALLED {op, results}` (§4.2): the count, never a word of what
+    /// was asked or answered.
+    fn recalled(&self, desk_id: &str, op: &'static str, results: usize) -> Result<(), MemoryError> {
+        let desk = desk_id.to_string();
+        let at_ns = now_ns();
+        self.store.unit(move |tx| {
+            append_event(
+                tx,
+                "MEMORY_RECALLED",
+                Some(&desk),
+                at_ns,
+                json!({ "op": op, "results": results }),
+            )
+        })?;
+        Ok(())
+    }
+}
+
+/// The child's answer as the subset §4.2 needs. An answer MarketRig cannot read
+/// is the child's failure, so it carries `MEMORY_ERROR` like any other (§4.3).
+fn read<T: serde::de::DeserializeOwned>(body: Value) -> Result<T, MemoryError> {
+    serde_json::from_value(body).map_err(|e| {
+        MemoryError::Error(sentence(
+            "The memory child answered a body MarketRig cannot read",
+            &e.to_string(),
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1244,6 +1652,8 @@ pub(crate) fn seam_memory(store: Store, roots: Roots) -> Memory {
         daemon_uuid: "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
         ready_deadline: READY_DEADLINE,
         live: Arc::new(Mutex::new(Live::default())),
+        long_timeout: LONG_TIMEOUT,
+        recall_timeout: RECALL_TIMEOUT,
     }
 }
 
@@ -2158,4 +2568,622 @@ async fn loss_then_one_restart_then_child_failed() {
     assert_eq!(row.state, "AVAILABLE");
     assert!(row.failure_code.is_none() && row.failure_message.is_none());
     assert_eq!(memory.live.lock().await.losses_since_ready, 0);
+}
+
+// ---------------------------------------------------------------------------
+// memory::ops (feature SPEC §8 check 4)
+// ---------------------------------------------------------------------------
+
+/// An in-process `hindsight-api`: §4.2's three routes on the paths and field
+/// names the daemon consumes, the bearer rule of §2.2, and one knob for the
+/// failure shapes §4.3 maps. Shared with `api`'s own route check.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct Fake {
+    pub port: u16,
+    pub bearer: String,
+    /// `("<op> <bank>", request body)` for every call that carried the bearer.
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+    mode: std::sync::Arc<std::sync::Mutex<&'static str>>,
+}
+
+/// A 5xx `detail` shaped like the real one: two lines, the first quoting the
+/// provider's own text, which quotes the key back (§4.3).
+#[cfg(test)]
+pub(crate) fn boom_detail(key: &str) -> String {
+    format!(
+        "Fact extraction failed: AuthenticationError: Error code: 401 - Incorrect API key \
+         provided: {key}.\nsecond line the caller never sees"
+    )
+}
+
+#[cfg(test)]
+impl Fake {
+    /// `ok` | `reject` (422) | `boom` (500) | `sleep` (past any budget).
+    pub(crate) fn arm(&self, mode: &'static str) {
+        *self.mode.lock().expect("fake mode") = mode;
+    }
+
+    pub(crate) fn drain(&self) -> Vec<(String, Value)> {
+        self.seen.lock().expect("fake log").drain(..).collect()
+    }
+
+    #[track_caller]
+    pub(crate) fn last(&self) -> (String, Value) {
+        self.drain().pop().expect("the daemon called the child")
+    }
+}
+
+#[cfg(test)]
+async fn fake_answer(
+    fake: Fake,
+    headers: axum::http::HeaderMap,
+    call: String,
+    body: Value,
+    ok: Value,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    if headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        != Some(&format!("Bearer {}", fake.bearer))
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(json!({ "detail": "Invalid API key" })),
+        )
+            .into_response();
+    }
+    fake.seen.lock().expect("fake log").push((call, body));
+    // Read the knob out before any await: a guard held across one is not `Send`.
+    let mode = *fake.mode.lock().expect("fake mode");
+    match mode {
+        "reject" => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            axum::Json(json!({ "detail": "rejected by script" })),
+        )
+            .into_response(),
+        "boom" => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({ "detail": boom_detail(FAKE_KEY) })),
+        )
+            .into_response(),
+        "sleep" => {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            axum::Json(ok).into_response()
+        }
+        _ => axum::Json(ok).into_response(),
+    }
+}
+
+/// The one recall result the fake holds, carrying two fields §4.2 does not
+/// answer so the projection is visible.
+#[cfg(test)]
+pub(crate) fn fake_result() -> Value {
+    json!({
+        "id": "m-1",
+        "text": "a lesson",
+        "type": "experience",
+        "context": "cycle 7",
+        "tags": ["lesson"],
+        "metadata": { "source": "INTERACTIVE" },
+        "occurred_start": "2026-09-04T00:00:00Z",
+        "mentioned_at": "2026-09-04T00:00:01Z",
+        "score": 0.91,
+        "document_id": "d-9"
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn fake_child() -> Fake {
+    use axum::extract::{Path as Segment, State};
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+
+    async fn retain(
+        State(fake): State<Fake>,
+        Segment(bank): Segment<String>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::response::Response {
+        let ok = json!({ "success": true, "bank_id": bank, "items_count": 1, "async": false });
+        fake_answer(fake, headers, format!("retain {bank}"), body, ok).await
+    }
+
+    async fn recall(
+        State(fake): State<Fake>,
+        Segment(bank): Segment<String>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::response::Response {
+        let ok = json!({ "results": [fake_result()], "elapsed_ms": 3 });
+        fake_answer(fake, headers, format!("recall {bank}"), body, ok).await
+    }
+
+    async fn reflect(
+        State(fake): State<Fake>,
+        Segment(bank): Segment<String>,
+        headers: HeaderMap,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::response::Response {
+        let ok = json!({
+            "text": "a reflection",
+            "based_on": { "memories": [{ "id": "m-1", "text": "a lesson",
+                                         "type": "experience", "weight": 2 }] },
+            "elapsed_ms": 4
+        });
+        fake_answer(fake, headers, format!("reflect {bank}"), body, ok).await
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake = Fake {
+        port: listener.local_addr().unwrap().port(),
+        bearer: "fake-per-start-bearer".to_string(),
+        seen: Default::default(),
+        mode: std::sync::Arc::new(std::sync::Mutex::new("ok")),
+    };
+    let app = axum::Router::new()
+        .route(
+            "/health",
+            get(|| async { axum::Json(json!({"status": "ok"})) }),
+        )
+        .route("/v1/default/banks/{bank}/memories", post(retain))
+        .route("/v1/default/banks/{bank}/memories/recall", post(recall))
+        .route("/v1/default/banks/{bank}/reflect", post(reflect))
+        .with_state(fake.clone());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    fake
+}
+
+/// Puts the fake in the live slot C30's launch would fill, so this check drives
+/// §4 without any of §2.2's start code.
+#[cfg(test)]
+pub(crate) async fn set_ready(memory: &Memory, fake: &Fake) {
+    let mut live = memory.live.lock().await;
+    live.state = LiveState::Ready;
+    live.port = Some(fake.port);
+    live.bearer = Some(fake.bearer.clone());
+    live.pid = Some(4242);
+}
+
+#[cfg(test)]
+const DESK: &str = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+#[cfg(test)]
+const DESK_BANK: &str = "desk-0199a1b2c3d47e5f8a9b0c1d2e3f4a5b";
+
+/// The desk an event's `desk_id` references; this check is about §4, not about
+/// how a desk comes to exist.
+#[cfg(test)]
+fn plant_desk(store: &Store) {
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES (?1, 'alpha', 'READY', '/desks/alpha', 1, 1)",
+                params![DESK],
+            )
+        })
+        .unwrap();
+}
+
+#[cfg(test)]
+fn retain_request(content: &str, context: Option<&str>, tags: &[&str]) -> RetainRequest {
+    RetainRequest {
+        content: content.to_string(),
+        context: context.map(str::to_string),
+        tags: (!tags.is_empty()).then(|| tags.iter().map(|t| t.to_string()).collect()),
+    }
+}
+
+/// The three request mappings field for field, the three answer shapes, the
+/// limits, every §4.3 code, the two event payloads, and no content anywhere
+/// MarketRig writes (§4.2, §4.3).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_operations() {
+    use crate::trade::Source;
+
+    let (_dir, mut memory) = scratch();
+    memory.long_timeout = Duration::from_secs(10);
+    memory.recall_timeout = Duration::from_secs(10);
+    plant_desk(&memory.store);
+    let fake = fake_child().await;
+    set_ready(&memory, &fake).await;
+    // The key the child quotes back at us (§4.3); stored, never sent anywhere.
+    memory.store_key(FAKE_KEY).unwrap();
+
+    // --- retain: one item, synchronous, the agent's own fields verbatim ------
+    let answer = memory
+        .retain_op(
+            DESK,
+            retain_request("a lesson", Some("cycle 7"), &["lesson", "AAPL.XNAS"]),
+            &Source::Session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer, json!({ "items_count": 1 }));
+    assert_eq!(
+        fake.last(),
+        (
+            format!("retain {DESK_BANK}"),
+            json!({
+                "items": [{
+                    "content": "a lesson",
+                    "context": "cycle 7",
+                    "tags": ["lesson", "AAPL.XNAS"],
+                    "metadata": { "source": "INTERACTIVE", "desk_id": DESK },
+                }],
+                "async": false,
+            })
+        )
+    );
+    // The first retain ever locks the embedding model (§3, §4.2).
+    assert!(
+        provider_row(&memory.store)
+            .unwrap()
+            .embedding_locked_at_ns
+            .is_some()
+    );
+
+    // A trigger's retain carries both ids in the metadata, and nothing else.
+    memory
+        .retain_op(
+            DESK,
+            retain_request("from a trigger", None, &[]),
+            &Source::Trigger {
+                trigger_id: "t-1".to_string(),
+                firing_id: "f-1".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.last().1,
+        json!({
+            "items": [{
+                "content": "from a trigger",
+                "metadata": {
+                    "source": "TRIGGER", "desk_id": DESK,
+                    "trigger_id": "t-1", "firing_id": "f-1",
+                },
+            }],
+            "async": false,
+        }),
+        "an omitted context or tag list is left out, never sent null"
+    );
+
+    // --- recall: the query, the budget, the tag filter, the eight fields -----
+    let answer = memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "what did AAPL teach".to_string(),
+                budget: Some("high".to_string()),
+                tags: Some(vec!["lesson".to_string()]),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.last(),
+        (
+            format!("recall {DESK_BANK}"),
+            json!({
+                "query": "what did AAPL teach",
+                "budget": "high",
+                "tags": ["lesson"],
+                "tags_match": "any",
+            })
+        )
+    );
+    assert_eq!(
+        answer,
+        json!({ "results": [{
+            "id": "m-1",
+            "text": "a lesson",
+            "type": "experience",
+            "context": "cycle 7",
+            "tags": ["lesson"],
+            "metadata": { "source": "INTERACTIVE" },
+            "occurred_start": "2026-09-04T00:00:00Z",
+            "mentioned_at": "2026-09-04T00:00:01Z",
+        }] }),
+        "exactly §4.2's eight fields; the child's score and document_id are dropped"
+    );
+
+    // No tags means no filter at all, and `mid` is the default budget (§4.3).
+    memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "anything".to_string(),
+                budget: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.last().1,
+        json!({ "query": "anything", "budget": "mid" })
+    );
+
+    // --- reflect: the citations come out of `based_on.memories` -------------
+    let answer = memory
+        .reflect_op(
+            DESK,
+            ReflectRequest {
+                query: "what have I learned".to_string(),
+                budget: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.last(),
+        (
+            format!("reflect {DESK_BANK}"),
+            json!({ "query": "what have I learned", "budget": "mid" })
+        )
+    );
+    assert_eq!(
+        answer,
+        json!({
+            "text": "a reflection",
+            "based_on": [{ "id": "m-1", "text": "a lesson", "type": "experience" }],
+        })
+    );
+
+    // --- The events: the counts and the attribution, never a word of content -
+    let seen = events(&memory.store);
+    assert_eq!(
+        seen.iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "MEMORY_RETAINED",
+            "MEMORY_RETAINED",
+            "MEMORY_RECALLED",
+            "MEMORY_RECALLED",
+            "MEMORY_RECALLED",
+        ]
+    );
+    assert_eq!(
+        seen[0].1,
+        json!({
+            "source": "INTERACTIVE", "trigger_id": null, "firing_id": null,
+            "items_count": 1, "tags": ["lesson", "AAPL.XNAS"],
+        })
+    );
+    assert_eq!(
+        seen[1].1,
+        json!({
+            "source": "TRIGGER", "trigger_id": "t-1", "firing_id": "f-1",
+            "items_count": 1, "tags": [],
+        })
+    );
+    assert_eq!(seen[2].1, json!({ "op": "recall", "results": 1 }));
+    assert_eq!(seen[4].1, json!({ "op": "reflect", "results": 1 }));
+    let written = seen
+        .iter()
+        .map(|(kind, payload)| format!("{kind}{payload}"))
+        .collect::<String>();
+    for secret in [
+        "a lesson",
+        "from a trigger",
+        "cycle 7",
+        "what did AAPL teach",
+        "what have I learned",
+        "a reflection",
+        FAKE_KEY,
+    ] {
+        assert!(
+            !written.contains(secret),
+            "{secret:?} is in an event payload"
+        );
+    }
+
+    // --- The limits, none of which reaches the child (§4.3) -----------------
+    let big = "x".repeat(CONTENT_MAX + 1);
+    for (label, request) in [
+        ("empty content", retain_request("", None, &[])),
+        ("content over 64 KiB", retain_request(&big, None, &[])),
+        (
+            "context over 4 KiB",
+            retain_request("c", Some(&"x".repeat(CONTEXT_MAX + 1)), &[]),
+        ),
+        (
+            "seventeen tags",
+            RetainRequest {
+                content: "c".to_string(),
+                context: None,
+                tags: Some((0..=TAGS_MAX).map(|n| n.to_string()).collect()),
+            },
+        ),
+        (
+            "a 65-character tag",
+            retain_request("c", None, &[&"t".repeat(TAG_MAX + 1)]),
+        ),
+        ("an empty tag", retain_request("c", None, &[""])),
+    ] {
+        let err = memory.retain_op(DESK, request, &Source::Session).await;
+        assert_eq!(err.unwrap_err().code(), "VALIDATION", "{label}");
+    }
+    for (label, request) in [
+        (
+            "empty query",
+            RecallRequest {
+                query: String::new(),
+                budget: None,
+                tags: None,
+            },
+        ),
+        (
+            "query over 8 KiB",
+            RecallRequest {
+                query: "x".repeat(QUERY_MAX + 1),
+                budget: None,
+                tags: None,
+            },
+        ),
+        (
+            "an unknown budget",
+            RecallRequest {
+                query: "q".to_string(),
+                budget: Some("enormous".to_string()),
+                tags: None,
+            },
+        ),
+    ] {
+        let err = memory.recall_op(DESK, request).await;
+        assert_eq!(err.unwrap_err().code(), "VALIDATION", "{label}");
+    }
+    let err = memory
+        .reflect_op(
+            DESK,
+            ReflectRequest {
+                query: String::new(),
+                budget: None,
+            },
+        )
+        .await;
+    assert_eq!(err.unwrap_err().code(), "VALIDATION");
+    assert!(fake.drain().is_empty(), "a refused request never leaves");
+
+    // --- 422: the child's own detail, as MEMORY_REJECTED --------------------
+    fake.arm("reject");
+    let err = memory
+        .retain_op(DESK, retain_request("c", None, &[]), &Source::Session)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_REJECTED");
+    assert!(err.to_string().contains("rejected by script"), "{err}");
+
+    // --- 500: the status and the first line, with the key redacted ----------
+    fake.arm("boom");
+    let err = memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "q".to_string(),
+                budget: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_ERROR");
+    let message = err.to_string();
+    assert!(message.contains("500"), "{message}");
+    assert!(!message.contains(FAKE_KEY), "the key leaked: {message}");
+    assert!(message.contains(REDACTED), "{message}");
+    assert!(
+        !message.contains("second line"),
+        "only the first line: {message}"
+    );
+
+    // --- The budget the operation waits inside, spent (§4.3) ----------------
+    fake.arm("sleep");
+    memory.recall_timeout = Duration::from_millis(50);
+    let err = memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "q".to_string(),
+                budget: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_TIMEOUT");
+    memory.recall_timeout = Duration::from_secs(10);
+    fake.arm("ok");
+
+    // --- A child that is not there at all: transport, then the two rows -----
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    set_ready(
+        &memory,
+        &Fake {
+            port: dead_port,
+            ..fake.clone()
+        },
+    )
+    .await;
+    let err = memory
+        .retain_op(DESK, retain_request("c", None, &[]), &Source::Session)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_ERROR");
+
+    // No live child and an unconfigured row: MEMORY_UNCONFIGURED (C30 owns the
+    // start that would follow).
+    *memory.live.lock().await = Live::default();
+    let err = memory
+        .retain_op(DESK, retain_request("c", None, &[]), &Source::Session)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_UNCONFIGURED");
+
+    // A failed row refuses before anything is started at all.
+    memory
+        .store
+        .unit(|tx| {
+            tx.execute(
+                "UPDATE memory_child SET state = 'UNAVAILABLE', failure_code = 'CHILD_FAILED', \
+                 failure_message = 'it exited' WHERE id = 1",
+                [],
+            )
+        })
+        .unwrap();
+    let err = memory
+        .recall_op(
+            DESK,
+            RecallRequest {
+                query: "q".to_string(),
+                budget: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_UNAVAILABLE");
+    assert!(err.to_string().contains("it exited"), "{err}");
+}
+
+/// A wrong bearer is the child's own refusal, and it never becomes a MarketRig
+/// answer that quotes it (§2.2, §4.3).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wrong_bearer_is_the_childs_refusal() {
+    let (_dir, memory) = scratch();
+    let fake = fake_child().await;
+    set_ready(
+        &memory,
+        &Fake {
+            bearer: "not-the-bearer".to_string(),
+            ..fake.clone()
+        },
+    )
+    .await;
+    let err = memory
+        .retain_op(
+            DESK,
+            retain_request("c", None, &[]),
+            &crate::trade::Source::Session,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "MEMORY_REJECTED");
+    assert!(err.to_string().contains("Invalid API key"), "{err}");
+    assert!(fake.drain().is_empty(), "the child logged nothing");
+    assert!(
+        events(&memory.store).is_empty(),
+        "and neither did MarketRig"
+    );
 }

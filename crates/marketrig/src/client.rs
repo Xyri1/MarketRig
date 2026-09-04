@@ -120,6 +120,25 @@ impl Endpoint {
         self.send(self.agent.post(self.uri(path)), body)
     }
 
+    /// A POST whose global timeout is the caller's rather than the agent's ten
+    /// seconds: the memory operations must outlast the daemon's own budgets, so
+    /// what the caller sees is the daemon's code (R4 feature SPEC §4.4).
+    pub fn post_within(
+        &self,
+        path: &str,
+        body: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<String, Fault> {
+        self.send(
+            self.agent
+                .post(self.uri(path))
+                .config()
+                .timeout_global(Some(timeout))
+                .build(),
+            body,
+        )
+    }
+
     /// Partial update — the trigger group's one mutation shape (R2 feature
     /// SPEC §8), carrying the same headers and timeouts as [`Self::post`].
     pub fn patch(&self, path: &str, body: Option<serde_json::Value>) -> Result<String, Fault> {

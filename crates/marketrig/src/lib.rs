@@ -62,7 +62,84 @@ enum Group {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// The desk's own experiential memory.
+    // R4 feature SPEC §4.4. The desk writes and reads it; MarketRig only
+    // carries it (per D17).
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
 }
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Show the memory child and provider behind this desk.
+    Status {
+        /// Desk name or UUID.
+        desk: String,
+    },
+    /// Retain one memory in this desk's bank.
+    #[command(group = clap::ArgGroup::new("material").required(true).args(["content", "file"]))]
+    Retain {
+        /// Desk name or UUID.
+        desk: String,
+        /// The memory itself.
+        #[arg(long, value_name = "TEXT")]
+        content: Option<String>,
+        /// Read the memory from this file instead.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Extra material carried beside the content.
+        #[arg(long, value_name = "TEXT")]
+        context: Option<String>,
+        /// One tag; repeat to build the whole list.
+        #[arg(long = "tag", value_name = "TAG")]
+        tag: Vec<String>,
+    },
+    /// Recall this desk's memories matching a query.
+    Recall {
+        /// Desk name or UUID.
+        desk: String,
+        #[arg(long, value_name = "TEXT")]
+        query: String,
+        #[arg(long)]
+        budget: Option<Budget>,
+        /// One tag the memory must carry; repeat to widen the filter.
+        #[arg(long = "tag", value_name = "TAG")]
+        tag: Vec<String>,
+    },
+    /// Reflect over this desk's memories.
+    Reflect {
+        /// Desk name or UUID.
+        desk: String,
+        #[arg(long, value_name = "TEXT")]
+        query: String,
+        #[arg(long)]
+        budget: Option<Budget>,
+    },
+}
+
+/// How much the child may spend on one recall or reflection (R4 §4.3).
+#[derive(Clone, Copy, ValueEnum)]
+enum Budget {
+    Low,
+    Mid,
+    High,
+}
+
+impl Budget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Budget::Low => "low",
+            Budget::Mid => "mid",
+            Budget::High => "high",
+        }
+    }
+}
+
+/// `--file`'s own bound, checked before the daemon is contacted so an oversize
+/// file is a usage error and never a request (R4 §4.4).
+const CONTENT_LIMIT: usize = 64 * 1024;
 
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -277,7 +354,12 @@ pub fn run() -> i32 {
     }
     match dispatch(&cli.group) {
         Ok(body) => {
-            emit(cli.json, &body);
+            match &cli.group {
+                // The memory answers are nested, sentence-shaped, or empty —
+                // none of which the generic renderer covers (R4 §4.4).
+                Group::Memory { command } if !cli.json => emit_memory(command, &body),
+                _ => emit(cli.json, &body),
+            }
             0
         }
         Err(fault) => {
@@ -299,6 +381,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
     // empty `update` are usage errors whether or not a daemon is up (§9).
     let body = match group {
         Group::Trigger { command } => trigger_body(command),
+        Group::Memory { command } => memory_body(command),
         _ => None,
     };
     let endpoint = Endpoint::discover()?;
@@ -369,6 +452,28 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             }
         }
         Group::Session { .. } => unreachable!("handled before discovery"),
+        Group::Memory { command } => {
+            let (MemoryCommand::Status { desk }
+            | MemoryCommand::Retain { desk, .. }
+            | MemoryCommand::Recall { desk, .. }
+            | MemoryCommand::Reflect { desk, .. }) = command;
+            let desk = resolve(&endpoint, "/desks", "desk", desk)?;
+            // Above the daemon's own 180 s and 60 s (R4 §4.3), so what the
+            // caller sees is the daemon's code and never a client giving up.
+            let (route, timeout) = match command {
+                MemoryCommand::Status { .. } => {
+                    return endpoint.get(&format!("/desks/{desk}/memory"));
+                }
+                MemoryCommand::Retain { .. } => ("retain", 200),
+                MemoryCommand::Recall { .. } => ("recall", 80),
+                MemoryCommand::Reflect { .. } => ("reflect", 200),
+            };
+            endpoint.post_within(
+                &format!("/desks/{desk}/memory/{route}"),
+                body,
+                std::time::Duration::from_secs(timeout),
+            )
+        }
         Group::Prompt { command } => {
             let (PromptCommand::List { desk } | PromptCommand::Show { desk, .. }) = command;
             let desk = resolve(&endpoint, "/desks", "desk", desk)?;
@@ -451,6 +556,74 @@ fn trigger_body(command: &TriggerCommand) -> Option<Value> {
         _ => return None,
     }
     Some(Value::Object(body))
+}
+
+/// The request body of the three mutating `memory` commands (R4 §4.2). Values
+/// pass through untouched; the daemon validates them. `--file` is read here,
+/// before discovery, so an unreadable or oversize one is a usage error whether
+/// or not a daemon is up (§4.4).
+fn memory_body(command: &MemoryCommand) -> Option<Value> {
+    let mut body = Map::new();
+    match command {
+        MemoryCommand::Status { .. } => return None,
+        MemoryCommand::Retain {
+            content,
+            file,
+            context,
+            tag,
+            ..
+        } => {
+            body.insert("content".to_string(), json!(content_of(content, file)));
+            if let Some(context) = context {
+                body.insert("context".to_string(), json!(context));
+            }
+            if !tag.is_empty() {
+                body.insert("tags".to_string(), json!(tag));
+            }
+        }
+        MemoryCommand::Recall {
+            query, budget, tag, ..
+        } => {
+            body.insert("query".to_string(), json!(query));
+            if let Some(budget) = budget {
+                body.insert("budget".to_string(), json!(budget.as_str()));
+            }
+            if !tag.is_empty() {
+                body.insert("tags".to_string(), json!(tag));
+            }
+        }
+        MemoryCommand::Reflect { query, budget, .. } => {
+            body.insert("query".to_string(), json!(query));
+            if let Some(budget) = budget {
+                body.insert("budget".to_string(), json!(budget.as_str()));
+            }
+        }
+    }
+    Some(Value::Object(body))
+}
+
+/// `--content` verbatim, or `--file`'s text refused over 64 KiB (§4.4). Clap
+/// has already required exactly one of the two.
+fn content_of(content: &Option<String>, file: &Option<PathBuf>) -> String {
+    if let Some(content) = content {
+        return content.clone();
+    }
+    let path = file.as_ref().expect("clap requires --content or --file");
+    let source = std::fs::read(path).unwrap_or_else(|e| {
+        usage(format!(
+            "cannot read the content file {}: {e}",
+            path.display()
+        ))
+    });
+    if source.len() > CONTENT_LIMIT {
+        usage(format!(
+            "the content file {} is {} bytes; the limit is {CONTENT_LIMIT}",
+            path.display(),
+            source.len()
+        ));
+    }
+    String::from_utf8(source)
+        .unwrap_or_else(|_| usage(format!("the content file {} is not UTF-8", path.display())))
 }
 
 /// `--at` or the recurring trio; clap has already rejected any other shape.
@@ -665,6 +838,72 @@ fn emit(json: bool, body: &str) {
     for (field, entry) in value.as_object().into_iter().flatten() {
         if !entry.is_null() && !FIELDS.contains(&field.as_str()) {
             println!("{field}: {}", text(entry));
+        }
+    }
+}
+
+/// The desk-scoped status in the route's own key order — `serde_json` sorts an
+/// object's keys on the way in, so the order lives here (R4 §4.2, §4.4). The
+/// child's fields, then the provider's, then the desk; a field the answer omits
+/// is skipped, exactly as [`emit`] skips one.
+const MEMORY_STATUS: [&str; 13] = [
+    "state",
+    "executable_path",
+    "validated_at_ns",
+    "failure_code",
+    "failure_message",
+    "live",
+    "pid",
+    "base_url",
+    "llm_model",
+    "embedding_model",
+    "api_key_present",
+    "embedding_locked_at_ns",
+    "desk_id",
+];
+
+/// The `memory` group's human output (R4 §4.4).
+fn emit_memory(command: &MemoryCommand, body: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        println!("{}", body.trim_end());
+        return;
+    };
+    match command {
+        MemoryCommand::Status { .. } => {
+            for field in MEMORY_STATUS {
+                if let Some(entry) = [&value, &value["child"], &value["provider"]]
+                    .into_iter()
+                    .map(|part| &part[field])
+                    .find(|entry| !entry.is_null())
+                {
+                    println!("{field}: {}", text(entry));
+                }
+            }
+        }
+        MemoryCommand::Retain { .. } => {
+            let count = value["items_count"].as_i64().unwrap_or_default();
+            println!("retained {count} item{}", if count == 1 { "" } else { "s" });
+        }
+        MemoryCommand::Recall { .. } => {
+            let results = value["results"].as_array().cloned().unwrap_or_default();
+            if results.is_empty() {
+                println!("no results");
+            }
+            for result in &results {
+                println!(
+                    "{}",
+                    ["id", "type", "text"]
+                        .map(|field| text(&result[field]))
+                        .join("\t")
+                );
+            }
+        }
+        MemoryCommand::Reflect { .. } => {
+            println!("{}", text(&value["text"]));
+            println!(
+                "based on: {} memories",
+                value["based_on"].as_array().map_or(0, Vec::len)
+            );
         }
     }
 }
