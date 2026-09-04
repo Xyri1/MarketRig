@@ -148,7 +148,7 @@ Dependencies: Milestone R2.
 
 ## Milestone R4 — Memory, skills, and the closed loop
 
-**Delivered 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC) and implemented in [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Its eight module checks, the gate's G33–G37, and the static checks are green on macOS (bundle `gate-1788509422`, and the run after the stop fix); Windows CI run 33862124921 is `<pending>`. E5 attended on both macOS cells on 2026-09-04.
+**Delivered 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC) and implemented in [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Its eight module checks, the gate's G33–G37, and the static checks are green on macOS (bundle `gate-1788509422`, and the run after the stop fix); Windows CI run 33862124921 failed only on a CRLF checkout of the seed files, fixed by `.gitattributes` (538dc01), and run 33863116603 is green on macOS and Windows. E5 attended on both macOS cells on 2026-09-04.
 
 This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65, and settles their mechanics as D81. Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
 
