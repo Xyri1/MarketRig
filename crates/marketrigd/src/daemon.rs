@@ -182,8 +182,11 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
+    // 6b. re-validate an AVAILABLE memory launcher (R4 feature SPEC §2.1),
+    //     skipped under the test data root for the same reason as 6a.
     if std::env::var_os(crate::store::TEST_DATA_ROOT_ENV).is_none() {
         crate::runtime::discover_undiscovered(&store)?;
+        crate::memory::revalidate_available(&store)?;
     }
 
     // 7. bind and mint the per-start bearer.

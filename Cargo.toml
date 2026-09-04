@@ -26,6 +26,13 @@ clap = { version = "=4.6.6", features = ["derive"] }
 # tokio-tungstenite and rmcp.
 futures-util = { version = "=0.3.34", default-features = false }
 getrandom = "=0.4.3"
+# The credential store (per R4-2, slice 005 §1): the `keyring-core` API plus the
+# platform store crate named explicitly, skipping the `keyring 4.2.0` facade,
+# which drags `clap`, `rpassword`, `rprompt`, and a second `base64` for its CLI.
+keyring-core = "=1.0.0"
+apple-native-keyring-store = { version = "=1.0.2", default-features = false, features = ["keychain"] }
+# `search` is on by default and drags `regex`; the daemon names one entry.
+windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 # The nautilus set is pinned in lockstep (per D39) and every entry disables
 # default features: `nautilus-sandbox` alone defaults `high-precision`, and
 # Cargo's feature unification would flip the whole graph to 128-bit (D76).

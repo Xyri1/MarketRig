@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod exec;
 pub mod feed;
 pub mod log;
+pub mod memory;
 pub mod node;
 pub mod runtime;
 pub mod schedule;
@@ -60,6 +61,16 @@ fn start() -> Result<daemon::Startup, (&'static str, String)> {
 }
 
 fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> std::io::Result<()> {
+    // The credential store is named once, before any route can reach it (R4
+    // feature SPEC §3, per R4-2). Under the test seam the store is a file in
+    // the relocated root, so the platform one is never touched.
+    let memory = Arc::new(memory::Memory::new(
+        startup.store.clone(),
+        startup.roots.clone(),
+    )?);
+    if !memory.seam {
+        memory::set_platform_store();
+    }
     let std_listener = startup
         .listener
         .take()
@@ -136,6 +147,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             terminals: terminals.clone(),
             channels,
             dispatch: dispatcher.clone(),
+            memory: memory.clone(),
         });
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
@@ -186,6 +198,9 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
         )
         .await;
         let _ = tokio::time::timeout_at(deadline, codex.stop()).await;
+        // The memory child goes after the terminals and the app-server, inside
+        // the same bound (R4 feature SPEC §2.3).
+        let _ = tokio::time::timeout_at(deadline, memory.stop_child()).await;
         let _ = dispatcher.quit_rows();
         let _ = tokio::time::timeout_at(
             deadline,
