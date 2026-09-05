@@ -332,13 +332,14 @@ mod tests {
     fn writer(source: &Path, target: &Path) -> (PathBuf, Vec<String>) {
         (
             PathBuf::from(std::env::var("COMSPEC").unwrap()),
+            // One argument per token: `Command` re-quotes any argument with a
+            // space, so a whole `cmd` line in one argument breaks on the paths.
             vec![
                 "/C".into(),
-                format!(
-                    "ping -n 2 127.0.0.1 >NUL & copy /Y \"{}\" \"{}\"",
-                    source.display(),
-                    target.display()
-                ),
+                "copy".into(),
+                "/Y".into(),
+                source.display().to_string(),
+                target.display().to_string(),
             ],
         )
     }
