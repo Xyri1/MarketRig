@@ -115,6 +115,8 @@ function ensure(deskId: string): Pane {
   // ghostty-web parks its hidden input textarea at absolute 0,0; without a
   // positioned host that is the window's corner, blinking caret and all.
   el.style.position = "relative";
+  // WebView2 still paints the caret of that opacity-0 textarea.
+  el.style.caretColor = "transparent";
   const term = new Terminal({
     // ghostty-web's defaults are the browser's generic monospace at 15px.
     fontFamily: getComputedStyle(document.documentElement)
