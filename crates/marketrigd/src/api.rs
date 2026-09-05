@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -199,11 +199,63 @@ pub fn router(state: ApiState) -> Router {
         .with_state(state)
         .split_for_parts()
         .0
+        // Outside the bearer check, so a preflight — which carries no header —
+        // is answered rather than refused (§4.4).
+        .layer(middleware::from_fn(cors))
 }
 
-/// The WebSocket origin allowlist (§4.4): Tauri's two production origins and
-/// Vite's dev server. A request carrying no `Origin` — every non-browser
-/// client, the harness included — passes to the bearer check.
+/// The same allowlist in front of REST (§4.4). The desktop webview is a
+/// foreign origin to this loopback API and calls it with an `Authorization`
+/// header, so the browser preflights and requires the answer to name the
+/// origin; a request carrying no `Origin` — the CLI, the harness, curl — is
+/// untouched, and a foreign one is `403 ORIGIN_REFUSED` like a socket's.
+async fn cors(request: Request, next: Next) -> Response {
+    let allowed = match request.headers().get(header::ORIGIN) {
+        None => return next.run(request).await,
+        Some(origin) => {
+            let origin = origin.to_str().ok();
+            ORIGINS.into_iter().find(|allowed| Some(*allowed) == origin)
+        }
+    };
+    let Some(origin) = allowed else {
+        return envelope(
+            StatusCode::FORBIDDEN,
+            "ORIGIN_REFUSED",
+            "This origin may not call the MarketRig API.".to_string(),
+        );
+    };
+    let mut response = if request.method() == Method::OPTIONS {
+        let mut preflight = StatusCode::NO_CONTENT.into_response();
+        let headers = preflight.headers_mut();
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("authorization, content-type"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        preflight
+    } else {
+        next.run(request).await
+    };
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static(origin),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+    response
+}
+
+/// The origin allowlist (§4.4), in front of the sockets and of REST alike:
+/// Tauri's two production origins and Vite's dev server. A request carrying no
+/// `Origin` — every non-browser client, the harness included — passes to the
+/// bearer check.
 const ORIGINS: [&str; 3] = [
     "tauri://localhost",
     "http://tauri.localhost",
@@ -4310,6 +4362,101 @@ fn idle_terminal() -> crate::terminal::Spawn {
         cols: 80,
         rows: 24,
     }
+}
+
+/// One header off an answer, as the browser reads it.
+#[cfg(test)]
+fn header_of(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    name: &str,
+) -> (u16, Option<String>) {
+    let response = response.unwrap();
+    let status = response.status().as_u16();
+    let value = response
+        .headers()
+        .get(name)
+        .map(|value| value.to_str().unwrap().to_string());
+    (status, value)
+}
+
+/// The webview's preflight is answered before the bearer check, because a
+/// preflight carries no header at all (§4.4).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_preflight_is_answered_without_the_bearer() {
+    let served = serve().await;
+    let response = agent()
+        .options(format!("{}/desks", served.base))
+        .header("Origin", "tauri://localhost")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "authorization")
+        .call()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 204);
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .map(|value| value.to_str().unwrap().to_string())
+    };
+    assert_eq!(
+        header("access-control-allow-origin").as_deref(),
+        Some("tauri://localhost")
+    );
+    assert_eq!(
+        header("access-control-allow-methods").as_deref(),
+        Some("GET, POST, PUT, PATCH, DELETE")
+    );
+    assert_eq!(
+        header("access-control-allow-headers").as_deref(),
+        Some("authorization, content-type")
+    );
+    assert_eq!(header("access-control-max-age").as_deref(), Some("600"));
+    assert_eq!(header("vary").as_deref(), Some("Origin"));
+}
+
+/// An allowed origin is echoed on the answer, which is what the fetch needs.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_allowed_origin_is_echoed_on_the_answer() {
+    let served = serve().await;
+    let answer = header_of(
+        agent()
+            .get(format!("{}/health", served.base))
+            .header("Authorization", format!("Bearer {CREDENTIAL}"))
+            .header("Origin", "http://localhost:1420")
+            .call(),
+        "access-control-allow-origin",
+    );
+    assert_eq!(answer, (200, Some("http://localhost:1420".to_string())));
+}
+
+/// A foreign origin is refused on REST exactly as it is on a socket (§4.4).
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_refuses_a_foreign_origin() {
+    let served = serve().await;
+    let refused = agent()
+        .get(format!("{}/health", served.base))
+        .header("Authorization", format!("Bearer {CREDENTIAL}"))
+        .header("Origin", FOREIGN)
+        .call();
+    expect_envelope(read(refused), 403, "ORIGIN_REFUSED");
+}
+
+/// A request with no `Origin` — the CLI, the harness — is untouched.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_origin_gets_no_cors_headers() {
+    let served = serve().await;
+    let answer = header_of(
+        agent()
+            .get(format!("{}/health", served.base))
+            .header("Authorization", format!("Bearer {CREDENTIAL}"))
+            .call(),
+        "access-control-allow-origin",
+    );
+    assert_eq!(answer, (200, None));
 }
 
 /// The origin allowlist in front of all three sockets, and the channel's
