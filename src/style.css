@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --font-ui:
+    system-ui, -apple-system, "Segoe UI Variable", "PingFang SC",
+    "Microsoft YaHei UI", sans-serif;
+  --font-terminal:
+    "SF Mono", Menlo, "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --spacing: 4px;
+  --radius-control: 4px;
+  --radius-panel: 8px;
+  --radius-pill: 999px;
+  --color-ground: oklch(0.985 0.004 250);
+  --color-panel: oklch(0.965 0.005 250);
+  --color-line: oklch(0.88 0.008 250);
+  --color-ink: oklch(0.22 0.01 250);
+  --color-ink-muted: oklch(0.5 0.01 250);
+  --color-well: oklch(0.17 0.01 250);
+  --color-accent: oklch(0.55 0.15 265);
+  --color-accent-ink: oklch(0.99 0 0);
+  --color-state-live: oklch(0.62 0.17 150);
+  --color-state-pending: oklch(0.78 0.16 85);
+  --color-state-attention: oklch(0.68 0.19 55);
+  --color-state-failure: oklch(0.58 0.22 25);
+  --color-state-idle: oklch(0.72 0.01 250);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-ground: oklch(0.19 0.01 250);
+    --color-panel: oklch(0.23 0.01 250);
+    --color-line: oklch(0.32 0.01 250);
+    --color-ink: oklch(0.92 0.005 250);
+    --color-ink-muted: oklch(0.65 0.01 250);
+    --color-well: oklch(0.14 0.01 250);
+    --color-accent: oklch(0.72 0.13 265);
+    --color-accent-ink: oklch(0.15 0.02 265);
+  }
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  background: var(--color-ground);
+  color: var(--color-ink);
+}
+
+.terminal {
+  font-family: var(--font-terminal);
+}

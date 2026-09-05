@@ -103,7 +103,7 @@ Conventions:
 
 ## Commands
 
-The frontend arrives with R5; until then everything is Cargo:
+The frontend is the repository root: `pnpm install` (Corepack provides the pinned pnpm), `pnpm generate` (rewrites `openapi.json` from `marketrigd --openapi` and regenerates `src/client`; both are committed and CI checks the diff), `pnpm check` (Prettier, ESLint, `vue-tsc`, Vitest), and `pnpm dev` (`tauri dev`, which needs the `src-tauri/` crate). Everything else is Cargo:
 
 ```bash
 cargo fmt --check                                  # formatting

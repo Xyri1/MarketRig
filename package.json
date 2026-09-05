@@ -1,0 +1,45 @@
+{
+  "name": "marketrig",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.25.0+sha512.XN6SW08HX3Jetx+64YpC/+eEUkeJ8ZthxzHLhyHsKKruFg4BqNWvT+2ypCzb8wDv4j2zVrDUoXtNY+EfirfJVg==",
+  "engines": {
+    "node": "24.18.0"
+  },
+  "scripts": {
+    "generate": "cargo run -q -p marketrigd -- --openapi > openapi.json && openapi-ts",
+    "check": "prettier --check \"*.{ts,js,html,json}\" \"src/**/*.{ts,vue,css,json}\" && eslint . && vue-tsc --noEmit && vitest run",
+    "dev": "tauri dev",
+    "build": "node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-autostart": "2.5.1",
+    "@tauri-apps/plugin-log": "2.9.1",
+    "@tauri-apps/plugin-notification": "2.4.0",
+    "ghostty-web": "0.4.0",
+    "reka-ui": "2.10.4",
+    "vue": "3.5.42",
+    "vue-i18n": "11.4.10"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@hey-api/openapi-ts": "0.99.0",
+    "@tailwindcss/vite": "4.3.3",
+    "@tauri-apps/cli": "2.11.4",
+    "@vitejs/plugin-vue": "6.0.8",
+    "@vue/compiler-sfc": "3.5.42",
+    "@vue/test-utils": "2.5.0",
+    "eslint": "10.10.0",
+    "eslint-plugin-vue": "10.10.0",
+    "jsdom": "30.0.1",
+    "prettier": "3.9.6",
+    "tailwindcss": "4.3.3",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vite": "8.2.2",
+    "vitest": "5.0.0",
+    "vue-tsc": "3.3.11"
+  }
+}

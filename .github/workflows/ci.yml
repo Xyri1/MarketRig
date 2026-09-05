@@ -26,3 +26,24 @@ jobs:
           name: acceptance-${{ matrix.os }}
           path: target/acceptance
           if-no-files-found: ignore
+
+  frontend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm generate
+      - name: The generated client matches the daemon's document
+        run: git diff --exit-code openapi.json src/client
+      - run: pnpm check

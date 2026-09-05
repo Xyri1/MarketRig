@@ -1,0 +1,4 @@
+allowBuilds:
+  vue-demi: true
+minimumReleaseAgeExclude:
+  - eslint@10.10.0

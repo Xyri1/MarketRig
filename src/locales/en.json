@@ -1,0 +1,10 @@
+{
+  "app": {
+    "name": "MarketRig"
+  },
+  "daemon": {
+    "starting": "Starting the MarketRig daemon…",
+    "unavailable": "The MarketRig daemon is not reachable.",
+    "retry": "Retry"
+  }
+}
