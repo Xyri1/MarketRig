@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "identifier": "dev.marketrig.desktop",
   "build": {
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:5173",
     "frontendDist": "../dist",
     "beforeDevCommand": "pnpm exec vite",
     "beforeBuildCommand": "pnpm exec vite build"

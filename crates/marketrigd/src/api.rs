@@ -259,7 +259,7 @@ async fn cors(request: Request, next: Next) -> Response {
 const ORIGINS: [&str; 3] = [
     "tauri://localhost",
     "http://tauri.localhost",
-    "http://localhost:1420",
+    "http://localhost:5173",
 ];
 
 /// How a socket presented its credential — or the answer that refuses it
@@ -4424,11 +4424,11 @@ async fn an_allowed_origin_is_echoed_on_the_answer() {
         agent()
             .get(format!("{}/health", served.base))
             .header("Authorization", format!("Bearer {CREDENTIAL}"))
-            .header("Origin", "http://localhost:1420")
+            .header("Origin", "http://localhost:5173")
             .call(),
         "access-control-allow-origin",
     );
-    assert_eq!(answer, (200, Some("http://localhost:1420".to_string())));
+    assert_eq!(answer, (200, Some("http://localhost:5173".to_string())));
 }
 
 /// A foreign origin is refused on REST exactly as it is on a socket (§4.4).
@@ -4510,7 +4510,7 @@ async fn sockets_refuse_a_foreign_origin() {
     }
 
     // An allowlist of exact origins, not prefixes or suffixes.
-    for near_miss in ["http://localhost:14200", "tauri://localhost.evil"] {
+    for near_miss in ["http://localhost:51730", "tauri://localhost.evil"] {
         let refused = dial_ws(&base, "/events", &[("origin", near_miss)])
             .await
             .expect_err("a near miss is a foreign origin");
@@ -4524,7 +4524,7 @@ async fn sockets_refuse_a_foreign_origin() {
     for origin in [
         "tauri://localhost",
         "http://tauri.localhost",
-        "http://localhost:1420",
+        "http://localhost:5173",
     ] {
         let mut tail = dial_ws(&base, "/events", &[("origin", origin)])
             .await
