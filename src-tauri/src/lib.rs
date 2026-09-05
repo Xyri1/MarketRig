@@ -231,6 +231,27 @@ fn exit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// The configured 1280×800 outgrows a small screen's work area, and Windows
+/// then parks the bottom rows under the taskbar: shrink to fit and centre.
+fn fit_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let area = monitor.work_area().size;
+    let outer = window.outer_size()?;
+    let inner = window.inner_size()?;
+    let width = inner
+        .width
+        .min(area.width.saturating_sub(outer.width - inner.width));
+    let height = inner
+        .height
+        .min(area.height.saturating_sub(outer.height - inner.height));
+    if (width, height) != (inner.width, inner.height) {
+        window.set_size(tauri::PhysicalSize::new(width, height))?;
+    }
+    window.center()
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -270,10 +291,11 @@ pub fn run() {
             exit_app
         ])
         .setup(|app| {
-            if std::env::args().any(|a| a == "--hidden")
-                && let Some(window) = app.get_webview_window("main")
-            {
-                window.hide()?;
+            if let Some(window) = app.get_webview_window("main") {
+                fit_to_work_area(&window)?;
+                if std::env::args().any(|a| a == "--hidden") {
+                    window.hide()?;
+                }
             }
             // slice 008: tray, close-hides, and the prevented ExitRequested.
             Ok(())
