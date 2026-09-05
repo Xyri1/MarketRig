@@ -1,7 +1,7 @@
 import { computed, reactive, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { approvals, decideApproval } from "../client";
-import type { Approval } from "../client";
+import type { Approval, Envelope } from "../client";
 import { useEvents } from "./useEvents";
 
 const pending = ref<Approval[]>([]);
@@ -20,13 +20,20 @@ async function refetch(): Promise<void> {
   await invoke("set_tray_pending", { n: rows.length });
 }
 
-/** Awaits the daemon and lets the APPROVAL_DECIDED refetch redraw (per D72). */
+/**
+ * Awaits the daemon and lets the APPROVAL_DECIDED refetch redraw (per D72);
+ * a refusal comes back as its envelope for the caller to show.
+ */
 async function decide(
   deskId: string,
   id: string,
   decision: "APPROVE" | "DENY",
-): Promise<void> {
-  await decideApproval({ path: { desk_id: deskId, id }, body: { decision } });
+): Promise<Envelope | undefined> {
+  const answer = await decideApproval({
+    path: { desk_id: deskId, id },
+    body: { decision },
+  });
+  return answer.error as Envelope | undefined;
 }
 
 let wired = false;

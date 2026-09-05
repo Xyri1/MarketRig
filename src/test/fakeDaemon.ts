@@ -18,14 +18,21 @@ export function installFakeDaemon(routes: Record<string, FakeRoute>): void {
     const url = new URL(
       typeof input === "string" ? input : ((input as Request).url ?? input),
     );
-    const method = (init?.method ?? "GET").toUpperCase();
+    // The generated client calls `fetch(new Request(...))`, so the method and
+    // the body live on the request, not on an `init`.
+    const request = input instanceof Request ? input : null;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const sent =
+      typeof init?.body === "string"
+        ? init.body
+        : ((await request?.text()) ?? null);
     const route = routes[`${method} ${url.pathname}`];
     if (!route) throw new Error(`no fake route for ${method} ${url.pathname}`);
     const answer = route({
       method,
       path: url.pathname,
       query: url.searchParams,
-      body: typeof init?.body === "string" ? init.body : null,
+      body: sent,
     });
     return new Response(
       answer.body === undefined ? null : JSON.stringify(answer.body),

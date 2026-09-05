@@ -6,5 +6,104 @@
     "starting": "Starting the MarketRig daemon…",
     "unavailable": "The MarketRig daemon is not reachable.",
     "retry": "Retry"
+  },
+  "approvals": {
+    "empty": "Nothing waiting for approval.",
+    "kind": {
+      "TRIGGER_CODE": "Trigger code",
+      "PAPER_ORDER": "Paper order"
+    },
+    "showCode": "Show code",
+    "hideCode": "Hide code",
+    "approve": "Approve",
+    "deny": "Deny"
+  },
+  "settings": {
+    "runtimes": {
+      "title": "Runtimes",
+      "discover": "Discover",
+      "retry": "Retry",
+      "path": "Path to the executable",
+      "submit": "Use this path"
+    },
+    "memory": {
+      "title": "Memory",
+      "child": "Child",
+      "provider": "Provider",
+      "path": "Path to the memory child",
+      "discover": "Discover",
+      "retry": "Retry",
+      "baseUrl": "Base URL",
+      "apiKey": "API key",
+      "keySet": "An API key is stored.",
+      "keyUnset": "No API key is stored.",
+      "llmModel": "Language model",
+      "embeddingModel": "Embedding model",
+      "save": "Save provider"
+    },
+    "policies": {
+      "title": "Approvals",
+      "triggerCode": "Trigger code",
+      "paperOrder": "Paper orders",
+      "delivery": "Delivery"
+    },
+    "policy": {
+      "ALWAYS_ALLOW": "Always allow",
+      "REQUIRE_APPROVAL": "Require approval"
+    },
+    "delivery": {
+      "QUEUE": "Queue next turn",
+      "STEER": "Steer the current turn"
+    },
+    "autostart": {
+      "title": "Startup",
+      "label": "Start MarketRig when I log in"
+    },
+    "quit": "Quit MarketRig"
+  },
+  "dialog": {
+    "denyTitle": "Deny this request?",
+    "deny": "Deny",
+    "quitTitle": "Quit MarketRig?",
+    "quit": "Quit",
+    "cancel": "Cancel"
+  },
+  "notify": {
+    "APPROVAL_REQUESTED": {
+      "title": "{desk}: approval needed",
+      "body": "{detail}"
+    },
+    "SESSION_ATTENTION": {
+      "title": "{desk}: the session wants you",
+      "body": "{detail}"
+    },
+    "PROMPT_FAILED": {
+      "title": "{desk}: a prompt was not delivered",
+      "body": "{detail}"
+    },
+    "DESK_FAILED": {
+      "title": "{desk}: the desk failed",
+      "body": "{detail}"
+    },
+    "TRADING_NODE_FAILED": {
+      "title": "{desk}: the trading node failed",
+      "body": "{detail}"
+    },
+    "RUNTIME_UNAVAILABLE": {
+      "title": "A runtime is unavailable",
+      "body": "{detail}"
+    },
+    "CONTROL_PLANE_LOST": {
+      "title": "A runtime control plane was lost",
+      "body": "{detail}"
+    },
+    "MEMORY_UNAVAILABLE": {
+      "title": "Memory is unavailable",
+      "body": "{detail}"
+    },
+    "TRIGGER_MISSED": {
+      "title": "{desk}: a trigger was missed",
+      "body": "{detail}"
+    }
   }
 }
