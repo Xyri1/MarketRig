@@ -244,11 +244,11 @@ Active decisions are grouped by subject; a decision's number is its stable ident
 
 **Contract:** [PRD desktop behavior](PRD.md#8-desktop-behavior) and [SPEC desktop lifecycle](SPEC.md#14-desktop-and-application-lifecycle).
 
-### D30 — The desktop uses Tauri 2 with ghostty-web
+### D30 — The desktop uses Tauri 2 with xterm.js
 
-**Decision:** Build the native shell with Tauri 2 and render attached terminals with ghostty-web in the system webview. Tauri remains a thin shell; ghostty-web owns presentation only; `marketrigd` owns terminal and session reality.
+**Decision:** Build the native shell with Tauri 2 and render attached terminals with xterm.js in the system webview. Tauri remains a thin shell; xterm.js owns presentation only; `marketrigd` owns terminal and session reality.
 
-**Rationale:** This supplies native tray/window lifecycle and a capable terminal without shipping Electron or moving domain authority into a second backend.
+**Rationale:** This supplies native tray/window lifecycle and a capable terminal without shipping Electron or moving domain authority into a second backend. xterm.js rather than ghostty-web because the well's job is warm presentation only, and xterm.js honours DECSCUSR, mouse tracking with SGR reports, and alternate scroll itself, where ghostty-web 0.4.0 needed four presentation workarounds in one day.
 
 **Contract:** [SPEC architecture](SPEC.md#3-top-level-architecture) and [SPEC desktop lifecycle](SPEC.md#14-desktop-and-application-lifecycle).
 
@@ -270,9 +270,9 @@ Active decisions are grouped by subject; a decision's number is its stable ident
 
 ### D33 — Tray hiding keeps frontend terminal presentations warm
 
-**Decision:** Closing hides the existing Tauri window without destroying its webview or daemon connections. The frontend keeps one bounded ghostty-web presentation warm per live managed terminal. If that presentation is lost, the daemon and PTY continue, but exact screen reconstruction is not an MVP guarantee.
+**Decision:** Closing hides the existing Tauri window without destroying its webview or daemon connections. The frontend keeps one bounded xterm.js presentation warm per live managed terminal. If that presentation is lost, the daemon and PTY continue, but exact screen reconstruction is not an MVP guarantee.
 
-**Rationale:** Warm presentation avoids rebuilding terminal-emulator state that ghostty-web does not expose through a supported export/import contract.
+**Rationale:** Warm presentation avoids rebuilding terminal-emulator state that no pinned xterm.js surface exports and reimports.
 
 **Contract:** [SPEC desktop lifecycle](SPEC.md#14-desktop-and-application-lifecycle).
 
@@ -564,7 +564,7 @@ Three things stay unproven and are open verification, not blockers: state reload
 
 ### D66 — The desktop attaches through an HTTP-free Tauri shell, first-frame WebSocket authentication, and one terminal socket per desk
 
-**Decision:** The Tauri shell reads and watches `runtime/endpoint.json`, spawns `marketrigd` when no usable daemon exists, owns window/tray/single-instance lifecycle, and exposes only `read_endpoint`, `start_daemon`, `exit_app`, and (per D68) `set_locale`; it never performs an HTTP request. The webview verifies the daemon through authenticated health with the UUID match, holds the credential in memory only, and calls the loopback API directly. WebSockets validate a fixed exact-origin allowlist at the handshake and authenticate with a first-frame bearer credential. `WS /desks/{desk_id}/terminal` is the desk's attachment: the newest generation wins, each live terminal replays a 1 MiB ring, input and resize come only from the current generation, and terminal start/exit are reported as facts on that same socket, so desk attachment needs no channel of its own. The frontend keeps one warm ghostty-web presentation and socket per listed desk. Close hides; Quit is `POST /quit` followed by a bounded wait; a second launch focuses the existing window.
+**Decision:** The Tauri shell reads and watches `runtime/endpoint.json`, spawns `marketrigd` when no usable daemon exists, owns window/tray/single-instance lifecycle, and exposes only `read_endpoint`, `start_daemon`, `exit_app`, and (per D68) `set_locale`; it never performs an HTTP request. The webview verifies the daemon through authenticated health with the UUID match, holds the credential in memory only, and calls the loopback API directly. WebSockets validate a fixed exact-origin allowlist at the handshake and authenticate with a first-frame bearer credential. `WS /desks/{desk_id}/terminal` is the desk's attachment: the newest generation wins, each live terminal replays a 1 MiB ring, input and resize come only from the current generation, and terminal start/exit are reported as facts on that same socket, so desk attachment needs no channel of its own. The frontend keeps one warm xterm.js presentation and socket per listed desk. Close hides; Quit is `POST /quit` followed by a bounded wait; a second launch focuses the existing window.
 
 **Rationale:** The browser WebSocket API cannot send headers and D44 forbids credentials in URLs, so a first authentication frame is the only compliant path. Attaching to the desk rather than the process lets a hidden desktop notice trigger-driven activation through the socket it already holds, and keeping the shell HTTP-free avoids a second verifier and the proxy D44 rules out.
 

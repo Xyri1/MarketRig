@@ -733,7 +733,7 @@ Global flags precede the group. Desk scope is explicit or resolved by the daemon
 
 The desktop shell is Tauri 2. Its system webview hosts a Vue 3 and TypeScript 6 application built by Vite, styled with Tailwind CSS 4, using Reka UI 2 directly for behavior-heavy accessible primitives and native HTML for ordinary controls. Frontend builds use an exact tested Node.js 24 LTS release and a `packageManager`-pinned pnpm 11 release with its integrity hash, provisioned through Corepack; the committed lockfile is authoritative and none of these tools ship in the installer. The frontend pins the newest tested TypeScript 6.x compatible with the whole Vue and Vite toolchain, and exact Tailwind 4.x, Reka UI 2.x, and vue-i18n releases.
 
-The frontend calls `marketrigd` directly over the authenticated loopback API, using the generated native-Fetch SDK for REST and the browser WebSocket API for terminal bytes and live events. Tauri's Rust layer owns only native desktop concerns — window, tray, single instance, daemon bootstrap through endpoint discovery, and the locale command — and performs no HTTP request of its own, proxies no API traffic, and holds no authoritative state (per D66). ghostty-web owns warm presentation only; the daemon-owned PTY or ConPTY remains the terminal and session authority.
+The frontend calls `marketrigd` directly over the authenticated loopback API, using the generated native-Fetch SDK for REST and the browser WebSocket API for terminal bytes and live events. Tauri's Rust layer owns only native desktop concerns — window, tray, single instance, daemon bootstrap through endpoint discovery, and the locale command — and performs no HTTP request of its own, proxies no API traffic, and holds no authoritative state (per D66). xterm.js owns warm presentation only; the daemon-owned PTY or ConPTY remains the terminal and session authority.
 
 The desktop follows a three-panel product model:
 
@@ -745,7 +745,7 @@ The desktop follows a three-panel product model:
 
 - hide the existing window to the tray without destroying its webview or unmounting the application;
 - keep `marketrigd`, sessions, triggers, and managed children running;
-- keep the authenticated connections and one bounded ghostty-web presentation per live managed terminal warm and consuming output.
+- keep the authenticated connections and one bounded xterm.js presentation per live managed terminal warm and consuming output.
 
 ### Reopen
 

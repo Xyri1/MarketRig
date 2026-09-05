@@ -1,53 +1,47 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
-// The WASM parser does not run in jsdom.
-vi.mock("ghostty-web", () => {
+// The renderer does not run in jsdom.
+vi.mock("@xterm/xterm", () => {
   class Terminal {
-    static made = 0;
-    written: unknown[] = [];
-    disposed = false;
-    constructor() {
-      Terminal.made += 1;
-    }
     loadAddon() {}
     open() {}
-    write(data: unknown) {
-      this.written.push(data);
-    }
+    write() {}
     onData() {}
     onResize() {}
-    static wheel: ((event: WheelEvent) => boolean) | undefined;
-    attachCustomWheelEventHandler(handler: (event: WheelEvent) => boolean) {
-      Terminal.wheel = handler;
-    }
-    buffer = { active: { type: "normal" } };
-    modes = new Set<number>();
-    getMode(mode: number) {
-      return this.modes.has(mode);
-    }
-    element: HTMLElement | undefined;
-    cols = 80;
-    rows = 24;
-    dispose() {
-      this.disposed = true;
-    }
+    dispose() {}
   }
+  return { Terminal };
+});
+
+vi.mock("@xterm/addon-fit", () => {
   class FitAddon {
     fit() {}
-    observeResize() {}
     dispose() {}
     proposeDimensions() {
       return { cols: 80, rows: 24 };
     }
   }
-  return { Terminal, FitAddon, init: async () => {} };
+  return { FitAddon };
 });
 
-import { Terminal } from "ghostty-web";
 import { FakeWebSocket, installFakeWebSocket } from "../test/fakeDaemon";
 import { setEndpoint } from "../daemon-endpoint";
 import { useEvents } from "./useEvents";
 import { useTerminal } from "./useTerminal";
+
+// jsdom has no ResizeObserver.
+class FakeResizeObserver {
+  static observing = 0;
+  observe() {
+    FakeResizeObserver.observing += 1;
+  }
+  unobserve() {}
+  disconnect() {
+    FakeResizeObserver.observing -= 1;
+  }
+}
+globalThis.ResizeObserver =
+  FakeResizeObserver as unknown as typeof ResizeObserver;
 
 const { ensure, mount, panes, bytesWritten } = useTerminal();
 
@@ -89,36 +83,9 @@ it("shows one desk at a time in the slot", () => {
   expect(slot.childNodes).toHaveLength(0);
 });
 
-it("reports the wheel as SGR mouse on the alternate screen when asked", () => {
-  const pane = ensure("d-1");
-  const socket = FakeWebSocket.instances[0];
-  socket.open();
-  const term = pane.term as unknown as {
-    buffer: { active: { type: string } };
-    modes: Set<number>;
-  };
-  const wheel = (Terminal as unknown as { wheel: (e: WheelEvent) => boolean })
-    .wheel;
-  const down = { deltaY: 100, clientX: 0, clientY: 0 } as WheelEvent;
-
-  // Normal screen: ghostty-web scrolls its own scrollback.
-  expect(wheel(down)).toBe(false);
-  term.buffer.active.type = "alternate";
-  // Alternate scroll off and no mouse tracking: swallowed, no arrow keys.
-  expect(wheel(down)).toBe(true);
-  term.modes.add(1007);
-  expect(wheel(down)).toBe(false);
-  // SGR mouse tracking: one report per notch, 1-based cell 1;1 in jsdom.
-  term.modes.add(1000).add(1006);
-  const before = socket.sent.length;
-  expect(wheel(down)).toBe(true);
-  const frames = socket.sent.slice(before) as Uint8Array[];
-  expect(frames).toHaveLength(3);
-  expect(new TextDecoder().decode(frames[0])).toBe("[<65;1;1M");
-});
-
 it("disposes on SESSION_EXITED", () => {
   ensure("d-1");
+  expect(FakeResizeObserver.observing).toBe(1);
   const { connect, disconnect } = useEvents();
   connect(7100, "b");
   const events = FakeWebSocket.instances.at(-1)!;
@@ -132,5 +99,7 @@ it("disposes on SESSION_EXITED", () => {
     }),
   );
   expect(panes.has("d-1")).toBe(false);
+  // The pane's ResizeObserver goes with it.
+  expect(FakeResizeObserver.observing).toBe(0);
   disconnect();
 });

@@ -1,5 +1,6 @@
 import { shallowReactive } from "vue";
-import { FitAddon, Terminal } from "ghostty-web";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
 import { endpoint } from "../daemon-endpoint";
 import { useEvents } from "./useEvents";
 
@@ -7,6 +8,7 @@ type Pane = {
   term: Terminal;
   fit: FitAddon;
   el: HTMLDivElement;
+  resize: ResizeObserver;
   socket: WebSocket | null;
   bytes: number;
   reconnected: boolean;
@@ -21,7 +23,7 @@ if (import.meta.hot) import.meta.hot.accept(() => location.reload());
 const encoder = new TextEncoder();
 
 /**
- * A token's value in a form ghostty-web parses (it takes `#rrggbb` and
+ * A token's value in a form xterm.js parses (it takes `#rrggbb` and
  * `rgb()` only). Reading back `fillStyle` keeps an `oklch()` string verbatim
  * in Chrome, so the colour is painted on a 1x1 canvas and read back as
  * pixels — the browser's own colour engine, no maths here; jsdom has no 2D
@@ -108,24 +110,18 @@ function ensure(deskId: string): Pane {
   const existing = panes.get(deskId);
   if (existing) return existing;
   const el = document.createElement("div");
-  // The well is dark before ghostty-web's own theme paints anything.
+  // The well is dark before xterm.js's own theme paints anything.
   el.className = "bg-well";
   el.style.width = "100%";
   el.style.height = "100%";
-  // ghostty-web parks its hidden input textarea at absolute 0,0; without a
-  // positioned host that is the window's corner, blinking caret and all.
-  el.style.position = "relative";
-  // WebView2 still paints the caret of that opacity-0 textarea.
+  // WebView2 paints the caret of the terminal's own hidden input textarea.
   el.style.caretColor = "transparent";
   const term = new Terminal({
-    // ghostty-web's defaults are the browser's generic monospace at 15px.
+    // xterm.js defaults to a generic courier stack at 15px.
     fontFamily: getComputedStyle(document.documentElement)
       .getPropertyValue("--font-terminal")
       .trim(),
     fontSize: 13,
-    // ghostty-web ignores DECSCUSR and paints its default block over the
-    // glyph; a bar reads as a caret and hides nothing.
-    cursorStyle: "bar",
     theme: {
       background: token("--color-well"),
       foreground: token("--color-state-idle"),
@@ -135,11 +131,15 @@ function ensure(deskId: string): Pane {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(el);
-  fit.observeResize();
+  // FitAddon only fits on demand; the well resizes with the window and the
+  // panels around it.
+  const resize = new ResizeObserver(() => fit.fit());
+  resize.observe(el);
   const pane: Pane = {
     term,
     fit,
     el,
+    resize,
     socket: null,
     bytes: 0,
     reconnected: false,
@@ -153,29 +153,6 @@ function ensure(deskId: string): Pane {
   term.onResize(({ cols, rows }) =>
     send(pane, JSON.stringify({ resize: { cols, rows } })),
   );
-  // The wheel on the alternate screen, the way a terminal does it: SGR mouse
-  // reports when the application asked for them (Claude Code does), nothing
-  // when it switched alternate scroll off, ghostty-web's own arrow keys
-  // otherwise. The normal screen keeps ghostty-web's scrollback scrolling.
-  term.attachCustomWheelEventHandler((event) => {
-    if (term.buffer.active.type !== "alternate") return false;
-    const tracking = [1000, 1002, 1003].some((mode) => term.getMode(mode));
-    if (!tracking || !term.getMode(1006)) return !term.getMode(1007);
-    const box = term.element?.querySelector("canvas")?.getBoundingClientRect();
-    const cell = (offset: number, span: number | undefined, count: number) =>
-      span ? Math.min(count, Math.floor((offset / span) * count) + 1) : 1;
-    const col = cell(event.clientX - (box?.left ?? 0), box?.width, term.cols);
-    const row = cell(event.clientY - (box?.top ?? 0), box?.height, term.rows);
-    const button = event.deltaY < 0 ? 64 : 65;
-    const notches = Math.min(
-      5,
-      Math.max(1, Math.round(Math.abs(event.deltaY) / 33)),
-    );
-    for (let i = 0; i < notches; i++) {
-      send(pane, encoder.encode(`[<${button};${col};${row}M`));
-    }
-    return true;
-  });
   openSocket(deskId, pane);
   return pane;
 }
@@ -204,6 +181,7 @@ function dispose(deskId: string): void {
   pane.disposed = true;
   panes.delete(deskId);
   pane.socket?.close();
+  pane.resize.disconnect();
   pane.fit.dispose();
   pane.term.dispose();
   pane.el.remove();

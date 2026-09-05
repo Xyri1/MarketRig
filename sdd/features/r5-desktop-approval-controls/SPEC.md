@@ -1,6 +1,6 @@
 # R5 — Desktop and approval controls: Feature SPEC
 
-*Decision basis: per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D60, D61, D62, D66, D68, D70, D71, D72, D75 and this feature's R5-1 … R5-8.* This document refines root `sdd/SPEC.md` §4.3, §4.4, §6.5, §8.3, §11.2, §12.3, §13.2, §14, §15, and §17. Where it names a Tauri, Hey API, utoipa, or ghostty-web fact, the fact was verified on 2026-09-04 against the versions R5-7 pins.
+*Decision basis: per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D60, D61, D62, D66, D68, D70, D71, D72, D75 and this feature's R5-1 … R5-8.* This document refines root `sdd/SPEC.md` §4.3, §4.4, §6.5, §8.3, §11.2, §12.3, §13.2, §14, §15, and §17. Where it names a Tauri, Hey API, utoipa, or xterm.js fact, the fact was verified on 2026-09-04 — and, for xterm.js, on 2026-09-06 — against the versions R5-7 pins.
 
 ## 1. Workspace additions
 
@@ -168,14 +168,15 @@ useDaemon      endpoint {port, bearer, daemon_uuid} in memory only; verify(); st
 useEvents      the one WS /events socket; cursor; on(kind | kind[], refetch): every handler refetches a resource and nothing else;
                reconnects with backoff (1 s … 10 s) sending the cursor; ATTENTION rows set a per-desk attention flag the
                operator's keyboard input on that terminal clears (the two frontend-local facts, per D72)
-useTerminal    per desk: one ghostty-web Terminal (created after init(), FitAddon, observeResize) and one terminal socket;
+useTerminal    per desk: one xterm.js Terminal (FitAddon, plus one ResizeObserver on the pane element, which the addon
+               does not carry) and one terminal socket;
                created when SESSION_STARTED / a live session is seen, kept while the desk is listed and the process lives,
                disposed on SESSION_EXITED; the mounted <div> is swapped by selection, the Terminal is never recreated for it
 useApprovals   GET /approvals?state=PENDING; per-desk counts; total → set_tray_pending; refetched on APPROVAL_REQUESTED
                and APPROVAL_DECIDED
 ```
 
-Terminal wiring: `socket.binaryType = 'arraybuffer'`; binary frames → `term.write(new Uint8Array(data))`; `term.onData(s => socket.send(encoder.encode(s)))`; `term.onResize(({cols, rows}) => socket.send(JSON.stringify({resize: {cols, rows}})))`, sent once more on attach; the `exited` frame writes one dim line *process exited (<reason>, <code>)* to the well and the composable disposes on `SESSION_EXITED`. A window hide neither closes the socket nor pauses writes; a reload reattaches and the ring replays. ghostty-web parses only `#rrggbb` and `rgb(r, g, b)`, so the theme derived at creation paints each token's value on a 1×1 2D canvas and reads the pixel back as `#rrggbb` — the browser's own colour engine, because reading `fillStyle` back returns an `oklch()` string verbatim — and takes `background` from `--color-well`, `foreground` from `--color-state-idle` (the one neutral that stays light in both schemes, as the well is dark in both), and `cursor` from `--color-accent`. No mutation updates a list optimistically; every control awaits the daemon and lets the refetch redraw (per D72).
+Terminal wiring: `@xterm/xterm/css/xterm.css` is imported once in `main.ts` and there is no initialisation step; `socket.binaryType = 'arraybuffer'`; binary frames → `term.write(new Uint8Array(data))`; `term.onData(s => socket.send(encoder.encode(s)))`; `term.onResize(({cols, rows}) => socket.send(JSON.stringify({resize: {cols, rows}})))`, sent once more on attach; the `exited` frame writes one dim line *process exited (<reason>, <code>)* to the well and the composable disposes on `SESSION_EXITED`. A window hide neither closes the socket nor pauses writes; a reload reattaches and the ring replays. xterm.js parses `#rrggbb` and `rgb(r, g, b)` itself and reaches any other CSS colour only through a canvas fallback that throws where no 2D context exists, so the theme derived at creation paints each token's value on a 1×1 2D canvas and reads the pixel back as `#rrggbb` before handing it over — the browser's own colour engine, because reading `fillStyle` back returns an `oklch()` string verbatim — and takes `background` from `--color-well`, `foreground` from `--color-state-idle` (the one neutral that stays light in both schemes, as the well is dark in both), and `cursor` from `--color-accent`. No mutation updates a list optimistically; every control awaits the daemon and lets the refetch redraw (per D72).
 
 ### 6.3 Layout
 
@@ -183,7 +184,7 @@ Terminal wiring: `socket.binaryType = 'arraybuffer'`; binary frames → `term.wr
 ┌─────────────┬──────────────────────────────────────────┬──────────────────────┐
 │ MarketRig   │ alpha · codex · session live · Interrupt Exit Switch  │ Desk Triggers Approvals │
 │ ▌alpha  ●2  │                                          │ Activity Settings    │
-│ ▌beta       │        terminal well (ghostty-web)       │                      │
+│ ▌beta       │         terminal well (xterm.js)         │                      │
 │ ▌gamma  ○   │        dark in both schemes              │  selected tab body   │
 │             │                                          │                      │
 │ + New desk  │                                          │                      │
@@ -225,7 +226,7 @@ Sent through `@tauri-apps/plugin-notification` (`isPermissionGranted` then `requ
 } }
 ```
 
-Colour appears only through the five `state-*` roles, in the gutter, the attention dot, and the approval badge, and through `accent` for selection and focus rings; everything else is the neutral ramp. The terminal well is `--color-well` in both schemes; ghostty-web's theme is derived from the tokens at mount. The gutter never animates; the only motion is the 120 ms opacity of a tab body. Type below 13 px is reserved for machine tokens in the terminal stack. Every prose string is `t('…')` from `src/locales/en.json`; a Vitest check fails on a bare string in a template (per D68) so R6 adds `zh-Hans.json` and nothing else.
+Colour appears only through the five `state-*` roles, in the gutter, the attention dot, and the approval badge, and through `accent` for selection and focus rings; everything else is the neutral ramp. The terminal well is `--color-well` in both schemes; xterm.js's theme is derived from the tokens at mount. The gutter never animates; the only motion is the 120 ms opacity of a tab body. Type below 13 px is reserved for machine tokens in the terminal stack. Every prose string is `t('…')` from `src/locales/en.json`; a Vitest check fails on a bare string in a template (per D68) so R6 adds `zh-Hans.json` and nothing else.
 
 ## 7. Verification (R5-8)
 

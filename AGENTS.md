@@ -89,7 +89,7 @@ Settled per D30, D43, D47, D53–D62; see `sdd/SPEC.md` §3 for the architecture
 
 | Path | Contents |
 | --- | --- |
-| `/` (root) | Vue 3 + TypeScript 6 + Vite frontend (Tailwind CSS 4, Reka UI 2, vue-i18n, ghostty-web, Hey API-generated REST client; Node.js 24 LTS and pnpm 11 via Corepack); the Cargo workspace manifest |
+| `/` (root) | Vue 3 + TypeScript 6 + Vite frontend (Tailwind CSS 4, Reka UI 2, vue-i18n, xterm.js, Hey API-generated REST client; Node.js 24 LTS and pnpm 11 via Corepack); the Cargo workspace manifest |
 | `crates/` | `marketrigd` (library crate + thin binary; axum-served loopback API), `marketrig` (CLI), `marketrig-mcp` (stdio adapter, `rmcp =3.2.0`), shared internal crates |
 | `src-tauri/` | Tauri 2 Rust shell, a member of the root workspace: window, tray, single instance, daemon bootstrap, no HTTP |
 
