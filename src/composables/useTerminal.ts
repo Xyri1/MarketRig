@@ -109,6 +109,9 @@ function ensure(deskId: string): Pane {
   el.className = "bg-well";
   el.style.width = "100%";
   el.style.height = "100%";
+  // ghostty-web parks its hidden input textarea at absolute 0,0; without a
+  // positioned host that is the window's corner, blinking caret and all.
+  el.style.position = "relative";
   const term = new Terminal({
     // ghostty-web's defaults are the browser's generic monospace at 15px.
     fontFamily: getComputedStyle(document.documentElement)
