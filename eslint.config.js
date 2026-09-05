@@ -19,5 +19,8 @@ export default [
   {
     files: ["**/*.vue"],
     languageOptions: { parserOptions: { parser: tseslint.parser } },
+    // `vue-tsc` is the checker for a block typescript-eslint's own config
+    // would have exempted; `no-undef` here only misreads DOM types.
+    rules: { "no-undef": "off" },
   },
 ];

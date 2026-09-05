@@ -33,7 +33,8 @@ function dispatch(event: DaemonEvent): void {
     attention.set(event.desk_id, true);
   }
   for (const subscription of handlers) {
-    if (subscription.kinds.has(event.kind)) subscription.handler(event);
+    if (subscription.kinds.has(event.kind) || subscription.kinds.has("*"))
+      subscription.handler(event);
   }
 }
 
@@ -80,7 +81,10 @@ function disconnect(): void {
   socket = null;
 }
 
-/** Subscribe a refetch to one kind or several; the return unsubscribes. */
+/**
+ * Subscribe a refetch to one kind or several — `"*"` is every kind, which the
+ * Activity tab needs; the return unsubscribes.
+ */
 function on(kind: string | string[], handler: Handler): () => void {
   const subscription = {
     kinds: new Set(Array.isArray(kind) ? kind : [kind]),

@@ -6,5 +6,60 @@
     "starting": "Starting the MarketRig daemon…",
     "unavailable": "The MarketRig daemon is not reachable.",
     "retry": "Retry"
+  },
+  "desks": {
+    "empty": "No desks yet. Create one to start a trader.",
+    "new": "New desk",
+    "create": "Create desk",
+    "name": "Desk name",
+    "namePlaceholder": "Desk name",
+    "runtime": "Runtime",
+    "retry": "Retry",
+    "attention": "This desk asked for you."
+  },
+  "session": {
+    "live": "session live",
+    "none": "no session",
+    "start": "Start",
+    "continue": "Continue",
+    "interrupt": "Interrupt",
+    "interruptUnsupported": "Claude Code has no structured interrupt.",
+    "exit": "Exit",
+    "switch": "Switch runtime"
+  },
+  "well": {
+    "noSession": "No session. Start one or continue the last."
+  },
+  "panel": {
+    "tabs": "Desk panels",
+    "collapse": "Collapse",
+    "expand": "Expand",
+    "desk": "Desk",
+    "triggers": "Triggers",
+    "approvals": "Approvals",
+    "activity": "Activity",
+    "settings": "Settings",
+    "deskShort": "D",
+    "triggersShort": "T",
+    "approvalsShort": "A",
+    "activityShort": "V",
+    "settingsShort": "S"
+  },
+  "desk": {
+    "quotes": "Quotes",
+    "book": "Book",
+    "positions": "Positions",
+    "orders": "Open orders"
+  },
+  "triggers": {
+    "empty": "No triggers yet.",
+    "enable": "Enable",
+    "disable": "Disable"
+  },
+  "activity": {
+    "more": "Load more"
+  },
+  "common": {
+    "cancel": "Cancel"
   }
 }
