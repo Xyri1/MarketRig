@@ -17,7 +17,7 @@ type Pane = {
 const panes = shallowReactive(new Map<string, Pane>());
 // Terminals, sockets, and elements live in this module's state: a hot update
 // under `tauri dev` must reload the page rather than orphan them on screen.
-if (import.meta.hot) import.meta.hot.decline();
+if (import.meta.hot) import.meta.hot.accept(() => location.reload());
 const encoder = new TextEncoder();
 
 /**
