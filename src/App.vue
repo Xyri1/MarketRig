@@ -12,6 +12,9 @@ import DeskList from "./components/DeskList.vue";
 import RightPanel from "./components/RightPanel.vue";
 import SessionHeader from "./components/SessionHeader.vue";
 import TerminalWell from "./components/TerminalWell.vue";
+import ApprovalsTab from "./components/ApprovalsTab.vue";
+import SettingsTab from "./components/SettingsTab.vue";
+import { installNotifications, installQuitListener } from "./notifications";
 
 const { t } = useI18n();
 const { status, endpoint, error, boot, retry } = useDaemon();
@@ -20,6 +23,7 @@ const { byDesk, refetch: refetchApprovals } = useApprovals();
 const { panes } = useTerminal();
 
 const desks = ref<Desk[]>([]);
+const deskNames = new Map<string, string>();
 const selected = ref<string | null>(null);
 const selectedDesk = computed(
   () => desks.value.find((desk) => desk.id === selected.value) ?? null,
@@ -38,6 +42,7 @@ const selectedState = computed(() =>
 async function refresh(): Promise<void> {
   const answer = await list();
   desks.value = (answer.data as { desks?: Desk[] } | undefined)?.desks ?? [];
+  for (const desk of desks.value) deskNames.set(desk.id, desk.name);
   if (!desks.value.some((desk) => desk.id === selected.value)) {
     selected.value = desks.value[0]?.id ?? null;
   }
@@ -63,7 +68,11 @@ watch(status, (now) => {
   void refetchApprovals();
 });
 
-onMounted(() => void boot());
+onMounted(() => {
+  installNotifications(deskNames);
+  void installQuitListener();
+  void boot();
+});
 </script>
 
 <template>
@@ -86,6 +95,9 @@ onMounted(() => void boot());
       <SessionHeader v-if="selectedDesk" :desk="selectedDesk" />
       <TerminalWell class="flex-1" :desk-id="selected" :state="selectedState" />
     </section>
-    <RightPanel :desk-id="selected" />
+    <RightPanel :desk-id="selected">
+      <template #approvals><ApprovalsTab /></template>
+      <template #settings><SettingsTab /></template>
+    </RightPanel>
   </main>
 </template>
