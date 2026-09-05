@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { useEvents } from "../composables/useEvents";
 import { useTerminal } from "../composables/useTerminal";
 import { gutterClass, type DeskState } from "../deskState";
 
 const props = defineProps<{ deskId: string | null; state: DeskState }>();
 const { t } = useI18n();
-const { on } = useEvents();
 const { mount, evict, panes } = useTerminal();
 
 const slot = ref<HTMLDivElement | null>(null);
@@ -26,8 +24,9 @@ async function attach(): Promise<void> {
   }
 }
 
-on(["SESSION_STARTED", "SESSION_EXITED"], () => void attach());
-watch(() => props.deskId, attach);
+// A pane appears on SESSION_STARTED or when a reload finds the session
+// live, and goes on SESSION_EXITED; the map is reactive, so this covers all.
+watch([() => props.deskId, hasPane], attach);
 onMounted(attach);
 </script>
 

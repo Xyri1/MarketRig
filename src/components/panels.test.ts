@@ -16,6 +16,7 @@ import ActivityTab from "./ActivityTab.vue";
 import DeskList from "./DeskList.vue";
 import RightPanel from "./RightPanel.vue";
 import SessionHeader from "./SessionHeader.vue";
+import TerminalWell from "./TerminalWell.vue";
 
 function desk(id: string, name: string, extra: Record<string, unknown> = {}) {
   return {
@@ -98,6 +99,23 @@ it("attaches the pane when a reload finds the session already live", async () =>
   await settle();
   expect(panes.has("d-1")).toBe(true);
   dispose("d-1");
+});
+
+it("mounts a pane that appears after the well is up", async () => {
+  installFakeWebSocket();
+  const { ensure, panes, dispose } = useTerminal();
+  const wrapper = mountWithI18n(TerminalWell, {
+    deskId: "d-1",
+    state: "idle",
+  });
+  await settle();
+  const pane = ensure("d-1");
+  await settle();
+  expect(wrapper.element.contains(pane.el)).toBe(true);
+  dispose("d-1");
+  await settle();
+  expect(wrapper.element.contains(pane.el)).toBe(false);
+  expect(panes.has("d-1")).toBe(false);
 });
 
 it("disables Interrupt for a claude desk and starts a NEW session", async () => {
