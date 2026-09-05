@@ -5,6 +5,7 @@ members = [
     "crates/marketrig",
     "crates/marketrig-mcp",
     "crates/marketrig-acceptance",
+    "src-tauri",
 ]
 
 [workspace.package]
@@ -85,6 +86,14 @@ rust_decimal = "=1.42.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sysinfo = "=0.39.6"
+# The desktop shell (per R5-6). `tray-icon` is on here because slice 008 builds
+# the tray; nothing else in the workspace touches these.
+tauri = { version = "=2.11.5", features = ["tray-icon"] }
+tauri-build = "=2.6.3"
+tauri-plugin-autostart = "=2.5.1"
+tauri-plugin-log = "=2.9.1"
+tauri-plugin-notification = "=2.4.0"
+tauri-plugin-single-instance = "=2.4.4"
 tempfile = "=3.27.0"
 tokio = { version = "=1.53.1", features = [
     "rt-multi-thread",

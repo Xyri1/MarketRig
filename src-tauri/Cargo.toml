@@ -1,0 +1,22 @@
+[package]
+name = "marketrig-desktop"
+version.workspace = true
+edition.workspace = true
+
+# Tauri's mobile-ready convention, and what lets `cargo test` reach the pure
+# functions behind the four commands.
+[lib]
+name = "marketrig_desktop_lib"
+crate-type = ["lib"]
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-autostart = { workspace = true }
+tauri-plugin-log = { workspace = true }
+tauri-plugin-notification = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
