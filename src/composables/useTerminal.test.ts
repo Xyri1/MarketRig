@@ -1,47 +1,14 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
-// The renderer does not run in jsdom.
-vi.mock("@xterm/xterm", () => {
-  class Terminal {
-    loadAddon() {}
-    open() {}
-    write() {}
-    onData() {}
-    onResize() {}
-    dispose() {}
-  }
-  return { Terminal };
-});
-
-vi.mock("@xterm/addon-fit", () => {
-  class FitAddon {
-    fit() {}
-    dispose() {}
-    proposeDimensions() {
-      return { cols: 80, rows: 24 };
-    }
-  }
-  return { FitAddon };
-});
+vi.mock("@xterm/xterm", () => import("../test/fakeXterm"));
+vi.mock("@xterm/addon-fit", () => import("../test/fakeXterm"));
 
 import { FakeWebSocket, installFakeWebSocket } from "../test/fakeDaemon";
 import { setEndpoint } from "../daemon-endpoint";
 import { useEvents } from "./useEvents";
 import { useTerminal } from "./useTerminal";
 
-// jsdom has no ResizeObserver.
-class FakeResizeObserver {
-  static observing = 0;
-  observe() {
-    FakeResizeObserver.observing += 1;
-  }
-  unobserve() {}
-  disconnect() {
-    FakeResizeObserver.observing -= 1;
-  }
-}
-globalThis.ResizeObserver =
-  FakeResizeObserver as unknown as typeof ResizeObserver;
+import { FakeResizeObserver } from "../test/fakeXterm";
 
 const { ensure, mount, panes, bytesWritten } = useTerminal();
 

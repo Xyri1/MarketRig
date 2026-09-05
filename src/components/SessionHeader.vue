@@ -22,11 +22,13 @@ import {
 } from "../client";
 import type { Desk, Envelope, Runtime } from "../client";
 import { useEvents } from "../composables/useEvents";
+import { useTerminal } from "../composables/useTerminal";
 import { button, buttonPrimary } from "../deskState";
 
 const props = defineProps<{ desk: Desk }>();
 const { t } = useI18n();
 const { on } = useEvents();
+const { ensure } = useTerminal();
 
 const process = ref<{ runtime: string } | null>(null);
 const pointers = ref<Record<string, string>>({});
@@ -45,6 +47,9 @@ async function refresh(): Promise<void> {
   process.value =
     (answer.data as { process?: { runtime: string } | null } | undefined)
       ?.process ?? null;
+  // A reload finds the process already running: no SESSION_STARTED will
+  // come, so a live answer attaches the pane here and the ring replays.
+  if (process.value) ensure(props.desk.id);
   const desk = await show({ path: { desk_id: props.desk.id } });
   pointers.value =
     ((desk.data as Desk | undefined)?.native_sessions as Record<

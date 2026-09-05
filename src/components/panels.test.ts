@@ -3,12 +3,15 @@ import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("../test/fakeDaemon")).fakeInvoke,
 }));
+vi.mock("@xterm/xterm", () => import("../test/fakeXterm"));
+vi.mock("@xterm/addon-fit", () => import("../test/fakeXterm"));
 
 import { nextTick } from "vue";
-import { installFakeDaemon } from "../test/fakeDaemon";
+import { installFakeDaemon, installFakeWebSocket } from "../test/fakeDaemon";
 import { mountWithI18n } from "../test/mountWithI18n";
 import { client } from "../client/client.gen";
 import { useApprovals } from "../composables/useApprovals";
+import { useTerminal } from "../composables/useTerminal";
 import ActivityTab from "./ActivityTab.vue";
 import DeskList from "./DeskList.vue";
 import RightPanel from "./RightPanel.vue";
@@ -78,6 +81,23 @@ it("renders desks in creation order with their gutter and pending count", async 
     "failure",
   ]);
   expect(rows[1].find("span").classes()).toContain("bg-state-pending");
+});
+
+it("attaches the pane when a reload finds the session already live", async () => {
+  installFakeWebSocket();
+  installFakeDaemon({
+    "GET /desks/d-1/session": () => ({
+      status: 200,
+      body: { process: { runtime: "codex" } },
+    }),
+    "GET /desks/d-1": () => ({ status: 200, body: desk("d-1", "alpha") }),
+    "GET /runtimes": () => ({ status: 200, body: { runtimes: [] } }),
+  });
+  const { panes, dispose } = useTerminal();
+  mountWithI18n(SessionHeader, { desk: desk("d-1", "alpha") });
+  await settle();
+  expect(panes.has("d-1")).toBe(true);
+  dispose("d-1");
 });
 
 it("disables Interrupt for a claude desk and starts a NEW session", async () => {
