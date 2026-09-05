@@ -22,31 +22,9 @@ const panes = shallowReactive(new Map<string, Pane>());
 if (import.meta.hot) import.meta.hot.accept(() => location.reload());
 const encoder = new TextEncoder();
 
-/**
- * A token's value in a form xterm.js parses (it takes `#rrggbb` and
- * `rgb()` only). Reading back `fillStyle` keeps an `oklch()` string verbatim
- * in Chrome, so the colour is painted on a 1x1 canvas and read back as
- * pixels — the browser's own colour engine, no maths here; jsdom has no 2D
- * context and gets `undefined`.
- */
-function token(name: string): string | undefined {
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue(name)
-    .trim();
-  if (!value) return undefined;
-  const canvas = document.createElement("canvas");
-  canvas.width = 1;
-  canvas.height = 1;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return undefined;
-  ctx.fillStyle = value;
-  ctx.fillRect(0, 0, 1, 1);
-  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-  return (
-    "#" +
-    [r, g, b].map((channel) => channel.toString(16).padStart(2, "0")).join("")
-  );
-}
+/** A token's value; xterm.js validates any CSS colour on a canvas itself. */
+const token = (name: string) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 /** Every frame goes through here: a socket still CONNECTING refuses a send. */
 function send(pane: Pane, frame: string | Uint8Array<ArrayBuffer>): void {
@@ -55,7 +33,9 @@ function send(pane: Pane, frame: string | Uint8Array<ArrayBuffer>): void {
 
 function sendResize(pane: Pane): void {
   const dimensions = pane.fit.proposeDimensions();
-  if (dimensions) send(pane, JSON.stringify({ resize: dimensions }));
+  // NaN while the element is detached (no parent to measure).
+  if (dimensions && Number.isFinite(dimensions.cols))
+    send(pane, JSON.stringify({ resize: dimensions }));
 }
 
 function openSocket(deskId: string, pane: Pane): void {
@@ -114,13 +94,9 @@ function ensure(deskId: string): Pane {
   el.className = "bg-well";
   el.style.width = "100%";
   el.style.height = "100%";
-  // WebView2 paints the caret of the terminal's own hidden input textarea.
-  el.style.caretColor = "transparent";
   const term = new Terminal({
     // xterm.js defaults to a generic courier stack at 15px.
-    fontFamily: getComputedStyle(document.documentElement)
-      .getPropertyValue("--font-terminal")
-      .trim(),
+    fontFamily: token("--font-terminal"),
     fontSize: 13,
     theme: {
       background: token("--color-well"),

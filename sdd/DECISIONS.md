@@ -248,7 +248,7 @@ Active decisions are grouped by subject; a decision's number is its stable ident
 
 **Decision:** Build the native shell with Tauri 2 and render attached terminals with xterm.js in the system webview. Tauri remains a thin shell; xterm.js owns presentation only; `marketrigd` owns terminal and session reality.
 
-**Rationale:** This supplies native tray/window lifecycle and a capable terminal without shipping Electron or moving domain authority into a second backend. xterm.js rather than ghostty-web because the well's job is warm presentation only, and xterm.js honours DECSCUSR, mouse tracking with SGR reports, and alternate scroll itself, where ghostty-web 0.4.0 needed four presentation workarounds in one day.
+**Rationale:** This supplies native tray/window lifecycle and a capable terminal without shipping Electron or moving domain authority into a second backend. xterm.js rather than ghostty-web because the well's job is warm presentation only, and xterm.js honours DECSCUSR and mouse tracking with SGR reports itself, where ghostty-web 0.4.0 needed four presentation workarounds in one day; like every xterm.js host, the well turns the wheel into arrow keys on the alternate screen when no mouse tracking is on, whether or not the application switched alternate scroll (mode 1007) off.
 
 **Contract:** [SPEC architecture](SPEC.md#3-top-level-architecture) and [SPEC desktop lifecycle](SPEC.md#14-desktop-and-application-lifecycle).
 
