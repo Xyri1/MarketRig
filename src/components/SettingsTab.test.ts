@@ -71,6 +71,18 @@ it("shows delivery as a disabled select whose Steer item is disabled", async () 
   expect(options[1].attributes("disabled")).toBeDefined();
 });
 
+it("takes the two model ids as typed text", async () => {
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  const inputs = wrapper
+    .findAll("input")
+    .filter((input) => input.attributes("aria-label")?.endsWith(" model"));
+  expect(
+    inputs.map((input) => (input.element as HTMLInputElement).value),
+  ).toEqual(["m-1", "m-2"]);
+});
+
 it("sends only the changed policy field", async () => {
   const wrapper = mountWithI18n(SettingsTab);
   await flushPromises();

@@ -21,7 +21,6 @@ import {
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   memoryDiscover,
-  memoryModels,
   memoryProvider,
   memoryRetry,
   memoryStatus,
@@ -45,7 +44,6 @@ const explicit = reactive(new Map<string, string>());
 const memory = ref<Status | null>(null);
 const memoryPath = ref("");
 const policy = ref<Resource | null>(null);
-const models = ref<string[]>([]);
 const autostart = ref(false);
 const failure = ref("");
 // The key is write-only: the daemon never returns it (R4 §3).
@@ -100,14 +98,6 @@ async function discoverMemory(): Promise<void> {
 async function retryMemory(): Promise<void> {
   refused((await memoryRetry()).error);
   await loadMemory();
-}
-
-/** Live on open, never cached (R4 §3). */
-async function openModels(open: boolean): Promise<void> {
-  if (!open) return;
-  const answer = await memoryModels();
-  if (refused(answer.error)) return;
-  models.value = (answer.data as { models?: string[] })?.models ?? [];
 }
 
 async function saveProvider(): Promise<void> {
@@ -264,42 +254,18 @@ onMounted(async () => {
           :aria-label="t('settings.memory.apiKey')"
           :placeholder="t('settings.memory.apiKey')"
         />
-        <label
-          v-for="field in [
-            { key: 'llm', label: 'settings.memory.llmModel' },
-            { key: 'embedding', label: 'settings.memory.embeddingModel' },
-          ]"
-          :key="field.key"
-          class="flex items-center gap-2"
-        >
-          <span class="text-xs text-ink-muted">{{ t(field.label) }}</span>
-          <SelectRoot
-            :model-value="form[field.key as 'llm' | 'embedding']"
-            @update:model-value="
-              form[field.key as 'llm' | 'embedding'] = $event as string
-            "
-            @update:open="openModels($event)"
-          >
-            <SelectTrigger :class="`terminal ${selectTrigger}`">
-              <SelectValue />
-              <span aria-hidden="true">▾</span>
-            </SelectTrigger>
-            <SelectContent
-              class="rounded-panel border border-line bg-panel p-1"
-            >
-              <SelectViewport>
-                <SelectItem
-                  v-for="model in models"
-                  :key="model"
-                  :value="model"
-                  class="terminal px-2 py-1"
-                >
-                  <SelectItemText>{{ model }}</SelectItemText>
-                </SelectItem>
-              </SelectViewport>
-            </SelectContent>
-          </SelectRoot>
-        </label>
+        <input
+          v-model="form.llm"
+          class="terminal rounded-control border border-line px-2 py-1"
+          :aria-label="t('settings.memory.llmModel')"
+          :placeholder="t('settings.memory.llmModel')"
+        />
+        <input
+          v-model="form.embedding"
+          class="terminal rounded-control border border-line px-2 py-1"
+          :aria-label="t('settings.memory.embeddingModel')"
+          :placeholder="t('settings.memory.embeddingModel')"
+        />
         <button
           type="submit"
           class="self-start rounded-control border border-line px-2 py-1"
