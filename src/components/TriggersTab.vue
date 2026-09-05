@@ -90,7 +90,7 @@ onMounted(() => void refresh());
       <pre
         v-for="(firing, at) in open === trigger.id ? firings : []"
         :key="at"
-        class="terminal text-xs wrap-anywhere"
+        class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
         >{{ JSON.stringify(firing) }}</pre>
     </div>
   </div>

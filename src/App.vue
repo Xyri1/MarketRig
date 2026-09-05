@@ -81,17 +81,19 @@ onMounted(() => {
   </main>
   <main v-else-if="status === 'UNAVAILABLE'" class="p-4">
     <p>{{ t("daemon.unavailable") }}</p>
-    <pre class="terminal text-xs text-ink-muted">{{ error }}</pre>
+    <pre
+      class="terminal text-xs wrap-anywhere whitespace-pre-wrap text-ink-muted"
+      >{{ error }}</pre>
     <button :class="button" @click="retry()">{{ t("daemon.retry") }}</button>
   </main>
-  <main v-else class="flex h-full">
+  <main v-else class="flex h-full overflow-x-hidden">
     <DeskList
       class="w-60 shrink-0"
       :desks="desks"
       :selected="selected"
       @select="selected = $event"
     />
-    <section class="flex min-w-[480px] flex-1 flex-col">
+    <section class="flex min-w-[480px] flex-1 flex-col overflow-hidden">
       <SessionHeader v-if="selectedDesk" :desk="selectedDesk" />
       <TerminalWell class="flex-1" :desk-id="selected" :state="selectedState" />
     </section>

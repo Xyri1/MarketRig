@@ -47,6 +47,8 @@ html,
 body,
 #app {
   height: 100%;
+  /* The window never scrolls sideways; a wide row wraps or scrolls itself. */
+  overflow-x: hidden;
 }
 
 body {

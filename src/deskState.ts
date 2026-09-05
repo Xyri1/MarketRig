@@ -31,3 +31,6 @@ export const gutterClass: Record<DeskState, string> = {
 export const button =
   "rounded-control border border-line px-2 py-1 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent";
 export const buttonPrimary = `${button} bg-accent text-accent-ink`;
+// A Select trigger boxed like the text inputs, so an empty value still reads
+// as a control; the ▾ its content carries gives it the inputs' height.
+export const selectTrigger = `${button} flex flex-1 items-center justify-between gap-2`;

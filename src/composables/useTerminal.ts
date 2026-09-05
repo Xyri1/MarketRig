@@ -1,3 +1,4 @@
+import { shallowReactive } from "vue";
 import { FitAddon, Terminal } from "ghostty-web";
 import { endpoint } from "../daemon-endpoint";
 import { useEvents } from "./useEvents";
@@ -12,44 +13,44 @@ type Pane = {
   disposed: boolean;
 };
 
-const panes = new Map<string, Pane>();
+// Reactive so a row reading `panes.has(id)` redraws when a session starts.
+const panes = shallowReactive(new Map<string, Pane>());
 const encoder = new TextEncoder();
 
 /**
  * A token's value in a form ghostty-web parses (it takes `#rrggbb` and
- * `rgb()` only). The canvas is the browser's own colour engine, so oklch
- * tokens need no maths here; jsdom has no 2D context and gets `undefined`.
+ * `rgb()` only). Reading back `fillStyle` keeps an `oklch()` string verbatim
+ * in Chrome, so the colour is painted on a 1x1 canvas and read back as
+ * pixels — the browser's own colour engine, no maths here; jsdom has no 2D
+ * context and gets `undefined`.
  */
 function token(name: string): string | undefined {
   const value = getComputedStyle(document.documentElement)
     .getPropertyValue(name)
     .trim();
   if (!value) return undefined;
-  const ctx = document.createElement("canvas").getContext("2d");
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext("2d");
   if (!ctx) return undefined;
-  ctx.fillStyle = "#000000";
   ctx.fillStyle = value;
-  const painted = String(ctx.fillStyle);
-  if (painted.startsWith("#") || painted.startsWith("rgb(")) return painted;
-  const srgb = painted.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)/);
-  return srgb
-    ? "#" +
-        srgb
-          .slice(1, 4)
-          .map((c) =>
-            Math.round(Number(c) * 255)
-              .toString(16)
-              .padStart(2, "0"),
-          )
-          .join("")
-    : undefined;
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+  return (
+    "#" +
+    [r, g, b].map((channel) => channel.toString(16).padStart(2, "0")).join("")
+  );
+}
+
+/** Every frame goes through here: a socket still CONNECTING refuses a send. */
+function send(pane: Pane, frame: string | Uint8Array<ArrayBuffer>): void {
+  if (pane.socket?.readyState === WebSocket.OPEN) pane.socket.send(frame);
 }
 
 function sendResize(pane: Pane): void {
   const dimensions = pane.fit.proposeDimensions();
-  if (dimensions && pane.socket?.readyState === WebSocket.OPEN) {
-    pane.socket.send(JSON.stringify({ resize: dimensions }));
-  }
+  if (dimensions) send(pane, JSON.stringify({ resize: dimensions }));
 }
 
 function openSocket(deskId: string, pane: Pane): void {
@@ -104,6 +105,8 @@ function ensure(deskId: string): Pane {
   const existing = panes.get(deskId);
   if (existing) return existing;
   const el = document.createElement("div");
+  // The well is dark before ghostty-web's own theme paints anything.
+  el.className = "bg-well";
   el.style.width = "100%";
   el.style.height = "100%";
   const term = new Terminal({
@@ -128,11 +131,11 @@ function ensure(deskId: string): Pane {
   };
   panes.set(deskId, pane);
   term.onData((data) => {
-    pane.socket?.send(encoder.encode(data));
+    send(pane, encoder.encode(data));
     useEvents().clearAttention(deskId);
   });
   term.onResize(({ cols, rows }) =>
-    pane.socket?.send(JSON.stringify({ resize: { cols, rows } })),
+    send(pane, JSON.stringify({ resize: { cols, rows } })),
   );
   openSocket(deskId, pane);
   return pane;

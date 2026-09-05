@@ -52,7 +52,7 @@ onMounted(() => void refresh());
       <p class="terminal text-xs text-ink-muted">
         {{ at(row.occurred_at_ns) }} {{ row.kind }}
       </p>
-      <pre class="terminal text-xs wrap-anywhere">{{
+      <pre class="terminal text-xs wrap-anywhere whitespace-pre-wrap">{{
         JSON.stringify(row.payload ?? {})
       }}</pre>
     </div>

@@ -34,6 +34,7 @@ import {
 import type { Envelope, Resource, Runtime, Status } from "../client";
 import { useDaemon } from "../composables/useDaemon";
 import { useEvents } from "../composables/useEvents";
+import { selectTrigger } from "../deskState";
 
 const { t } = useI18n();
 const { on } = useEvents();
@@ -162,7 +163,7 @@ onMounted(async () => {
         :key="row.runtime"
         class="flex flex-col gap-1 border-b border-line pb-2"
       >
-        <p class="terminal text-sm">
+        <p class="terminal text-sm wrap-anywhere">
           {{ row.runtime }} {{ row.executable_path }} {{ row.version }}
           {{ row.state }}
         </p>
@@ -211,11 +212,11 @@ onMounted(async () => {
 
     <section v-if="memory" class="flex flex-col gap-2">
       <p class="text-xs text-ink-muted">{{ t("settings.memory.title") }}</p>
-      <p class="terminal text-sm">
+      <p class="terminal text-sm wrap-anywhere">
         {{ memory.child.state }} {{ memory.child.live }}
         {{ memory.child.executable_path }}
       </p>
-      <p class="terminal text-sm">
+      <p class="terminal text-sm wrap-anywhere">
         {{ memory.provider.base_url }} {{ memory.provider.llm_model }}
         {{ memory.provider.embedding_model }}
       </p>
@@ -279,10 +280,9 @@ onMounted(async () => {
             "
             @update:open="openModels($event)"
           >
-            <SelectTrigger
-              class="terminal rounded-control border border-line px-2 py-1"
-            >
+            <SelectTrigger :class="`terminal ${selectTrigger}`">
               <SelectValue />
+              <span aria-hidden="true">▾</span>
             </SelectTrigger>
             <SelectContent
               class="rounded-panel border border-line bg-panel p-1"
@@ -330,8 +330,9 @@ onMounted(async () => {
           :model-value="policy[row.field]"
           @update:model-value="setPolicy(row.field, $event as string)"
         >
-          <SelectTrigger class="rounded-control border border-line px-2 py-1">
+          <SelectTrigger :class="selectTrigger">
             <SelectValue />
+            <span aria-hidden="true">▾</span>
           </SelectTrigger>
           <SelectContent class="rounded-panel border border-line bg-panel p-1">
             <SelectViewport>

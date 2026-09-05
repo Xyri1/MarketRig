@@ -158,6 +158,7 @@ onMounted(() => void refresh());
       <SelectRoot v-model="switchTo" :disabled="busy || !others.length">
         <SelectTrigger :class="button" :aria-label="t('session.switch')">
           <SelectValue :placeholder="t('session.switch')" />
+          <span aria-hidden="true">▾</span>
         </SelectTrigger>
         <SelectPortal>
           <SelectContent class="rounded-control border border-line bg-panel">
@@ -175,8 +176,9 @@ onMounted(() => void refresh());
         </SelectPortal>
       </SelectRoot>
     </div>
-    <pre v-if="failure" class="terminal text-xs wrap-anywhere">{{
-      failure
-    }}</pre>
+    <pre
+      v-if="failure"
+      class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
+      >{{ failure }}</pre>
   </header>
 </template>

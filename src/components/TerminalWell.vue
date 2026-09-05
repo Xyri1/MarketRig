@@ -11,12 +11,9 @@ const { on } = useEvents();
 const { mount, panes } = useTerminal();
 
 const slot = ref<HTMLDivElement | null>(null);
-// `panes` is a plain Map; the two kinds that change it are the notification.
-const tick = ref(0);
-const hasPane = computed(() => {
-  void tick.value;
-  return props.deskId !== null && panes.has(props.deskId);
-});
+const hasPane = computed(
+  () => props.deskId !== null && panes.has(props.deskId),
+);
 
 /** The Terminal is never recreated: only its element moves into the slot. */
 async function attach(): Promise<void> {
@@ -26,18 +23,15 @@ async function attach(): Promise<void> {
   }
 }
 
-on(["SESSION_STARTED", "SESSION_EXITED"], () => {
-  tick.value += 1;
-  void attach();
-});
+on(["SESSION_STARTED", "SESSION_EXITED"], () => void attach());
 watch(() => props.deskId, attach);
 onMounted(attach);
 </script>
 
 <template>
-  <div class="flex bg-well">
+  <div class="flex overflow-hidden bg-well">
     <span class="w-[2px] shrink-0" :class="gutterClass[state]" />
-    <div ref="slot" class="flex-1">
+    <div ref="slot" class="min-w-0 flex-1 overflow-hidden">
       <p v-if="!hasPane" class="terminal p-2 text-state-idle">
         {{ t("well.noSession") }}
       </p>

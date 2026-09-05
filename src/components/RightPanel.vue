@@ -72,7 +72,7 @@ onMounted(async () => {
       <TabsContent
         v-for="name in TABS"
         :key="name"
-        class="flex-1 overflow-auto p-2 transition-opacity duration-[120ms] data-[state=inactive]:opacity-0 motion-reduce:transition-none"
+        class="min-w-0 flex-1 overflow-x-hidden overflow-y-auto p-2 transition-opacity duration-[120ms] data-[state=inactive]:opacity-0 motion-reduce:transition-none"
         :value="name"
       >
         <DeskTab v-if="name === 'desk' && deskId" :desk-id="deskId" />

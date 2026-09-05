@@ -55,6 +55,8 @@ it("keeps one Terminal per desk across selection changes", () => {
   expect(first.childNodes).toHaveLength(0);
 
   const socket = FakeWebSocket.instances[0];
+  // mount() fits, which resizes: nothing may be sent before the socket opens.
+  expect(socket.sent).toHaveLength(0);
   socket.open();
   expect(socket.sent[0]).toBe(JSON.stringify({ bearer: "b" }));
   socket.message(new Uint8Array([1, 2, 3]).buffer);

@@ -91,11 +91,12 @@ async function settle(
       </button>
       <pre
         v-if="sources.has(item.id)"
-        class="terminal text-xs overflow-x-auto"
+        class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
         >{{ sources.get(item.id) }}</pre>
-      <pre v-else-if="item.kind !== 'TRIGGER_CODE'" class="terminal text-xs">{{
-        request(item)
-      }}</pre>
+      <pre
+        v-else-if="item.kind !== 'TRIGGER_CODE'"
+        class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
+        >{{ request(item) }}</pre>
 
       <div class="flex gap-2">
         <button

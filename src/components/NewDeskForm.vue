@@ -60,6 +60,7 @@ async function submit(): Promise<void> {
     <SelectRoot v-model="runtime">
       <SelectTrigger :class="button" :aria-label="t('desks.runtime')">
         <SelectValue class="terminal" />
+        <span aria-hidden="true">▾</span>
       </SelectTrigger>
       <SelectPortal>
         <SelectContent class="rounded-control border border-line bg-panel">
@@ -84,8 +85,9 @@ async function submit(): Promise<void> {
         {{ t("common.cancel") }}
       </button>
     </div>
-    <pre v-if="failure" class="terminal text-xs wrap-anywhere">{{
-      failure
-    }}</pre>
+    <pre
+      v-if="failure"
+      class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
+      >{{ failure }}</pre>
   </form>
 </template>
