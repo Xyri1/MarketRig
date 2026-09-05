@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0 through R4 are delivered; Milestone R5 is design complete, its first slice (006, the daemon's approval policies and events tail) is frozen, and slice 007 is next.
+Milestones R0 through R4 are delivered; Milestone R5 is design complete, its slices 006 (the daemon's approval policies and events tail) and 007 (the Tauri shell and the frontend control plane) are frozen, and slice 008 is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -184,7 +184,7 @@ Dependencies: Milestone R3.
 
 This milestone realizes the choices recorded per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D70, D71, and D72.
 
-**Design complete 2026-09-04** — [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC with gate G38–G41 and the packaged smoke); slice 006 delivered and frozen 2026-09-05 (daemon and CLI: policies, approvals, events tail, sockets, `--openapi`; gate G38–G41), slices 007 and 008 not started.
+**Design complete 2026-09-04** — [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC with gate G38–G41 and the packaged smoke); slice 006 delivered and frozen 2026-09-05 (daemon and CLI: policies, approvals, events tail, sockets, `--openapi`; gate G38–G41); slice 007 delivered and frozen 2026-09-05 (the `marketrig-desktop` crate, the root Vue frontend over the generated client, CI's `frontend` job, REST CORS on the origin allowlist); slice 008 not started.
 
 **Goal:** Give the user a control plane over desks that are already running.
 
