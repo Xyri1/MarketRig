@@ -73,7 +73,16 @@ pub fn spawn(command: Command) -> io::Result<Contained> {
     #[cfg(unix)]
     wrap.wrap(ProcessSession);
     #[cfg(windows)]
-    wrap.wrap(JobObject);
+    {
+        // `JobObject` rewrites the creation flags at spawn, so the no-window
+        // flag rides the wrapper chain rather than the command.
+        wrap.wrap(process_wrap::tokio::CreationFlags(
+            windows::Win32::System::Threading::PROCESS_CREATION_FLAGS(
+                crate::runtime::CREATE_NO_WINDOW,
+            ),
+        ));
+        wrap.wrap(JobObject);
+    }
     let child = wrap.spawn()?;
     #[cfg(windows)]
     let job = child.id().map(contain).unwrap_or(0);

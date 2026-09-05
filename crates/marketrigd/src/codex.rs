@@ -255,6 +255,8 @@ impl Inner {
                     token_path.display().to_string(),
                 ];
                 let mut command = tokio::process::Command::new(&executable);
+                #[cfg(windows)]
+                command.creation_flags(crate::runtime::CREATE_NO_WINDOW);
                 command
                     .args(&args)
                     .current_dir(&self.roots.data)

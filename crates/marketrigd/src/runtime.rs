@@ -404,7 +404,18 @@ pub(crate) fn probe(executable: &Path, args: &[&str]) -> Command {
 
 /// Runs a probe with the §2 timeout, answering `(exit succeeded, stdout,
 /// stderr)` or `None` when it could not be started or did not finish in time.
+/// The daemon runs without a console (the shell starts it detached), and
+/// Windows then gives every console-subsystem child a fresh console window of
+/// its own unless the spawn says otherwise. Every daemon spawn passes this.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub(crate) fn run(mut command: Command) -> Option<(bool, String, String)> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

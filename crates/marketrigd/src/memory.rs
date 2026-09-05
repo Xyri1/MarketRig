@@ -969,6 +969,8 @@ impl Memory {
         deadline: tokio::time::Instant,
     ) -> Result<(), MemoryError> {
         let mut command = tokio::process::Command::new(&launch.executable);
+        #[cfg(windows)]
+        command.creation_flags(crate::runtime::CREATE_NO_WINDOW);
         command
             // The data root carries no `.env` for the launcher's dotenv loader.
             .current_dir(&self.roots.data)

@@ -63,6 +63,19 @@ it("keeps one Terminal per desk across selection changes", () => {
   expect(bytesWritten("d-1")).toBe(3);
 });
 
+it("shows one desk at a time in the slot", () => {
+  const slot = document.createElement("div");
+  const first = ensure("d-1");
+  mount("d-1", slot);
+  mount("d-2", slot);
+  expect([...slot.children]).toEqual([panes.get("d-2")!.el]);
+  expect(first.el.parentElement).toBeNull();
+  expect(panes.has("d-1")).toBe(true);
+  // A desk without a session leaves the slot empty of every pane.
+  useTerminal().evict(slot);
+  expect(slot.childNodes).toHaveLength(0);
+});
+
 it("disposes on SESSION_EXITED", () => {
   ensure("d-1");
   const { connect, disconnect } = useEvents();

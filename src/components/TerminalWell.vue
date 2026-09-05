@@ -8,7 +8,7 @@ import { gutterClass, type DeskState } from "../deskState";
 const props = defineProps<{ deskId: string | null; state: DeskState }>();
 const { t } = useI18n();
 const { on } = useEvents();
-const { mount, panes } = useTerminal();
+const { mount, evict, panes } = useTerminal();
 
 const slot = ref<HTMLDivElement | null>(null);
 const hasPane = computed(
@@ -18,8 +18,11 @@ const hasPane = computed(
 /** The Terminal is never recreated: only its element moves into the slot. */
 async function attach(): Promise<void> {
   await nextTick();
-  if (props.deskId && slot.value && panes.has(props.deskId)) {
+  if (!slot.value) return;
+  if (props.deskId && panes.has(props.deskId)) {
     mount(props.deskId, slot.value);
+  } else {
+    evict(slot.value);
   }
 }
 

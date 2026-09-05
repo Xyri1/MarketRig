@@ -110,6 +110,11 @@ function ensure(deskId: string): Pane {
   el.style.width = "100%";
   el.style.height = "100%";
   const term = new Terminal({
+    // ghostty-web's defaults are the browser's generic monospace at 15px.
+    fontFamily: getComputedStyle(document.documentElement)
+      .getPropertyValue("--font-terminal")
+      .trim(),
+    fontSize: 13,
     theme: {
       background: token("--color-well"),
       foreground: token("--color-state-idle"),
@@ -141,11 +146,22 @@ function ensure(deskId: string): Pane {
   return pane;
 }
 
+/** Takes every other desk's element out of the slot; the Terminals are kept. */
+function evict(slot: HTMLElement, keep?: Pane): void {
+  for (const pane of panes.values()) {
+    if (pane !== keep && pane.el.parentElement === slot) pane.el.remove();
+  }
+}
+
 /** Moves the desk's own element into the well slot; the Terminal is kept. */
 function mount(deskId: string, slot: HTMLElement): void {
   const pane = ensure(deskId);
+  evict(slot, pane);
   if (pane.el.parentElement !== slot) slot.appendChild(pane.el);
   pane.fit.fit();
+  // fit() only fires onResize when the size changed; the PTY still needs the
+  // size the element was first measured at.
+  sendResize(pane);
 }
 
 function dispose(deskId: string): void {
@@ -172,5 +188,5 @@ export function useTerminal() {
     on("SESSION_STARTED", (event) => event.desk_id && ensure(event.desk_id));
     on("SESSION_EXITED", (event) => event.desk_id && dispose(event.desk_id));
   }
-  return { ensure, mount, dispose, bytesWritten, panes };
+  return { ensure, mount, evict, dispose, bytesWritten, panes };
 }
