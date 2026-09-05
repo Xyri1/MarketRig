@@ -148,6 +148,29 @@ function ensure(deskId: string): Pane {
   term.onResize(({ cols, rows }) =>
     send(pane, JSON.stringify({ resize: { cols, rows } })),
   );
+  // The wheel on the alternate screen, the way a terminal does it: SGR mouse
+  // reports when the application asked for them (Claude Code does), nothing
+  // when it switched alternate scroll off, ghostty-web's own arrow keys
+  // otherwise. The normal screen keeps ghostty-web's scrollback scrolling.
+  term.attachCustomWheelEventHandler((event) => {
+    if (term.buffer.active.type !== "alternate") return false;
+    const tracking = [1000, 1002, 1003].some((mode) => term.getMode(mode));
+    if (!tracking || !term.getMode(1006)) return !term.getMode(1007);
+    const box = term.element?.querySelector("canvas")?.getBoundingClientRect();
+    const cell = (offset: number, span: number | undefined, count: number) =>
+      span ? Math.min(count, Math.floor((offset / span) * count) + 1) : 1;
+    const col = cell(event.clientX - (box?.left ?? 0), box?.width, term.cols);
+    const row = cell(event.clientY - (box?.top ?? 0), box?.height, term.rows);
+    const button = event.deltaY < 0 ? 64 : 65;
+    const notches = Math.min(
+      5,
+      Math.max(1, Math.round(Math.abs(event.deltaY) / 33)),
+    );
+    for (let i = 0; i < notches; i++) {
+      send(pane, encoder.encode(`[<${button};${col};${row}M`));
+    }
+    return true;
+  });
   openSocket(deskId, pane);
   return pane;
 }
