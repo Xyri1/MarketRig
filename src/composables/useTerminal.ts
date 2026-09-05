@@ -15,6 +15,9 @@ type Pane = {
 
 // Reactive so a row reading `panes.has(id)` redraws when a session starts.
 const panes = shallowReactive(new Map<string, Pane>());
+// Terminals, sockets, and elements live in this module's state: a hot update
+// under `tauri dev` must reload the page rather than orphan them on screen.
+if (import.meta.hot) import.meta.hot.decline();
 const encoder = new TextEncoder();
 
 /**
