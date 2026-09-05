@@ -118,6 +118,9 @@ function ensure(deskId: string): Pane {
       .getPropertyValue("--font-terminal")
       .trim(),
     fontSize: 13,
+    // ghostty-web ignores DECSCUSR and paints its default block over the
+    // glyph; a bar reads as a caret and hides nothing.
+    cursorStyle: "bar",
     theme: {
       background: token("--color-well"),
       foreground: token("--color-state-idle"),
