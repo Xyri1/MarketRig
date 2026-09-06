@@ -20,6 +20,10 @@ type Pane = {
   terminalId: string | null;
   offset: bigint;
   pending: number;
+  /** ConPTY: hide the caret while output is mid-burst; paint it only at rest. */
+  conpty: boolean;
+  cursorParked: boolean;
+  cursorRestore: ReturnType<typeof setTimeout> | null;
 };
 
 // Reactive so a row reading `panes.has(id)` redraws when a session starts.
@@ -28,10 +32,85 @@ const panes = shallowReactive(new Map<string, Pane>());
 // under `tauri dev` must reload the page rather than orphan them on screen.
 if (import.meta.hot) import.meta.hot.accept(() => location.reload());
 const encoder = new TextEncoder();
+// Local xterm only — never sent to the PTY. ConPTY re-emits CUP mid-redraw;
+// painting those positions makes the caret chase Codex/Claude status rows.
+const HIDE_CURSOR = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c]);
+const SHOW_CURSOR = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68]);
+// Longer than a Codex status-tick gap: restoring sooner re-shows the caret on
+// the last CUP cell (often the status row) between frames.
+const CURSOR_RESTORE_MS = 250;
 
 /** A token's value; xterm.js validates any CSS colour on a canvas itself. */
 const token = (name: string) =>
   getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+/** Last DECTCEM in the chunk, if any: true when the TUI asked to stay hidden. */
+function lastDectcemHidden(bytes: Uint8Array): boolean | null {
+  let hidden: boolean | null = null;
+  for (let i = 0; i + 5 < bytes.length; i++) {
+    if (
+      bytes[i] === 0x1b &&
+      bytes[i + 1] === 0x5b &&
+      bytes[i + 2] === 0x3f &&
+      bytes[i + 3] === 0x32 &&
+      bytes[i + 4] === 0x35 &&
+      (bytes[i + 5] === 0x6c || bytes[i + 5] === 0x68)
+    ) {
+      hidden = bytes[i + 5] === 0x6c;
+      i += 5;
+    }
+  }
+  return hidden;
+}
+
+/** Writes PTY bytes into xterm; on ConPTY parks the caret until output settles. */
+function writeOutput(
+  pane: Pane,
+  bytes: Uint8Array,
+  done?: () => void,
+): void {
+  if (!pane.conpty) {
+    pane.term.write(bytes, done);
+    return;
+  }
+  // Codex ends sync frames with ?25h at a transient CUP cell (codex#39710).
+  // Only those visible frame-ends need a trailing host hide; plain idle output
+  // and app-hidden frames must stay untouched so the steady idle caret remains.
+  const lastHidden = lastDectcemHidden(bytes);
+  if (lastHidden === true) {
+    pane.cursorParked = true;
+    pane.term.write(bytes, done);
+    if (pane.cursorRestore !== null) clearTimeout(pane.cursorRestore);
+    pane.cursorRestore = null;
+    return;
+  }
+  if (lastHidden !== false && !pane.cursorParked) {
+    pane.term.write(bytes, done);
+    return;
+  }
+  const payload = new Uint8Array(bytes.length + HIDE_CURSOR.length);
+  payload.set(bytes);
+  payload.set(HIDE_CURSOR, bytes.length);
+  pane.cursorParked = true;
+  pane.term.write(payload, done);
+  if (pane.cursorRestore !== null) clearTimeout(pane.cursorRestore);
+  pane.cursorRestore = setTimeout(() => releaseCursor(pane), CURSOR_RESTORE_MS);
+}
+
+/** Show the caret again after a ConPTY redraw burst (or on user input). */
+function releaseCursor(pane: Pane): void {
+  if (pane.cursorRestore !== null) clearTimeout(pane.cursorRestore);
+  pane.cursorRestore = null;
+  if (!pane.cursorParked || pane.disposed) return;
+  pane.cursorParked = false;
+  pane.term.write(SHOW_CURSOR);
+}
+
+function clearCursorRestore(pane: Pane): void {
+  if (pane.cursorRestore !== null) clearTimeout(pane.cursorRestore);
+  pane.cursorRestore = null;
+  pane.cursorParked = false;
+}
 
 /** Every frame goes through here: a socket still CONNECTING refuses a send. */
 function send(pane: Pane, frame: string | Uint8Array<ArrayBuffer>): void {
@@ -77,6 +156,7 @@ function fitVisible(pane: Pane): void {
 function stop(pane: Pane, reason: string): void {
   pane.reconnected = true;
   pane.ready = false;
+  clearCursorRestore(pane);
   const socket = pane.socket;
   pane.socket = null;
   socket?.close(1000);
@@ -127,6 +207,7 @@ function openSocket(deskId: string, pane: Pane): void {
         if (pane.terminalId === null) {
           pane.terminalId = info.terminal_id;
           pane.offset = streamOffset;
+          pane.conpty = info.windows_pty !== null;
           pane.term.options.windowsPty = info.windows_pty
             ? {
                 backend: info.windows_pty.backend,
@@ -168,7 +249,7 @@ function openSocket(deskId: string, pane: Pane): void {
     pane.pending += bytes.length;
     const completingReplay = replay;
     replay = false;
-    pane.term.write(bytes, () => {
+    writeOutput(pane, bytes, () => {
       pane.pending -= bytes.length;
       if (pane.disposed || pane.socket !== socket) return;
       if (completingReplay) {
@@ -213,6 +294,10 @@ function ensure(deskId: string): Pane {
     cols: 120,
     rows: 40,
     rescaleOverlappingGlyphs: true,
+    // Steady accent block: agent TUIs (and VS Code/Pane defaults) keep blink
+    // off so the caret does not fight ConPTY redraw parking or Codex DECSCUSR.
+    cursorBlink: false,
+    cursorStyle: "block",
     // xterm.js defaults to a generic courier stack at 15px.
     fontFamily: token("--font-terminal"),
     fontSize: 13,
@@ -244,9 +329,14 @@ function ensure(deskId: string): Pane {
     terminalId: null,
     offset: 0n,
     pending: 0,
+    conpty: false,
+    cursorParked: false,
+    cursorRestore: null,
   };
   panes.set(deskId, pane);
   term.onData((data) => {
+    // Don't leave the caret dark under keystrokes while a settle timer runs.
+    if (pane.conpty) releaseCursor(pane);
     send(pane, encoder.encode(data));
     useEvents().clearAttention(deskId);
   });
@@ -277,6 +367,7 @@ function dispose(deskId: string): void {
   const pane = panes.get(deskId);
   if (!pane) return;
   pane.disposed = true;
+  clearCursorRestore(pane);
   panes.delete(deskId);
   pane.socket?.close();
   pane.resize.disconnect();

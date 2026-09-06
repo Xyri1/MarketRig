@@ -192,6 +192,61 @@ it.each([
   },
 );
 
+it("parks the ConPTY caret during output bursts and restores it after settle", async () => {
+  vi.useFakeTimers();
+  const pane = ensure("d-1");
+  const socket = FakeWebSocket.instances[0];
+  socket.open();
+  socket.message(
+    JSON.stringify({
+      attached: {
+        terminal_id: "terminal-1",
+        offset: "0",
+        replay_bytes: 0,
+        cols: 120,
+        rows: 40,
+        windows_pty: { backend: "conpty", buildNumber: 26100 },
+      },
+    }),
+  );
+  // Codex-shaped frame: ends visible (?25h) at a transient cell — host must
+  // still leave the caret hidden after the write.
+  socket.message(
+    new Uint8Array([
+      0x1b, 0x5b, 0x31, 0x3b, 0x31, 0x48, 0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68,
+    ]).buffer,
+  );
+  expect(pane.term.write).toHaveBeenLastCalledWith(
+    new Uint8Array([
+      0x1b, 0x5b, 0x31, 0x3b, 0x31, 0x48, 0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68,
+      0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c,
+    ]),
+    expect.any(Function),
+  );
+  // Follow-on bytes while parked stay darkened; plain idle bytes do not park.
+  socket.message(new Uint8Array([66]).buffer);
+  expect(pane.term.write).toHaveBeenLastCalledWith(
+    new Uint8Array([66, 0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c]),
+    expect.any(Function),
+  );
+  await vi.advanceTimersByTimeAsync(250);
+  expect(pane.term.write).toHaveBeenLastCalledWith(
+    new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x68]),
+  );
+  socket.message(new Uint8Array([67]).buffer);
+  expect(pane.term.write).toHaveBeenLastCalledWith(
+    new Uint8Array([67]),
+    expect.any(Function),
+  );
+  // A chunk that ends asking for hide must not get a host restore.
+  socket.message(
+    new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x35, 0x6c, 68]).buffer,
+  );
+  const before = vi.mocked(pane.term.write).mock.calls.length;
+  await vi.advanceTimersByTimeAsync(250);
+  expect(vi.mocked(pane.term.write).mock.calls.length).toBe(before);
+});
+
 it("waits for replay parsing before fitting, and bounds outstanding writes", () => {
   const pane = ensure("d-1");
   mount("d-1", visibleSlot(pane));
