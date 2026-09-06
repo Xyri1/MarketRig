@@ -1,5 +1,7 @@
 import { shallowReactive } from "vue";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { endpoint } from "../daemon-endpoint";
 import { useEvents } from "./useEvents";
@@ -13,6 +15,11 @@ type Pane = {
   bytes: number;
   reconnected: boolean;
   disposed: boolean;
+  opened: boolean;
+  ready: boolean;
+  terminalId: string | null;
+  offset: bigint;
+  pending: number;
 };
 
 // Reactive so a row reading `panes.has(id)` redraws when a session starts.
@@ -32,10 +39,48 @@ function send(pane: Pane, frame: string | Uint8Array<ArrayBuffer>): void {
 }
 
 function sendResize(pane: Pane): void {
-  const dimensions = pane.fit.proposeDimensions();
-  // NaN while the element is detached (no parent to measure).
-  if (dimensions && Number.isFinite(dimensions.cols))
-    send(pane, JSON.stringify({ resize: dimensions }));
+  if (pane.ready)
+    send(
+      pane,
+      JSON.stringify({
+        resize: { cols: pane.term.cols, rows: pane.term.rows },
+      }),
+    );
+}
+
+function fitVisible(pane: Pane): void {
+  if (
+    !pane.el.isConnected ||
+    pane.el.clientWidth === 0 ||
+    pane.el.clientHeight === 0
+  )
+    return;
+  if (!pane.opened) {
+    pane.term.open(pane.el);
+    pane.opened = true;
+    let webgl: WebglAddon | undefined;
+    try {
+      webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl?.dispose();
+        fitVisible(pane);
+      });
+      pane.term.loadAddon(webgl);
+    } catch {
+      webgl?.dispose();
+    }
+  }
+  if (pane.ready) pane.fit.fit();
+  pane.term.refresh(0, pane.term.rows - 1);
+}
+
+function stop(pane: Pane, reason: string): void {
+  pane.reconnected = true;
+  pane.ready = false;
+  const socket = pane.socket;
+  pane.socket = null;
+  socket?.close(1000);
+  pane.term.write(`\r\n\x1b[0m${reason} Reload the window to reattach.\r\n`);
 }
 
 function openSocket(deskId: string, pane: Pane): void {
@@ -46,15 +91,59 @@ function openSocket(deskId: string, pane: Pane): void {
   );
   socket.binaryType = "arraybuffer";
   pane.socket = socket;
+  pane.ready = false;
+  let streamOffset = 0n;
+  let replay = false;
   socket.onopen = () => {
+    if (pane.disposed || pane.socket !== socket) return;
     socket.send(JSON.stringify({ bearer: current.bearer }));
-    sendResize(pane);
   };
   socket.onmessage = (message) => {
+    if (pane.disposed || pane.socket !== socket) return;
     if (typeof message.data === "string") {
       const frame = JSON.parse(message.data) as {
+        attached?: {
+          terminal_id: string;
+          offset: string;
+          replay_bytes: number;
+          cols: number;
+          rows: number;
+          windows_pty: { backend: "conpty"; buildNumber: number | null } | null;
+        };
         exited?: { reason: string; code: number | null };
       };
+      if (frame.attached) {
+        const info = frame.attached;
+        streamOffset = BigInt(info.offset);
+        if (
+          pane.terminalId !== null &&
+          (pane.terminalId !== info.terminal_id ||
+            streamOffset > pane.offset ||
+            streamOffset + BigInt(info.replay_bytes) < pane.offset)
+        ) {
+          stop(pane, "Terminal continuity was lost.");
+          return;
+        }
+        if (pane.terminalId === null) {
+          pane.terminalId = info.terminal_id;
+          pane.offset = streamOffset;
+          pane.term.options.windowsPty = info.windows_pty
+            ? {
+                backend: info.windows_pty.backend,
+                ...(info.windows_pty.buildNumber === null
+                  ? {}
+                  : { buildNumber: info.windows_pty.buildNumber }),
+              }
+            : {};
+          pane.term.resize(info.cols, info.rows);
+        }
+        replay = info.replay_bytes > 0;
+        if (!replay) {
+          pane.ready = true;
+          fitVisible(pane);
+          sendResize(pane);
+        }
+      }
       // Machine surface written into the terminal itself, never localized.
       if (frame.exited) {
         pane.term.write(
@@ -63,12 +152,36 @@ function openSocket(deskId: string, pane: Pane): void {
       }
       return;
     }
-    const bytes = new Uint8Array(message.data as ArrayBuffer);
+    const incoming = new Uint8Array(message.data as ArrayBuffer);
+    const skip = Number(
+      pane.offset > streamOffset ? pane.offset - streamOffset : 0n,
+    );
+    streamOffset += BigInt(incoming.length);
+    const bytes = incoming.subarray(skip);
+    // Bound the parser queue too; socket delivery is not parser completion.
+    if (pane.pending + bytes.length > 1024 * 1024) {
+      stop(pane, "Terminal output exceeded the display buffer.");
+      return;
+    }
+    pane.offset += BigInt(bytes.length);
     pane.bytes += bytes.length;
-    pane.term.write(bytes);
+    pane.pending += bytes.length;
+    const completingReplay = replay;
+    replay = false;
+    pane.term.write(bytes, () => {
+      pane.pending -= bytes.length;
+      if (pane.disposed || pane.socket !== socket) return;
+      if (completingReplay) {
+        pane.ready = true;
+        fitVisible(pane);
+        sendResize(pane);
+      }
+    });
   };
   socket.onclose = (closed) => {
+    if (pane.socket !== socket) return;
     pane.socket = null;
+    pane.ready = false;
     if (pane.disposed) return;
     // The daemon refusing the attachment is final; a network close while the
     // process lives is a reload path and reattaches once.
@@ -76,7 +189,8 @@ function openSocket(deskId: string, pane: Pane): void {
       dispose(deskId);
       return;
     }
-    if (pane.reconnected) return;
+    if (pane.reconnected || closed.code === 1000 || closed.code === 4001)
+      return;
     pane.reconnected = true;
     setTimeout(() => {
       if (panes.get(deskId) === pane && !pane.disposed)
@@ -95,6 +209,10 @@ function ensure(deskId: string): Pane {
   el.style.width = "100%";
   el.style.height = "100%";
   const term = new Terminal({
+    allowProposedApi: true,
+    cols: 120,
+    rows: 40,
+    rescaleOverlappingGlyphs: true,
     // xterm.js defaults to a generic courier stack at 15px.
     fontFamily: token("--font-terminal"),
     fontSize: 13,
@@ -106,10 +224,11 @@ function ensure(deskId: string): Pane {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.open(el);
+  term.loadAddon(new Unicode11Addon());
+  term.unicode.activeVersion = "11";
   // FitAddon only fits on demand; the well resizes with the window and the
   // panels around it.
-  const resize = new ResizeObserver(() => fit.fit());
+  const resize = new ResizeObserver(() => fitVisible(pane));
   resize.observe(el);
   const pane: Pane = {
     term,
@@ -120,15 +239,18 @@ function ensure(deskId: string): Pane {
     bytes: 0,
     reconnected: false,
     disposed: false,
+    opened: false,
+    ready: false,
+    terminalId: null,
+    offset: 0n,
+    pending: 0,
   };
   panes.set(deskId, pane);
   term.onData((data) => {
     send(pane, encoder.encode(data));
     useEvents().clearAttention(deskId);
   });
-  term.onResize(({ cols, rows }) =>
-    send(pane, JSON.stringify({ resize: { cols, rows } })),
-  );
+  term.onResize(() => sendResize(pane));
   openSocket(deskId, pane);
   return pane;
 }
@@ -145,7 +267,7 @@ function mount(deskId: string, slot: HTMLElement): void {
   const pane = ensure(deskId);
   evict(slot, pane);
   if (pane.el.parentElement !== slot) slot.appendChild(pane.el);
-  pane.fit.fit();
+  fitVisible(pane);
   // fit() only fires onResize when the size changed; the PTY still needs the
   // size the element was first measured at.
   sendResize(pane);

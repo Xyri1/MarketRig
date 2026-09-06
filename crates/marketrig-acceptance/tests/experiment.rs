@@ -1505,6 +1505,11 @@ mod console {
                             let _ = out.flush();
                         }
                         Some(Ok(Message::Text(text))) => {
+                            if serde_json::from_str::<serde_json::Value>(&text)
+                                .is_ok_and(|frame| frame.get("attached").is_some())
+                            {
+                                continue;
+                            }
                             let mut out = std::io::stdout();
                             let _ = write!(out, "\r\n{text}\r\n");
                             let _ = out.flush();

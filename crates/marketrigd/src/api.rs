@@ -1075,6 +1075,28 @@ async fn attached(
     use axum::extract::ws::{CloseFrame, Message};
 
     let generation = attachment.generation;
+    #[cfg(windows)]
+    let windows_pty = serde_json::json!({
+        "backend": "conpty",
+        "buildNumber": sysinfo::System::kernel_version().and_then(|v| v.parse::<u32>().ok()),
+    });
+    #[cfg(not(windows))]
+    let windows_pty = serde_json::Value::Null;
+    let info = serde_json::json!({"attached": {
+        "terminal_id": attachment.terminal_id,
+        "offset": attachment.offset.to_string(),
+        "replay_bytes": attachment.replay.len(),
+        "cols": attachment.cols,
+        "rows": attachment.rows,
+        "windows_pty": windows_pty,
+    }});
+    if socket
+        .send(Message::Text(info.to_string().into()))
+        .await
+        .is_err()
+    {
+        return;
+    }
     if !attachment.replay.is_empty() {
         let replay = std::mem::take(&mut attachment.replay);
         if socket.send(Message::Binary(replay.into())).await.is_err() {
@@ -4620,6 +4642,26 @@ async fn terminal_socket_authenticates_in_its_first_frame() {
     let mut viewer = dial_ws(&base, &path, &[("authorization", &bearer)])
         .await
         .expect("the header path attaches");
+    use futures_util::StreamExt;
+    let metadata = viewer.next().await.unwrap().unwrap();
+    assert!(
+        metadata.is_text(),
+        "attachment metadata precedes all PTY bytes"
+    );
+    let metadata: Value = serde_json::from_str(metadata.to_text().unwrap()).unwrap();
+    let info = &metadata["attached"];
+    assert!(uuid::Uuid::parse_str(info["terminal_id"].as_str().unwrap()).is_ok());
+    assert!(info["offset"].as_str().unwrap().parse::<u64>().is_ok());
+    assert!(info["replay_bytes"].as_u64().unwrap() <= 256 * 1024);
+    assert_eq!(info["cols"], 80);
+    assert_eq!(info["rows"], 24);
+    #[cfg(windows)]
+    {
+        assert_eq!(info["windows_pty"]["backend"], "conpty");
+        assert!(info["windows_pty"]["buildNumber"].as_u64().unwrap() > 0);
+    }
+    #[cfg(not(windows))]
+    assert!(info["windows_pty"].is_null());
     let mut refused = dial_ws(&base, &path, &[]).await.expect("upgrades");
     ws_send(&mut refused, first("nope")).await;
     assert_eq!(ws_closed(&mut refused).await, 4401);
@@ -4640,9 +4682,13 @@ async fn terminal_socket_authenticates_in_its_first_frame() {
             "the live viewer was closed by a refused connection"
         );
     }
-    let _newer = dial_ws(&base, &path, &[("authorization", &bearer)])
+    let mut newer = dial_ws(&base, &path, &[])
         .await
-        .expect("the header path attaches");
+        .expect("the browser path upgrades");
+    ws_send(&mut newer, first(CREDENTIAL)).await;
+    let next = newer.next().await.unwrap().unwrap();
+    let next: Value = serde_json::from_str(next.to_text().unwrap()).unwrap();
+    assert_eq!(next["attached"]["terminal_id"], info["terminal_id"]);
     assert_eq!(ws_closed(&mut viewer).await, 4001, "the viewer was live");
     served.terminals.shutdown(&desk_id);
 }

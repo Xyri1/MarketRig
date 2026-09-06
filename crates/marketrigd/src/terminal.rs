@@ -66,6 +66,10 @@ pub struct TerminalExit {
 /// One attachment generation: the ring replay, then live frames.
 pub struct Attachment {
     pub generation: u64,
+    pub terminal_id: String,
+    pub offset: u64,
+    pub cols: u16,
+    pub rows: u16,
     pub replay: Vec<u8>,
     pub frames: mpsc::UnboundedReceiver<Frame>,
     buffered: Arc<AtomicUsize>,
@@ -83,6 +87,7 @@ impl Attachment {
 /// duplicate a byte that arrives while an attachment is being installed.
 struct Sink {
     ring: VecDeque<u8>,
+    offset: u64,
     generation: u64,
     sender: Option<mpsc::UnboundedSender<Frame>>,
     buffered: Arc<AtomicUsize>,
@@ -90,6 +95,7 @@ struct Sink {
 
 impl Sink {
     fn push(&mut self, bytes: &[u8]) {
+        self.offset += bytes.len() as u64;
         self.ring.extend(bytes);
         while self.ring.len() > RING {
             let excess = self.ring.len() - RING;
@@ -119,6 +125,7 @@ impl Sink {
 }
 
 struct Terminal {
+    id: String,
     master: Mutex<Box<dyn MasterPty + Send>>,
     size: Mutex<PtySize>,
     /// The bounded writer channel; dropping it stops input and EOFs the slave.
@@ -205,6 +212,7 @@ impl Manager {
 
         let sink = Arc::new(Mutex::new(Sink {
             ring: VecDeque::new(),
+            offset: 0,
             generation: 0,
             sender: None,
             buffered: Arc::new(AtomicUsize::new(0)),
@@ -302,6 +310,7 @@ impl Manager {
         self.terminals.lock().expect("terminals").insert(
             desk_id.to_string(),
             Arc::new(Terminal {
+                id: uuid::Uuid::now_v7().to_string(),
                 master: Mutex::new(pair.master),
                 size: Mutex::new(size),
                 input: Mutex::new(Some(input_tx)),
@@ -328,6 +337,7 @@ impl Manager {
     /// its input stops counting, and this one gets the ring then live bytes.
     pub fn attach(&self, desk_id: &str) -> Option<Attachment> {
         let terminal = self.get(desk_id)?;
+        let size = *terminal.size.lock().expect("size");
         let mut sink = terminal
             .sink
             .lock()
@@ -341,6 +351,10 @@ impl Manager {
         sink.buffered = buffered.clone();
         Some(Attachment {
             generation: sink.generation,
+            terminal_id: terminal.id.clone(),
+            offset: sink.offset - sink.ring.len() as u64,
+            cols: size.cols,
+            rows: size.rows,
             replay: sink.ring.iter().copied().collect(),
             frames: rx,
             buffered,
@@ -496,6 +510,27 @@ impl Drop for Manager {
     fn drop(&mut self) {
         self.shutdown_all();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn replay_offsets_survive_ring_truncation() {
+    let mut sink = Sink {
+        ring: VecDeque::new(),
+        offset: 0,
+        generation: 0,
+        sender: None,
+        buffered: Arc::new(AtomicUsize::new(0)),
+    };
+    sink.push(&vec![b'a'; RING + 17]);
+    assert_eq!(sink.offset - sink.ring.len() as u64, 17);
+    sink.push(b"tail");
+    assert_eq!(sink.offset - sink.ring.len() as u64, 21);
+    assert_eq!(sink.ring.len(), RING);
+    assert_eq!(
+        sink.ring.iter().rev().take(4).copied().collect::<Vec<_>>(),
+        b"liat"
+    );
 }
 
 // The PTY checks script a Unix shell; the Windows paths are compiled here and

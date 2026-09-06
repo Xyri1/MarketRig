@@ -5,6 +5,8 @@ vi.mock("@tauri-apps/api/core", async () => ({
 }));
 vi.mock("@xterm/xterm", () => import("../test/fakeXterm"));
 vi.mock("@xterm/addon-fit", () => import("../test/fakeXterm"));
+vi.mock("@xterm/addon-unicode11", () => import("../test/fakeXterm"));
+vi.mock("@xterm/addon-webgl", () => import("../test/fakeXterm"));
 
 import { nextTick } from "vue";
 import { installFakeDaemon, installFakeWebSocket } from "../test/fakeDaemon";
