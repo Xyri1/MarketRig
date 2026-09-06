@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/plugin-autostart", () => ({
 }));
 
 import { flushPromises } from "@vue/test-utils";
+import { enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { installFakeDaemon } from "../test/fakeDaemon";
 import { client } from "../client/client.gen";
 import { mountWithI18n } from "../test/mountWithI18n";
@@ -24,20 +25,19 @@ const policy = {
 };
 
 let put: string | null = null;
+let runtimes: unknown[] = [];
 
 beforeEach(() => {
   put = null;
+  vi.mocked(enable).mockClear();
+  vi.mocked(isEnabled).mockResolvedValue(false);
+  runtimes = [
+    { runtime: "codex", state: "AVAILABLE", version: "1.0.0" },
+    { runtime: "claude", state: "UNAVAILABLE" },
+  ];
   client.setConfig({ baseUrl: "http://127.0.0.1:7100" });
   installFakeDaemon({
-    "GET /runtimes": () => ({
-      status: 200,
-      body: {
-        runtimes: [
-          { runtime: "codex", state: "AVAILABLE", version: "1.0.0" },
-          { runtime: "claude", state: "UNAVAILABLE" },
-        ],
-      },
-    }),
+    "GET /runtimes": () => ({ status: 200, body: { runtimes } }),
     "GET /memory": () => ({
       status: 200,
       body: {
@@ -94,4 +94,19 @@ it("sends only the changed policy field", async () => {
   await flushPromises();
 
   expect(put).toBe('{"paper_order_policy":"ALWAYS_ALLOW"}');
+});
+
+it("turns autostart on once when no runtime is AVAILABLE yet", async () => {
+  runtimes = [{ runtime: "codex", state: "UNAVAILABLE" }];
+  mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  expect(enable).toHaveBeenCalledTimes(1);
+});
+
+it("leaves autostart alone once a runtime is AVAILABLE", async () => {
+  mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  expect(enable).not.toHaveBeenCalled();
 });

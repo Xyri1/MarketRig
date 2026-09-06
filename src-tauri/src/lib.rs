@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 /// The endpoint file the daemon writes (root §4.3); `credential` is the bearer.
 #[derive(Deserialize)]
@@ -188,9 +190,10 @@ pub fn spawn_and_wait(
     }
 }
 
-/// The tray's pending count. Slice 008 builds the tray that reads it.
+/// The tray's disabled "n pending approvals" line, held so `set_tray_pending`
+/// can retext it. `None` until `setup` builds the tray.
 #[derive(Default)]
-pub struct TrayPending(pub Mutex<u32>);
+pub struct TrayPending(pub Mutex<Option<MenuItem<tauri::Wry>>>);
 
 pub fn pending_label(n: u32) -> String {
     format!("{n} pending approvals")
@@ -225,10 +228,19 @@ fn start_daemon() -> Result<Endpoint, String> {
 }
 
 #[tauri::command]
-fn set_tray_pending(n: u32, pending: State<'_, TrayPending>) {
-    *pending.0.lock().unwrap() = n;
-    // slice 008: tray — update the menu line to `pending_label(n)` and the
-    // macOS title / Windows tooltip.
+fn set_tray_pending(n: u32, app: AppHandle, pending: State<'_, TrayPending>) -> Result<(), String> {
+    let label = pending_label(n);
+    if let Some(item) = pending.0.lock().unwrap().as_ref() {
+        item.set_text(&label).map_err(|e| e.to_string())?;
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        #[cfg(target_os = "macos")]
+        tray.set_title(if n > 0 { Some(n.to_string()) } else { None })
+            .map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        tray.set_tooltip(Some(&label)).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -295,6 +307,13 @@ pub fn run() {
             set_tray_pending,
             exit_app
         ])
+        // Close hides the window; the tray keeps the app reachable (§5).
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 fit_to_work_area(&window)?;
@@ -302,11 +321,51 @@ pub fn run() {
                     window.hide()?;
                 }
             }
-            // slice 008: tray, close-hides, and the prevented ExitRequested.
+            let open = MenuItem::with_id(app, "open", "Open MarketRig", true, None::<&str>)?;
+            let pending = MenuItem::with_id(app, "pending", pending_label(0), false, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit MarketRig", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open, &pending, &quit])?;
+            *app.state::<TrayPending>().0.lock().unwrap() = Some(pending);
+            let mut tray = TrayIconBuilder::with_id("main")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => show_main(app),
+                    // The webview owns the quit sequence (`POST /quit`, poll,
+                    // `exit_app`); the tray only asks for it.
+                    "quit" => {
+                        let _ = app.emit_to("main", "marketrig://quit", ());
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main(tray.app_handle());
+                    }
+                });
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            tray.build(app)?;
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the desktop shell failed to start");
+        .build(tauri::generate_context!())
+        .expect("the desktop shell failed to start")
+        // A hidden window is not a reason to exit; `exit_app` carries
+        // `code: Some(0)` and so is never prevented here.
+        .run(|_app, event| {
+            if let RunEvent::ExitRequested {
+                api, code: None, ..
+            } = event
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]

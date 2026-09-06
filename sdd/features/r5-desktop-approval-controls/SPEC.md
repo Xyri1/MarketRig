@@ -131,7 +131,7 @@ Scenarios:
 ```text
 read_endpoint()          -> {port, bearer, daemon_uuid} | null      reads <data root>/runtime/endpoint.json
 start_daemon()           -> {port, bearer, daemon_uuid}             spawns <app dir>/marketrigd detached; polls the file every 250 ms for a new daemon_uuid, 30 s; Err(DAEMON_START_FAILED {stderr tail}) on exit or timeout
-set_tray_pending(n)      -> ()                                       menu line "n pending approvals" (disabled), tray title on macOS, tooltip on Windows
+set_tray_pending(n)      -> () | Err(text)                            menu line "n pending approvals" (disabled), tray title on macOS, tooltip on Windows
 exit_app()               -> never returns                            app.exit(0)
 ```
 

@@ -140,6 +140,16 @@ onUnmounted(() => off.forEach((stop) => stop()));
 
 onMounted(async () => {
   await Promise.all([loadRuntimes(), loadMemory(), loadPolicies()]);
+  // First launch — no runtime discovered yet — turns autostart on once.
+  // ponytail: "first launch" is read as "no AVAILABLE runtime", so an operator
+  // who disables autostart before discovering one gets it re-enabled next
+  // launch; the plugin's own state is the setting (slice 008 §2).
+  if (
+    !rows.value.some((row) => row.state === "AVAILABLE") &&
+    !(await isEnabled())
+  ) {
+    await enable();
+  }
   autostart.value = await isEnabled();
 });
 </script>
