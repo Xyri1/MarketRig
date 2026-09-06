@@ -203,6 +203,9 @@ fn read_endpoint() -> Result<Option<Endpoint>, String> {
 
 #[tauri::command]
 fn start_daemon() -> Result<Endpoint, String> {
+    if std::env::var_os("MARKETRIG_DEV_SUPERVISED").is_some() {
+        return Err("DAEMON_START_FAILED: the dev runner owns the daemon; restart pnpm dev.".into());
+    }
     let root = data_root()?;
     std::fs::create_dir_all(root.join("runtime"))
         .map_err(|e| format!("DAEMON_START_FAILED: {e}"))?;

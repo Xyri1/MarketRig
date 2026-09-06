@@ -220,6 +220,8 @@ The feature docs settle the pending-approval rows and their events before slicin
 
 **Corrective slice (2026-09-06):** [009 — terminal rendering](slices/009-r5-terminal-rendering.md) is implemented and frozen: measurable per-desk rendering, WebGL fallback, Unicode 11 widths, ConPTY metadata, replay deduplication/gap detection, and bounded parser writes. Frontend checks, Windows terminal/socket tests, production frontend build, and scoped Clippy pass. Native Windows/macOS visual confirmation remains outstanding; this does not complete slice 008.
 
+**Corrective slice (2026-09-06):** [010 — owned development stack](slices/010-r5-dev-lifecycle.md) is Active: `pnpm dev` builds and supervises the daemon, Vite, and Tauri under scratch data.
+
 Dependencies: Milestone R4.
 
 ## Milestone R6 — Crypto, event triggers, localization, and packaging

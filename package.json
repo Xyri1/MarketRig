@@ -10,7 +10,7 @@
   "scripts": {
     "generate": "cargo run -q -p marketrigd -- --openapi > openapi.json && openapi-ts",
     "check": "prettier --check \"*.{ts,js,html,json}\" \"src/**/*.{ts,vue,css,json}\" && eslint . && vue-tsc --noEmit && vitest run",
-    "dev": "tauri dev",
+    "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs"
   },
   "dependencies": {

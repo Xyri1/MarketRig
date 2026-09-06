@@ -105,6 +105,15 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
     rt.block_on(async {
         let listener = tokio::net::TcpListener::from_std(std_listener)?;
         let (quit_tx, mut quit_rx) = tokio::sync::mpsc::channel::<()>(1);
+        if std::env::args().any(|arg| arg == "--exit-on-stdin-close") {
+            let quit = quit_tx.clone();
+            // A pipe owned by the dev runner: its closure (including a runner
+            // crash) enters the same shutdown path as Quit, on both platforms.
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+                let _ = quit.blocking_send(());
+            });
+        }
         let (shut_tx, shut_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(async move {
             tokio::select! {
