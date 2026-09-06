@@ -19,4 +19,9 @@ const wdio =
   process.env.MARKETRIG_SMOKE_WIPE === '1'
     ? ['--features', 'wdio', ...(win ? ['--no-bundle'] : ['--bundles', 'app'])]
     : [];
-execFileSync(win ? 'pnpm.cmd' : 'pnpm', ['exec', 'tauri', 'build', ...wdio], { stdio: 'inherit' });
+// The CLI's own node entry, not `pnpm exec`: a Windows box whose pnpm is the
+// standalone `pnpm.exe` has no `pnpm.cmd`, and `execFile` cannot run a `.cmd`
+// without a shell anyway.
+execFileSync(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'build', ...wdio], {
+  stdio: 'inherit',
+});

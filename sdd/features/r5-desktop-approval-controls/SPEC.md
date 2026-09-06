@@ -249,7 +249,7 @@ Vitest with Vue Test Utils and jsdom, against a fake `fetch` and a fake `WebSock
 
 ### 7.3 The packaged smoke
 
-`pnpm smoke`, operator-run, refuses to start unless `MARKETRIG_SMOKE_WIPE=1`; it then quits any running MarketRig, deletes the per-user data root, the log root, and `~/.marketrig`, and drives the bundled application (the workspace `target/release/bundle/…`, because `src-tauri` is a workspace member) through `@wdio/tauri-service` in `driverProvider: 'embedded'` mode on both platforms, one spec:
+`pnpm smoke`, operator-run, refuses to start unless `MARKETRIG_SMOKE_WIPE=1`; it then quits any running MarketRig, deletes the per-user data root, the log root, and `~/.marketrig`, and drives the packaged application (`src-tauri` is a workspace member, so its artifacts land in the workspace `target/`: `target/release/bundle/macos/MarketRig.app/…` on macOS, and the bare `target/release/marketrig-desktop.exe` on Windows, whose build passes `--no-bundle`) through `@wdio/tauri-service` in `driverProvider: 'embedded'` mode on both platforms, one spec:
 
 1. the window appears; the daemon endpoint file exists and health answers with the bearer it carries; Settings is the auto-selected tab when `GET /runtimes` reports no `AVAILABLE` runtime (a first-launch machine), and is selected by the spec otherwise — the daemon discovers a real `codex` or `claude` on the login PATH at start, so an operator's machine usually is not a first launch;
 2. register `runtime-standin` (built by `cargo build -p marketrig-acceptance`) as `codex` through the explicit-path field; create desk `smoke`; *Start*; the well shows the stand-in's banner;
