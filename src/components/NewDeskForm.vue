@@ -59,7 +59,11 @@ async function submit(): Promise<void> {
       :aria-label="t('desks.name')"
     />
     <SelectRoot v-model="runtime">
-      <SelectTrigger :class="button" :aria-label="t('desks.runtime')">
+      <SelectTrigger
+        :class="button"
+        :aria-label="t('desks.runtime')"
+        data-testid="new-desk-runtime"
+      >
         <SelectValue class="terminal" />
         <span aria-hidden="true">▾</span>
       </SelectTrigger>

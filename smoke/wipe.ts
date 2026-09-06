@@ -32,7 +32,7 @@ export function logDir(): string {
 }
 
 /** Every process the smoke owns; `running()` is also step 5's assertion. */
-const PROCESSES = ["MarketRig", "marketrigd", "runtime-standin"];
+const PROCESSES = ["marketrig-desktop", "marketrigd", "runtime-standin"];
 
 export function running(): string[] {
   return PROCESSES.filter((name) => {
@@ -71,7 +71,15 @@ export function wipe(): void {
       // Nothing of that name was running, which is the wanted state.
     }
   }
-  for (const dir of [dataRoot(), logDir(), join(homedir(), ".marketrig")]) {
+  // The daemon's own log root sits beside the shell's on macOS and inside the
+  // data root on Windows (`Roots::resolve`).
+  const daemonLogs = join(homedir(), "Library", "Logs", "MarketRig");
+  for (const dir of [
+    dataRoot(),
+    logDir(),
+    daemonLogs,
+    join(homedir(), ".marketrig"),
+  ]) {
     rmSync(dir, { recursive: true, force: true });
   }
 }

@@ -24,7 +24,7 @@ const target = resolve(process.env.CARGO_TARGET_DIR ?? "target");
 const release = join(target, "release");
 
 export const application = win
-  ? join(release, "MarketRig.exe")
+  ? join(release, "marketrig-desktop.exe")
   : join(
       release,
       "bundle",
@@ -32,7 +32,7 @@ export const application = win
       "MarketRig.app",
       "Contents",
       "MacOS",
-      "MarketRig",
+      "marketrig-desktop",
     );
 
 /** `runtime-standin`, the desk's runtime for the whole run (R3 SPEC §9.1). */

@@ -13,5 +13,10 @@ for (const name of names) {
 }
 // The packaged smoke needs the embedded WebDriver server compiled in; every
 // other build is the shipped artifact and never carries it (feature SPEC §7.3).
-const wdio = process.env.MARKETRIG_SMOKE_WIPE === '1' ? ['--features', 'wdio'] : [];
+// The smoke drives the .app on macOS and the bare exe on Windows, so the dmg
+// and nsis steps are skipped (bundle_dmg.sh also needs Finder).
+const wdio =
+  process.env.MARKETRIG_SMOKE_WIPE === '1'
+    ? ['--features', 'wdio', ...(win ? ['--no-bundle'] : ['--bundles', 'app'])]
+    : [];
 execFileSync(win ? 'pnpm.cmd' : 'pnpm', ['exec', 'tauri', 'build', ...wdio], { stdio: 'inherit' });

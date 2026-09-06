@@ -90,6 +90,13 @@ describe("the packaged desktop", () => {
   let deskId = "";
   let quit = false;
 
+  before(async () => {
+    // Without `tauri-plugin-wdio` the service's focus check before every find
+    // and click waits 5 s for a command that never answers; an explicit
+    // window switch is what turns that check off (the service's own rule).
+    await browser.tauri.switchWindow("main");
+  });
+
   after(async () => {
     // Step 5 quits the application, so the embedded WebDriver server dies with
     // it and WebdriverIO's own teardown DELETE would fail — a failure that can
@@ -101,33 +108,96 @@ describe("the packaged desktop", () => {
 
   it("1 — shows the window on Settings with the daemon answering", async () => {
     await $('[data-testid="tab-settings"]').waitForExist({ timeout: 90_000 });
-    await until(
-      "Settings to be the selected tab",
-      async () =>
-        (await $('[data-testid="tab-settings"]').getAttribute("data-state")) ===
-        "active",
-    );
     await keepTheWellInTheDom();
 
     expect(existsSync(endpointPath())).toBe(true);
     const health = await api<{ daemon_uuid: string }>("GET", "/health");
     expect(health.status).toBe(200);
+
+    // The daemon discovers a real `codex` or `claude` on the login PATH at
+    // start (R3 SPEC §2), so an operator's machine is rarely a first launch.
+    // Settings is asserted as the auto-selected tab only when it is one; a
+    // machine with a real CLI selects it by hand and step 2 overrides `codex`
+    // with the stand-in through the explicit-path field.
+    const found = await api<{ runtimes: { state: string }[] }>(
+      "GET",
+      "/runtimes",
+    );
+    const firstLaunch = !found.body.runtimes.some(
+      (row) => row.state === "AVAILABLE",
+    );
+    const settings = $('[data-testid="tab-settings"]');
+    if (firstLaunch) {
+      await until(
+        "Settings to be the selected tab",
+        async () => (await settings.getAttribute("data-state")) === "active",
+      );
+    } else {
+      await settings.click();
+    }
+    await until(
+      "the Settings tab to show",
+      async () => await $('[data-testid="runtime-path-codex"]').isExisting(),
+    );
   });
 
   it("2 — registers the stand-in runtime, starts a desk, and shows its banner", async () => {
     await $('[data-testid="runtime-path-codex"]').setValue(standin);
     await $('[data-testid="runtime-submit-codex"]').click();
-    await until("codex to be AVAILABLE", async () => {
+    // The real `codex` may already be AVAILABLE, so the wait is for the
+    // stand-in's path to be the one registered, not for the state alone.
+    await until("the stand-in to be codex", async () => {
       const { body } = await api<{
-        runtimes: { runtime: string; state: string }[];
+        runtimes: { runtime: string; state: string; executable_path: string }[];
       }>("GET", "/runtimes");
       return body.runtimes.some(
-        (row) => row.runtime === "codex" && row.state === "AVAILABLE",
+        (row) =>
+          row.runtime === "codex" &&
+          row.state === "AVAILABLE" &&
+          row.executable_path === standin,
       );
     });
 
     await $('[data-testid="new-desk"]').click();
     await $('[data-testid="new-desk-name"]').setValue(DESK);
+    // A machine with a real `claude` offers two runtimes; the desk is the
+    // stand-in's, so `codex` is picked when the trigger shows anything else.
+    const runtime = $('[data-testid="new-desk-runtime"]');
+    if (!(await runtime.getText()).includes("codex")) {
+      // A WebDriver click opens the popover and the pointer-up closes it, so
+      // the smoke sends what Reka `Select` listens to: pointerdown on the
+      // trigger, pointerup on the item.
+      await browser.execute(() => {
+        const down = new PointerEvent("pointerdown", {
+          bubbles: true,
+          button: 0,
+          pointerType: "mouse",
+        });
+        document
+          .querySelector('[data-testid="new-desk-runtime"]')
+          ?.dispatchEvent(down);
+      });
+      await until(
+        "the runtime list to open",
+        async () => (await $$('[role="option"]').length) > 0,
+        10_000,
+      );
+      await browser.execute(() => {
+        const up = new PointerEvent("pointerup", {
+          bubbles: true,
+          button: 0,
+          pointerType: "mouse",
+        });
+        [...document.querySelectorAll('[role="option"]')]
+          .find((o) => o.textContent?.trim() === "codex")
+          ?.dispatchEvent(up);
+      });
+      await until(
+        "the runtime to be codex",
+        async () => (await runtime.getText()).includes("codex"),
+        10_000,
+      );
+    }
     await $('[data-testid="new-desk-submit"]').click();
     await until("the desk to be READY", async () => {
       const { body } = await api<{
@@ -230,10 +300,30 @@ describe("the packaged desktop", () => {
     );
 
     await $('[data-testid="approval-approve"]').click();
-    await $('[data-testid="tab-desk"]').click();
-    await until("the filled position in the Desk tab", async () =>
-      (await textOf('[data-testid="desk-positions"]')).includes("AAPL.XNAS"),
+    await until("the buy to be APPROVED", async () => {
+      const { body } = await api<{
+        actions: { action_id: string; approval: string }[];
+      }>("GET", `/desks/${deskId}/history/actions`);
+      return body.actions.some(
+        (row) => row.action_id === "smoke-buy" && row.approval === "APPROVED",
+      );
+    });
+    // The smoke trades on the real feed: off-hours it has no price, and the
+    // sandbox's own outcome for a market order is then MARKET_PRICE_UNAVAILABLE.
+    // The position is required only while the feed quotes the instrument.
+    const quotes = await api<{ quotes: { health: string }[] }>(
+      "GET",
+      `/desks/${deskId}/market/quotes`,
     );
+    const priced = quotes.body.quotes.some((q) => q.health !== "UNAVAILABLE");
+    await $('[data-testid="tab-desk"]').click();
+    if (priced) {
+      await until("the filled position in the Desk tab", async () =>
+        (await textOf('[data-testid="desk-positions"]')).includes("AAPL.XNAS"),
+      );
+    } else {
+      console.log("smoke: the feed has no price; the position is not asserted");
+    }
 
     const sell = await api("POST", `/desks/${deskId}/orders`, {
       action_id: "smoke-deny",
