@@ -64,11 +64,7 @@ function lastDectcemHidden(bytes: Uint8Array): boolean | null {
 }
 
 /** Writes PTY bytes into xterm; on ConPTY parks the caret until output settles. */
-function writeOutput(
-  pane: Pane,
-  bytes: Uint8Array,
-  done?: () => void,
-): void {
+function writeOutput(pane: Pane, bytes: Uint8Array, done?: () => void): void {
   if (!pane.conpty) {
     pane.term.write(bytes, done);
     return;
