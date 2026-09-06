@@ -17,7 +17,12 @@ async function refetch(): Promise<void> {
   for (const row of rows) {
     byDesk.set(row.desk_id, (byDesk.get(row.desk_id) ?? 0) + 1);
   }
-  await invoke("set_tray_pending", { n: rows.length });
+  // A tray that cannot be retexted is not a reason to fail the listing.
+  try {
+    await invoke("set_tray_pending", { n: rows.length });
+  } catch {
+    // Nothing to do: the listing is right and the tray simply lags.
+  }
 }
 
 /**

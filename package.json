@@ -9,7 +9,7 @@
   },
   "scripts": {
     "generate": "cargo run -q -p marketrigd -- --openapi > openapi.json && openapi-ts",
-    "check": "prettier --check \"*.{ts,js,html,json}\" \"smoke/**/*.ts\" \"src/**/*.{ts,vue,css,json}\" && eslint . && vue-tsc --noEmit && vitest run",
+    "check": "prettier --check \"*.{ts,js,html,json}\" \"smoke/**/*.ts\" \"src/**/*.{ts,vue,css,json}\" && eslint . && vue-tsc --noEmit && tsc -p smoke --noEmit && vitest run",
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
     "smoke": "wdio run wdio.conf.ts"

@@ -278,6 +278,11 @@ fn show_main(app: &AppHandle) {
 }
 
 pub fn run() {
+    // The smoke build only (feature SPEC §7.3); a shipped build never prints this.
+    #[cfg(feature = "wdio")]
+    eprintln!(
+        "marketrig-desktop: built with the wdio feature — an unauthenticated WebDriver server is listening"
+    );
     let builder = tauri::Builder::default();
     // The embedded WebDriver server the packaged smoke drives (feature SPEC
     // §7.3). It listens on loopback without authentication, so it exists only
@@ -327,6 +332,7 @@ pub fn run() {
                     window.hide()?;
                 }
             }
+            // ponytail: English tray labels in R5; R6's `set_locale` rebuilds them.
             let open = MenuItem::with_id(app, "open", "Open MarketRig", true, None::<&str>)?;
             let pending = MenuItem::with_id(app, "pending", pending_label(0), false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit MarketRig", true, None::<&str>)?;

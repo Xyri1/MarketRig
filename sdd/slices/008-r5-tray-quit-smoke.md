@@ -14,9 +14,9 @@ Verified against npm, crates.io, and the service's own packaged documentation on
 
 | Dependency | Pin | Used by | Notes |
 | --- | --- | --- | --- |
-| `@wdio/cli` | `9.31.5` | smoke (dev) | with `@wdio/local-runner`, `@wdio/mocha-framework`, `@wdio/globals`, and `webdriverio` on the same line. |
+| `@wdio/cli` | `9.31.5` | smoke (dev) | with `@wdio/local-runner`, `@wdio/mocha-framework`, `webdriverio` on the same line, `@wdio/globals` at `9.31.3` (its line stops there). |
 | `@wdio/spec-reporter` | `9.31.2` | smoke (dev) | the reporter's line stops at 9.31.2; it does not publish 9.31.5. |
-| `@types/mocha`, `@types/node` | `10.0.10`, `26.4.1` | smoke (dev) | the spec is type-checked by its own `smoke/tsconfig.json`, outside the root `vue-tsc` program. |
+| `@types/mocha`, `@types/node` | `10.0.10`, `26.4.1` | smoke (dev) | the spec is type-checked by its own `smoke/tsconfig.json` (`tsc -p smoke --noEmit`, part of `pnpm check`), outside the root `vue-tsc` program. |
 | `@wdio/tauri-service` | `1.3.0` | smoke (dev) | `driverProvider: 'embedded'` on both platforms — macOS has no WKWebView WebDriver and the CrabNebula one is paid, and one mode everywhere is one config. Peer `webdriverio ^9`. |
 | `tauri-plugin-wdio-webdriver` | `=1.3.0` | `marketrig-desktop` (optional) | the embedded provider *is* this crate: the service spawns the app with `TAURI_WEBDRIVER_PORT` and polls the server the plugin's `init()` starts. Behind the `wdio` Cargo feature, because `init()` opens an unauthenticated W3C WebDriver server on loopback and must never ship. |
 

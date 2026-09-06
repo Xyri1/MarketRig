@@ -257,6 +257,22 @@ describe("the packaged desktop", () => {
     expect(code).not.toBe(null);
 
     expect(await browser.getWindowHandles()).toContain("main");
+    await until(
+      "the window to be visible again",
+      async () =>
+        browser.execute(() =>
+          (
+            window as unknown as {
+              __TAURI_INTERNALS__: {
+                invoke: (cmd: string, args: unknown) => Promise<boolean>;
+              };
+            }
+          ).__TAURI_INTERNALS__.invoke("plugin:window|is_visible", {
+            label: "main",
+          }),
+        ),
+      10_000,
+    );
     expect(
       await browser.execute(
         () =>
@@ -311,18 +327,33 @@ describe("the packaged desktop", () => {
     // The smoke trades on the real feed: off-hours it has no price, and the
     // sandbox's own outcome for a market order is then MARKET_PRICE_UNAVAILABLE.
     // The position is required only while the feed quotes the instrument.
-    const quotes = await api<{ quotes: { health: string }[] }>(
-      "GET",
-      `/desks/${deskId}/market/quotes`,
+    const quotes = await api<{
+      quotes: { instrument_id: string; health: string }[];
+    }>("GET", `/desks/${deskId}/market/quotes`);
+    const priced = quotes.body.quotes.some(
+      (q) => q.instrument_id === "AAPL.XNAS" && q.health !== "UNAVAILABLE",
     );
-    const priced = quotes.body.quotes.some((q) => q.health !== "UNAVAILABLE");
     await $('[data-testid="tab-desk"]').click();
     if (priced) {
       await until("the filled position in the Desk tab", async () =>
         (await textOf('[data-testid="desk-positions"]')).includes("AAPL.XNAS"),
       );
     } else {
-      console.log("smoke: the feed has no price; the position is not asserted");
+      console.log(
+        "smoke: AAPL.XNAS has no price; the sandbox's denial is the outcome",
+      );
+      await until(
+        "the sandbox's own MARKET_PRICE_UNAVAILABLE outcome",
+        async () => {
+          const { body } = await api<{
+            actions: { action_id: string; outcome?: { status?: string } }[];
+          }>("GET", `/desks/${deskId}/history/actions`);
+          return body.actions.some(
+            (row) =>
+              row.action_id === "smoke-buy" && row.outcome?.status === "DENIED",
+          );
+        },
+      );
     }
 
     const sell = await api("POST", `/desks/${deskId}/orders`, {

@@ -12,6 +12,8 @@ const win = process.platform === "win32";
 
 /** The daemon's data root — `Roots::resolve` and the shell's `data_root()`. */
 export function dataRoot(): string {
+  if (win && !process.env.LOCALAPPDATA)
+    throw new Error("LOCALAPPDATA is not set: the roots would be relative");
   return win
     ? join(process.env.LOCALAPPDATA ?? "", "MarketRig")
     : join(homedir(), "Library", "Application Support", "MarketRig");
