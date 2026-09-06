@@ -4,7 +4,7 @@ This roadmap orders work by the smallest end-to-end evidence needed to validate 
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0 through R4 are delivered; Milestone R5 is design complete, its slices 006 (the daemon's approval policies and events tail) and 007 (the Tauri shell and the frontend control plane) are frozen, and slice 008 is next.
+Milestones R0 through R5 are delivered; Milestone R6's design is next.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -56,7 +56,7 @@ Expected outcomes:
 - the realized-P&L signal: a closed position cycle persists one fact and durably queues one evaluation prompt (delivery arrives with the runtimes in R3);
 - the MCP adapter: concretely enumerated awareness resources — quotes, book, positions, open orders, instruments — plus typed submit and cancel order tools, validated server-side, with no subscriptions and no completion (per D4, D63);
 - the CLI's trading read surface over durable records: `history` for orders, individual fills, and closed position cycles exactly as the sandbox produced them; live positions, open orders, and instrument discovery belong to the MCP plane (per D4);
-- paper-order approval fixed at **Always allow**; the policy and its surfaces arrive in R5.
+- paper-order approval fixed at **Always allow**; the policy and its surfaces arrived with R5 (per D82).
 
 Evidence of completion:
 
@@ -93,7 +93,7 @@ Expected outcomes:
 - trigger code as an approved immutable snapshot, executed without a command shell under native process-group containment (per D35, D41);
 - firing-time brief and context captured as immutable provenance;
 - result persistence before delivery, and durable at-most-once handoff;
-- trigger-code approval fixed at **Always allow**; the policy and its surfaces arrive in R5.
+- trigger-code approval fixed at **Always allow**; the policy and its surfaces arrived with R5, after which the installed default gates code (per D82).
 
 Evidence of completion:
 
@@ -182,9 +182,9 @@ Dependencies: Milestone R3.
 
 ## Milestone R5 — Desktop and approval controls
 
-This milestone realizes the choices recorded per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D70, D71, and D72.
+**Delivered 2026-09-06** — designed in [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC) and implemented in [`slices/006-r5-approval-policies.md`](slices/006-r5-approval-policies.md) (2026-09-05, the daemon and CLI: policies, approvals, the events tail, the sockets, `--openapi`), [`slices/007-r5-shell-control-plane.md`](slices/007-r5-shell-control-plane.md) (2026-09-05, the `marketrig-desktop` crate, the root Vue frontend over the generated client, CI's `frontend` job, REST CORS on the origin allowlist), and [`slices/008-r5-tray-quit-smoke.md`](slices/008-r5-tray-quit-smoke.md) (2026-09-06, close-hides, the tray, Quit, autostart, and the packaged smoke), all frozen. Its nine module checks, the gate's G38–G41, and the static and frontend checks are green on macOS and Windows CI (run on commit 1fab454); `pnpm smoke` is 5/5 once per platform from a wiped per-user root — `target/acceptance/smoke-darwin-2026-09-06T10-20-13-770/` (10 s) and `target/acceptance/smoke-win32-2026-09-06T10-51-25-019/` (36 s), each bundle holding its WebdriverIO report and the shell's own log.
 
-**Design complete 2026-09-04** — [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC with gate G38–G41 and the packaged smoke); slice 006 delivered and frozen 2026-09-05 (daemon and CLI: policies, approvals, events tail, sockets, `--openapi`; gate G38–G41); slice 007 delivered and frozen 2026-09-05 (the `marketrig-desktop` crate, the root Vue frontend over the generated client, CI's `frontend` job, REST CORS on the origin allowlist); slice 008 not started.
+This milestone realizes the choices recorded per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D70, D71, and D72, and settles their mechanics as D82.
 
 **Goal:** Give the user a control plane over desks that are already running.
 
@@ -207,6 +207,8 @@ a desk's real terminal attaches, survives a tray hide and reopen, and keeps work
 -> a denied trigger-code approval leaves no action behind
 -> the packaged application does all of the above from a freshly wiped per-user root
 ```
+
+**Produced** by the gate's G38–G41 on both platforms, by the frontend's own checks, and by the packaged smoke. The gate proved the policy resource with `STEER` refused, the event tail read live and reconnected gaplessly with a slow consumer closed `4408`, a trigger whose pending code never became due through enable, disable, or an elapsed occurrence and whose denial left no firing, execution, or prompt, an order that reached no sandbox while pending, replayed idempotently, refused its cancel, and after approval filled, closed a cycle, and queued its evaluation exactly as an ungated one, and the three sockets under a foreign origin, a wrong first frame, and a hard kill after which both pending records were still decidable. The smoke drove the packaged application through all five steps on each platform: a first launch that found no daemon and started one, the stand-in runtime registered by path through Settings, a desk created and its terminal attached, the window hidden and a second launch focusing the same warm webview with the bytes written meanwhile, a paper order approved and another denied from the Approvals tab with the desk's pending badge following, and Quit ending the managed processes, the daemon, and the shell. Close-hides itself stays confirmed by hand, because a WebDriver close destroys the window rather than requesting one.
 
 **Why here:** the control plane is cheapest to build once the daemon's surface has stopped moving, and nothing before it needs a window — the loop is already proven headless by R4; approvals ride with it because the approval boundary is worth little until something can present the prompt.
 

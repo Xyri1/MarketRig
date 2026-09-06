@@ -1,7 +1,7 @@
 # R5 — Desktop and approval controls: Feature PRD
 
 **Milestone:** [R5](../../ROADMAP.md#milestone-r5--desktop-and-approval-controls)
-**Status:** Design complete — PRD, DECISIONS, and SPEC written 2026-09-04; implementation not started
+**Status:** Design complete — PRD, DECISIONS, and SPEC written 2026-09-04; delivered 2026-09-06 through slices 006, 007, and 008 (all frozen) and merged into the root set as D82
 
 This feature designs Milestone R5: the user's control plane over desks that are already running, and the approval boundary the daemon has carried as a fixed **Always allow** since R1 and R2. It refines `sdd/SPEC.md` §4.3, §4.4, §6.5, §8.3, §11.2, §12.3, §13.2, §14, §15, and §17 and invents nothing beyond them.
 
