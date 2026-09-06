@@ -55,6 +55,7 @@ onMounted(async () => {
           v-for="name in TABS"
           :key="name"
           class="px-1 py-1 data-[state=active]:text-accent"
+          :data-testid="`tab-${name}`"
           :value="name"
         >
           {{ collapsed ? t(short[name]) : t(label[name]) }}

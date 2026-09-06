@@ -20,3 +20,9 @@ tauri-plugin-autostart = { workspace = true }
 tauri-plugin-log = { workspace = true }
 tauri-plugin-notification = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
+tauri-plugin-wdio-webdriver = { workspace = true, optional = true }
+
+# The packaged smoke only: the bundle it drives is built with `--features wdio`,
+# which compiles the embedded WebDriver server in (feature SPEC §7.3).
+[features]
+wdio = ["dep:tauri-plugin-wdio-webdriver"]

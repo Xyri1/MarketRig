@@ -54,6 +54,7 @@ async function submit(): Promise<void> {
     <input
       v-model="name"
       class="terminal rounded-control border border-line px-1 py-1"
+      data-testid="new-desk-name"
       :placeholder="t('desks.namePlaceholder')"
       :aria-label="t('desks.name')"
     />
@@ -78,7 +79,12 @@ async function submit(): Promise<void> {
       </SelectPortal>
     </SelectRoot>
     <div class="flex gap-1">
-      <button :class="buttonPrimary" :disabled="busy" type="submit">
+      <button
+        :class="buttonPrimary"
+        :disabled="busy"
+        data-testid="new-desk-submit"
+        type="submit"
+      >
         {{ t("desks.create") }}
       </button>
       <button :class="button" type="button" @click="emit('close')">

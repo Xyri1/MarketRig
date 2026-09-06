@@ -33,7 +33,7 @@ onMounted(attach);
 <template>
   <div class="flex overflow-hidden bg-well">
     <span class="w-[2px] shrink-0" :class="gutterClass[state]" />
-    <div ref="slot" class="min-w-0 flex-1 overflow-hidden">
+    <div ref="slot" class="min-w-0 flex-1 overflow-hidden" data-testid="well">
       <p v-if="!hasPane" class="terminal p-2 text-state-idle">
         {{ t("well.noSession") }}
       </p>

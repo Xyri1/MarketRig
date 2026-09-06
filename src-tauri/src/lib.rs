@@ -278,7 +278,13 @@ fn show_main(app: &AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // The embedded WebDriver server the packaged smoke drives (feature SPEC
+    // §7.3). It listens on loopback without authentication, so it exists only
+    // in a `--features wdio` build and never in a shipped one.
+    #[cfg(feature = "wdio")]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init());
+    builder
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
         }))

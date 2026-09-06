@@ -27,7 +27,12 @@ const creating = ref(false);
     />
     <div class="mt-auto px-2">
       <NewDeskForm v-if="creating" @close="creating = false" />
-      <button v-else :class="button" @click="creating = true">
+      <button
+        v-else
+        :class="button"
+        data-testid="new-desk"
+        @click="creating = true"
+      >
         {{ t("desks.new") }}
       </button>
     </div>

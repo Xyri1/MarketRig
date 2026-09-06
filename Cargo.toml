@@ -95,6 +95,10 @@ tauri-plugin-autostart = "=2.5.1"
 tauri-plugin-log = "=2.9.1"
 tauri-plugin-notification = "=2.4.0"
 tauri-plugin-single-instance = "=2.4.4"
+# The embedded W3C WebDriver server the packaged smoke drives (R5 feature
+# SPEC §7.3). Optional and off by default: `init()` opens an unauthenticated
+# HTTP automation server, so no shipped build ever carries the `wdio` feature.
+tauri-plugin-wdio-webdriver = "=1.3.0"
 tempfile = "=3.27.0"
 tokio = { version = "=1.53.1", features = [
     "rt-multi-thread",

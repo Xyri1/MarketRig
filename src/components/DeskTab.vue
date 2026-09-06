@@ -77,7 +77,12 @@ onUnmounted(() => {
 
 <template>
   <div class="flex min-w-0 flex-col gap-3">
-    <section v-for="block in BLOCKS" :key="block.key" class="flex flex-col">
+    <section
+      v-for="block in BLOCKS"
+      :key="block.key"
+      class="flex flex-col"
+      :data-testid="`desk-${block.key}`"
+    >
       <p class="text-xs text-ink-muted">{{ t(`desk.${block.key}`) }}</p>
       <p v-if="!(rows[block.key] ?? []).length" class="text-xs text-ink-muted">
         {{ t(`desk.empty.${block.key}`) }}

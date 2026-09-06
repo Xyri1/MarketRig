@@ -70,6 +70,7 @@ async function settle(
       v-for="item in pending"
       :key="item.id"
       class="flex flex-col gap-2 border-b border-line pb-4"
+      data-testid="approval-row"
     >
       <div class="flex items-baseline gap-2">
         <span>{{ t(`approvals.kind.${item.kind}`) }}</span>
@@ -102,6 +103,7 @@ async function settle(
         <button
           type="button"
           class="rounded-control bg-accent px-2 py-1 text-accent-ink"
+          data-testid="approval-approve"
           :disabled="deciding === item.id"
           @click="settle(item, 'APPROVE')"
         >
@@ -110,6 +112,7 @@ async function settle(
         <AlertDialogRoot>
           <AlertDialogTrigger
             class="rounded-control border border-line px-2 py-1"
+            data-testid="approval-deny"
             :disabled="deciding === item.id"
           >
             {{ t("approvals.deny") }}
@@ -123,6 +126,7 @@ async function settle(
               <div class="flex gap-2">
                 <AlertDialogAction
                   class="rounded-control border border-line px-2 py-1"
+                  data-testid="dialog-deny"
                   @click="settle(item, 'DENY')"
                 >
                   {{ t("dialog.deny") }}

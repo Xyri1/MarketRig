@@ -11,4 +11,7 @@ mkdirSync('src-tauri/binaries', { recursive: true });
 for (const name of names) {
   copyFileSync(`target/release/${name}${ext}`, `src-tauri/binaries/${name}-${triple}${ext}`);
 }
-execFileSync(win ? 'pnpm.cmd' : 'pnpm', ['exec', 'tauri', 'build'], { stdio: 'inherit' });
+// The packaged smoke needs the embedded WebDriver server compiled in; every
+// other build is the shipped artifact and never carries it (feature SPEC §7.3).
+const wdio = process.env.MARKETRIG_SMOKE_WIPE === '1' ? ['--features', 'wdio'] : [];
+execFileSync(win ? 'pnpm.cmd' : 'pnpm', ['exec', 'tauri', 'build', ...wdio], { stdio: 'inherit' });

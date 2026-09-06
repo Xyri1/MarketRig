@@ -10,14 +10,17 @@ Depends on slice 007 frozen. Closes Milestone R5.
 
 ## 1. Pins
 
-Verified against npm and the Tauri WebDriver documentation on 2026-09-04.
+Verified against npm, crates.io, and the service's own packaged documentation on 2026-09-06.
 
 | Dependency | Pin | Used by | Notes |
 | --- | --- | --- | --- |
-| `@wdio/cli` | `9.31.5` | smoke (dev) | with `@wdio/local-runner`, `@wdio/mocha-framework`, `@wdio/spec-reporter` at the same 9.31.5 line. |
-| `@wdio/tauri-service` | `1.3.0` | smoke (dev) | `driverProvider: 'embedded'` on both platforms — macOS has no WKWebView WebDriver, and one mode everywhere is one config. Peer `webdriverio ^9`. |
+| `@wdio/cli` | `9.31.5` | smoke (dev) | with `@wdio/local-runner`, `@wdio/mocha-framework`, `@wdio/globals`, and `webdriverio` on the same line. |
+| `@wdio/spec-reporter` | `9.31.2` | smoke (dev) | the reporter's line stops at 9.31.2; it does not publish 9.31.5. |
+| `@types/mocha`, `@types/node` | `10.0.10`, `26.4.1` | smoke (dev) | the spec is type-checked by its own `smoke/tsconfig.json`, outside the root `vue-tsc` program. |
+| `@wdio/tauri-service` | `1.3.0` | smoke (dev) | `driverProvider: 'embedded'` on both platforms — macOS has no WKWebView WebDriver and the CrabNebula one is paid, and one mode everywhere is one config. Peer `webdriverio ^9`. |
+| `tauri-plugin-wdio-webdriver` | `=1.3.0` | `marketrig-desktop` (optional) | the embedded provider *is* this crate: the service spawns the app with `TAURI_WEBDRIVER_PORT` and polls the server the plugin's `init()` starts. Behind the `wdio` Cargo feature, because `init()` opens an unauthenticated W3C WebDriver server on loopback and must never ship. |
 
-`ponytail:` no `tauri-driver` install step, no Windows-only branch; the embedded server is the whole driver story.
+`ponytail:` no `tauri-driver` install step, no Windows-only branch; the embedded server is the whole driver story — at the price of one feature-gated crate in the shell and a smoked bundle that differs from the shipped one by that plugin.
 
 ## 2. Plan-time settlements
 
@@ -25,9 +28,10 @@ Verified against npm and the Tauri WebDriver documentation on 2026-09-04.
 - **Tray:** built in `setup` with `TrayIconBuilder` — the app icon, menu `open` / `pending` (disabled `MenuItem`, text from `set_tray_pending`) / `quit`; `on_menu_event` handles `open` (unminimize, show, focus) and `quit` (emit `marketrig://quit` to `main`); `on_tray_icon_event` left-click-up does what `open` does. `set_tray_pending(n)` sets the menu item text and, on macOS, `tray.set_title(Some(n.to_string()))` when `n > 0` else `None`; on Windows `set_tooltip`. Tray labels are English in R5; R6's `set_locale` rebuilds them.
 - **Quit sequence:** the webview's `useDaemon.quit()` — `POST /quit`, poll `GET /health` every 250 ms until it fails or 10 s pass, `exit_app`. Both the Settings tab's button (behind `AlertDialog`) and the tray event call it.
 - **Autostart:** `SettingsTab` reads `isEnabled()` and toggles `enable()` / `disable()`; first launch (no runtime `AVAILABLE` and autostart never touched) calls `enable()` once and records nothing — the plugin's own state is the setting.
-- **Smoke harness:** `wdio.conf.ts` with the tauri service pointing at the bundled binary path per platform (`src-tauri/target/release/bundle/macos/MarketRig.app/Contents/MacOS/MarketRig`, `src-tauri/target/release/MarketRig.exe`), `maxInstances: 1`, mocha, 120 s timeout; `smoke/wipe.ts` runs in `onPrepare`: refuses without `MARKETRIG_SMOKE_WIPE=1`, kills any `MarketRig`, `marketrigd`, `runtime-standin` process, removes the data root, the log root, and `~/.marketrig`; `smoke/smoke.spec.ts` is the five steps of feature SPEC §7.3, using the bearer read from the real endpoint file for its REST calls and `runtime-standin` from `target/release/`. Test ids (`data-testid`) are added to the controls the spec drives; nothing else changes in the frontend for the smoke.
-- **Second launch in the smoke:** `child_process.spawn` of the same binary; the single-instance plugin exits it; the spec asserts the window is visible through `browser.getWindowHandles()` and a `window.__marketrigSmokeMarker` set before hiding.
-- **Evidence:** the WebdriverIO report and the shell's `MarketRig.log` are copied to `target/acceptance/smoke-<platform>-<stamp>/` by `onComplete`.
+- **The `wdio` feature:** `marketrig-desktop` gains `tauri-plugin-wdio-webdriver` as an optional dependency behind a `wdio` feature and one `#[cfg(feature = "wdio")]` line registering it. `scripts/build.mjs` passes `--features wdio` to `tauri build` only when `MARKETRIG_SMOKE_WIPE=1` — the same guard the wipe already needs — so every other `pnpm build` is the shipped artifact. The capability is untouched: the plugin's `default` permission set is empty, and naming it would break the feature-off build.
+- **Smoke harness:** `wdio.conf.ts` with the tauri service pointing at the bundled binary path per platform. `src-tauri` is a member of the root Cargo workspace, so its artifacts land in the workspace target directory, not `src-tauri/target/`: `<CARGO_TARGET_DIR or target>/release/bundle/macos/MarketRig.app/Contents/MacOS/MarketRig` and `<…>/release/MarketRig.exe`. `maxInstances: 1`, mocha, 120 s timeout; `smoke/wipe.ts` runs in `onPrepare`: refuses without `MARKETRIG_SMOKE_WIPE=1`, kills any `MarketRig`, `marketrigd`, `runtime-standin` process, removes the data root, the log directory (`app_log_dir()`, which keys on the bundle identifier — `~/Library/Logs/dev.marketrig.desktop` and `%LOCALAPPDATA%\dev.marketrig.desktop\logs`), and `~/.marketrig`; `onPrepare` also builds `runtime-standin` (`cargo build --release -p marketrig-acceptance`). `smoke/smoke.spec.ts` is the five steps of feature SPEC §7.3, using the bearer read from the real endpoint file for its REST calls and `runtime-standin` from `target/release/`, armed by `MARKETRIG_STANDIN_SCRIPT` on the wdio process's environment — the shell and the daemon inherit it, exactly as the gate's harness sets it on the daemon's. Test ids (`data-testid`) are added to the controls the spec drives; nothing else changes in the frontend for the smoke.
+- **Second launch in the smoke:** `child_process.spawn` of the same binary; the single-instance plugin exits it; the spec asserts the webview survived through `browser.getWindowHandles()` and a `window.__marketrigSmokeMarker` set before hiding.
+- **Evidence:** the WebdriverIO report is written straight into `target/acceptance/smoke-<platform>-<stamp>/` through the reporter's and the runner's `outputDir`, and `onComplete` copies the shell's `MarketRig.log` beside it.
 
 ## 3. Chunks
 

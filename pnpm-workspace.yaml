@@ -1,4 +1,8 @@
 allowBuilds:
+  # The embedded WebDriver provider needs neither browser driver (slice 008 §1).
+  edgedriver: false
+  esbuild: false
+  geckodriver: false
   vue-demi: true
 minimumReleaseAgeExclude:
   - eslint@10.10.0

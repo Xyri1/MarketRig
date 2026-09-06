@@ -115,6 +115,7 @@ onMounted(() => void refresh());
         v-if="!live"
         :class="buttonPrimary"
         :disabled="busy"
+        data-testid="session-start"
         @click="
           act(() =>
             sessionActivate({

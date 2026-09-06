@@ -190,6 +190,7 @@ onMounted(async () => {
         >
           <input
             class="terminal flex-1 rounded-control border border-line px-2 py-1"
+            :data-testid="`runtime-path-${row.runtime}`"
             :aria-label="t('settings.runtimes.path')"
             :placeholder="t('settings.runtimes.path')"
             :value="explicit.get(row.runtime) ?? ''"
@@ -203,6 +204,7 @@ onMounted(async () => {
           <button
             type="submit"
             class="rounded-control border border-line px-2 py-1"
+            :data-testid="`runtime-submit-${row.runtime}`"
           >
             {{ t("settings.runtimes.submit") }}
           </button>
@@ -363,6 +365,7 @@ onMounted(async () => {
     <AlertDialogRoot>
       <AlertDialogTrigger
         class="self-start rounded-control border border-line px-2 py-1"
+        data-testid="quit"
       >
         {{ t("settings.quit") }}
       </AlertDialogTrigger>
@@ -375,6 +378,7 @@ onMounted(async () => {
           <div class="flex gap-2">
             <AlertDialogAction
               class="rounded-control border border-line px-2 py-1"
+              data-testid="dialog-quit"
               @click="quit()"
             >
               {{ t("dialog.quit") }}

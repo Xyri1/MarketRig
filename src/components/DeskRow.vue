@@ -39,7 +39,12 @@ const state = computed(() =>
     >
       {{ desk.name }}
     </button>
-    <span v-if="pending" class="text-xs text-ink-muted">{{ pending }}</span>
+    <span
+      v-if="pending"
+      class="text-xs text-ink-muted"
+      :data-testid="`desk-pending-${desk.id}`"
+      >{{ pending }}</span
+    >
     <span
       v-if="attention.has(desk.id)"
       class="h-2 w-2 rounded-pill bg-state-attention"

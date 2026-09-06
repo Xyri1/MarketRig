@@ -249,13 +249,15 @@ Vitest with Vue Test Utils and jsdom, against a fake `fetch` and a fake `WebSock
 
 ### 7.3 The packaged smoke
 
-`pnpm smoke`, operator-run, refuses to start unless `MARKETRIG_SMOKE_WIPE=1`; it then quits any running MarketRig, deletes the per-user data root, the log root, and `~/.marketrig`, and drives the bundled application (`src-tauri/target/release/bundle/…`) through `@wdio/tauri-service` in `driverProvider: 'embedded'` mode on both platforms, one spec:
+`pnpm smoke`, operator-run, refuses to start unless `MARKETRIG_SMOKE_WIPE=1`; it then quits any running MarketRig, deletes the per-user data root, the log root, and `~/.marketrig`, and drives the bundled application (the workspace `target/release/bundle/…`, because `src-tauri` is a workspace member) through `@wdio/tauri-service` in `driverProvider: 'embedded'` mode on both platforms, one spec:
 
 1. the window appears; Settings is selected (no runtime); the daemon endpoint file exists and health answers with the bearer it carries;
 2. register `runtime-standin` (built by `cargo build -p marketrig-acceptance`) as `codex` through the explicit-path field; create desk `smoke`; *Start*; the well shows the stand-in's banner;
 3. hide by closing the window (the WebDriver session stays attached to the hidden webview); create through REST a code-free one-off trigger 2 s ahead, whose `TRIGGER_RESULT` the stand-in echoes into the terminal; launch the binary a second time; the window is visible again, the same webview (a marker set in `window` before hiding is still there), and the well contains the bytes written while hidden;
 4. set paper orders to *Require approval*; `POST /desks/{d}/orders` with the bearer → the Approvals tab shows one item and the tray count is 1; *Approve* → the Desk tab shows the position; a second order → *Deny* → `DENIED` in history actions;
 5. *Quit MarketRig* through the Settings tab → the endpoint file is gone, no `marketrigd` or `runtime-standin` process survives, the application process has exited.
+
+The bundle it drives is built with the `wdio` Cargo feature, which compiles the embedded WebDriver server `driverProvider: 'embedded'` connects to into the shell; a shipped build never carries it, because that server listens on loopback without authentication.
 
 It is the one leg that touches the per-user root (root §17) and stays out of CI.
 
