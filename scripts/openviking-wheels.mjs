@@ -41,9 +41,14 @@ const wheels = () => readdirSync(dir).filter((f) => f.endsWith('.whl')).sort();
 if (args.includes('--check')) {
   const want = readFileSync(lockPath, 'utf8').trim().split('\n');
   const have = wheels().map(entry);
-  const missing = want.filter((l) => !have.includes(l));
-  if (missing.length) {
-    console.error(`openviking-wheels/${platform} differs from its lockfile:\n${missing.join('\n')}`);
+  // Both directions: a wheel the lockfile names and the directory lacks, and a
+  // wheel the directory carries and the lockfile does not.
+  const differs = [
+    ...want.filter((l) => !have.includes(l)).map((l) => `- ${l}`),
+    ...have.filter((l) => !want.includes(l)).map((l) => `+ ${l}`),
+  ];
+  if (differs.length) {
+    console.error(`openviking-wheels/${platform} differs from its lockfile:\n${differs.join('\n')}`);
     process.exit(1);
   }
   console.log(`openviking-wheels/${platform}: ${have.length} wheels match ${platform}.lock`);
@@ -62,6 +67,8 @@ execFileSync(
   ],
   { stdio: 'inherit' },
 );
+// OpenViking's own license text; every dependency's is already in the directory,
+// inside its wheel as `<dist-info>/LICENSE*`.
 for (const f of ['LICENSE']) copyFileSync(join(root, 'crates/marketrigd/seed/openviking', f), join(dir, `OPENVIKING-${f}`));
 const lines = wheels().map(entry);
 writeFileSync(lockPath, lines.join('\n') + '\n');

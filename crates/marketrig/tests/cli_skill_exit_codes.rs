@@ -76,6 +76,33 @@ fn put_takes_its_name_from_the_frontmatter() {
         "name: spread-watch\npath: /desks/alpha/.agents/skills/spread-watch/SKILL.md\n"
     );
 
+    // The same file as a Windows editor writes it: CRLF throughout, same name.
+    let crlf_file = root.path().join("crlf.md");
+    let crlf =
+        "---\r\nname: spread-watch\r\ndescription: Watch spreads.\r\n---\r\n\r\nStep one.\r\n";
+    std::fs::write(&crlf_file, crlf).expect("write the CRLF skill");
+    let put = marketrig(
+        root.path(),
+        &[
+            "skill",
+            "put",
+            DESK,
+            "--file",
+            crlf_file.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_eq!(code(&put), 0, "{put:?}");
+    assert_eq!(
+        sent(&requests),
+        [
+            ("GET /health".to_string(), Value::Null),
+            (
+                format!("PUT /desks/{DESK}/skills/spread-watch"),
+                json!({ "content": crlf }),
+            ),
+        ]
+    );
+
     let deleted = marketrig(root.path(), &["skill", "delete", DESK, "spread-watch"]);
     assert_eq!(code(&deleted), 0, "{deleted:?}");
     assert_eq!(
@@ -91,8 +118,9 @@ fn put_takes_its_name_from_the_frontmatter() {
     );
 }
 
-/// The file is read before the daemon is contacted: too large, unreadable, or
-/// carrying no frontmatter name is a usage error, and nothing is sent.
+/// The file is read before the daemon is contacted: too large, unreadable,
+/// carrying no frontmatter name, or naming something that is not a skill name
+/// is a usage error, and nothing is sent.
 #[test]
 fn an_unusable_file_is_a_usage_error_before_contact() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -116,5 +144,18 @@ fn an_unusable_file_is_a_usage_error_before_contact() {
     assert_eq!(code(&put(&nameless)), 2);
 
     assert_eq!(code(&put(&root.path().join("absent.md"))), 2);
+
+    // §5.5: the name is validated as §5.2 validates one, so a path separator or
+    // a leading dash never reaches a route.
+    for named in ["../escape", "-leading", "spread watch"] {
+        let bad = root.path().join("bad.md");
+        std::fs::write(
+            &bad,
+            format!("---\nname: {named}\ndescription: d\n---\n\nx\n"),
+        )
+        .expect("write the badly named skill");
+        assert_eq!(code(&put(&bad)), 2, "{named:?} is not a skill name");
+    }
+
     assert!(sent(&requests).is_empty(), "no daemon was contacted");
 }

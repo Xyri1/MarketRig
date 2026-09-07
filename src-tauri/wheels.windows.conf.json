@@ -1,0 +1,8 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../openviking-wheels/windows-x64/": "openviking-wheels/windows-x64/"
+    }
+  }
+}

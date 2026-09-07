@@ -6,6 +6,25 @@ const ext = win ? '.exe' : '';
 const names = ['marketrigd', 'marketrig', 'marketrig-mcp'];
 const triple = execFileSync('rustc', ['-vV'], { encoding: 'utf8' }).match(/^host: (.+)$/m)[1];
 
+// The bundle ships the locked OpenViking wheel set beside the daemon (feature
+// SPEC openviking-continuity §1.3): `wheels.<platform>.conf.json` maps the
+// directory into the bundle's resources. It is passed here rather than named
+// `tauri.<platform>.conf.json`, which the CLI merges automatically — that file
+// would also reach `tauri-build`, and every plain `cargo build` of the shell,
+// CI's included, would then demand a directory that is not committed. The
+// wheels are checked first, so a missing set is one clear line instead of the
+// bundler's resource-path error.
+const wheelConfig = `src-tauri/wheels.${win ? 'windows' : 'macos'}.conf.json`;
+try {
+  execFileSync(process.execPath, ['scripts/openviking-wheels.mjs', '--check'], { stdio: 'inherit' });
+} catch {
+  console.error(
+    'The OpenViking wheels this platform bundles are missing or stale. Produce them first:\n' +
+      '  node scripts/openviking-wheels.mjs --python <python3.12>',
+  );
+  process.exit(1);
+}
+
 execFileSync('cargo', ['build', '--release', ...names.flatMap((n) => ['-p', n])], { stdio: 'inherit' });
 mkdirSync('src-tauri/binaries', { recursive: true });
 for (const name of names) {
@@ -22,6 +41,8 @@ const wdio =
 // The CLI's own node entry, not `pnpm exec`: a Windows box whose pnpm is the
 // standalone `pnpm.exe` has no `pnpm.cmd`, and `execFile` cannot run a `.cmd`
 // without a shell anyway.
-execFileSync(process.execPath, ['node_modules/@tauri-apps/cli/tauri.js', 'build', ...wdio], {
-  stdio: 'inherit',
-});
+execFileSync(
+  process.execPath,
+  ['node_modules/@tauri-apps/cli/tauri.js', 'build', '--config', wheelConfig, ...wdio],
+  { stdio: 'inherit' },
+);

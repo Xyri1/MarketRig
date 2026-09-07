@@ -453,7 +453,8 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
 
 /// The skill body `skill put` reads before the daemon is contacted (§5.5): at
 /// most 64 KiB of UTF-8, and the frontmatter `name` that names it — the name
-/// OpenViking itself derives, so the CLI sends the same one in the path.
+/// OpenViking itself derives, so the CLI sends the same one in the path, and it
+/// is validated here as §5.2 validates a name.
 fn skill_file(path: &Path) -> (String, String) {
     let source = std::fs::read(path).unwrap_or_else(|e| {
         usage(format!(
@@ -472,6 +473,7 @@ fn skill_file(path: &Path) -> (String, String) {
         .unwrap_or_else(|_| usage(format!("the skill file {} is not UTF-8", path.display())));
     let name = source
         .strip_prefix("---\n")
+        .or_else(|| source.strip_prefix("---\r\n"))
         .and_then(|rest| rest.split_once("\n---"))
         .into_iter()
         .flat_map(|(front, _)| front.lines())
@@ -481,6 +483,20 @@ fn skill_file(path: &Path) -> (String, String) {
     if name.is_empty() {
         usage(format!(
             "the skill file {} carries no frontmatter name:",
+            path.display()
+        ));
+    }
+    // §5.2's rule, copied rather than shared: the CLI takes no dependency on the
+    // daemon crate, and the name becomes a path segment on both sides.
+    let valid = name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        usage(format!(
+            "the skill file {} names {name:?}: a skill name is letters, digits, - and _, \
+             starting with a letter or a digit, at most 64 bytes",
             path.display()
         ));
     }

@@ -3443,6 +3443,39 @@ fn gate() {
         seen.matches("MarketRig TRIGGER_RESULT ").count() >= 2,
         "both frames reached the session in order: {seen:?}"
     );
+    {
+        // O4's `UNCONFIGURED` half for the Claude launch, captured here because
+        // the launch files live only as long as the process row (R3 §5.1) and
+        // every launch before O1's setup is one of G28–G32's: an unconfigured
+        // daemon registers no `openviking` server and none of the plugin's
+        // hooks, and the runtime process carries `OPENVIKING_MEMORY_ENABLED=0`
+        // and no key (`openviking-continuity` §4.3).
+        let launch = g
+            .out
+            .join("data")
+            .join("runtime")
+            .join("launch")
+            .join(&delta_id);
+        let mcp = fs::read_to_string(launch.join("mcp.json")).expect("the live mcp.json");
+        let settings =
+            fs::read_to_string(launch.join("settings.json")).expect("the live settings.json");
+        assert!(
+            !mcp.contains("openviking"),
+            "an unconfigured launch registers no memory server: {mcp}"
+        );
+        assert!(
+            !settings.contains("openviking"),
+            "and none of the plugin's hooks: {settings}"
+        );
+        assert!(
+            seen.contains("ENV OPENVIKING_MEMORY_ENABLED=0"),
+            "the runtime process carries the off form: {seen:?}"
+        );
+        assert!(
+            !seen.contains("ENV OPENVIKING_API_KEY="),
+            "and no desk key: {seen:?}"
+        );
+    }
     let (status, refused) = g.api(
         "G30",
         &endpoint,
@@ -3454,7 +3487,7 @@ fn gate() {
     assert_eq!(refused["code"], "INTERRUPT_UNSUPPORTED");
     g.note(
         "G30",
-        "the desk switched to Claude keeping its Codex pointer, the bridge's connection was readiness, three inputs arrived FIFO with a turn-ended hook each, a scripted clear repointed the desk, and Interrupt was refused",
+        "the desk switched to Claude keeping its Codex pointer, the bridge's connection was readiness, three inputs arrived FIFO with a turn-ended hook each, a scripted clear repointed the desk, Interrupt was refused, and this pre-setup Claude launch registered no openviking server or hook and carried OPENVIKING_MEMORY_ENABLED=0 (O4's UNCONFIGURED half)",
         json!({ "switched": switched, "cleared": cleared, "transcript": seen }),
     );
 
@@ -3932,6 +3965,20 @@ fn gate() {
     );
 
     // --- O2 — two desks and the seed ----------------------------------------
+    // Distinct users, read back from the stand-in's own store rather than from
+    // the rule the harness derives (§3.1): the key each desk speaks with names
+    // its own `desk-<hex>` and no other's.
+    {
+        let store = parse(&fs::read_to_string(ov_store(&g)).expect("the stand-in's store"));
+        let user = |key: &str| store["keys"][key].as_str().map(str::to_owned);
+        assert_eq!(user(&alpha_key), Some(desk_user(&ids[0])));
+        assert_eq!(user(&beta_key), Some(desk_user(&ids[1])));
+        assert_ne!(
+            user(&alpha_key),
+            user(&beta_key),
+            "one OpenViking user per desk (§3.1): {store}"
+        );
+    }
     assert_eq!(skill_names(&g, &alpha_key), ["desk-improvement"]);
     assert_eq!(skill_names(&g, &beta_key), ["desk-improvement"]);
     let (status, seeded) = ov(
@@ -3980,7 +4027,7 @@ fn gate() {
     );
     g.note(
         "O2",
-        "both desks were provisioned under distinct users each listing exactly desk-improvement, and a skill written under B's key was neither listed nor findable under A's",
+        "both desks were provisioned under distinct users — the stand-in's store maps each key to its own desk-<hex> — each listing exactly desk-improvement, and a skill written under B's key was neither listed nor findable under A's",
         json!({ "alpha_user": desk_user(&ids[0]), "beta_user": desk_user(&ids[1]) }),
     );
 
@@ -4073,6 +4120,27 @@ fn gate() {
         second
     );
 
+    // An update of the same skill is the `PUT` (§5.5's replace half), and the
+    // next turn end carries the new content into the workspace.
+    let updated = "---\nname: gate-second\ndescription: The second skill\n---\n\nRewritten.\n";
+    let (status, replaced) = ov(
+        &g,
+        "PUT",
+        "/api/v1/skills/gate-second",
+        &kappa_key,
+        Some(&json!({ "data": updated }).to_string()),
+    );
+    assert_eq!(status, 200, "{replaced}");
+    one_turn(&mut g, "O3", &kappa, &kappa_id, "o3-update");
+    within(
+        Duration::from_secs(60),
+        "the updated second skill to reach the workspace",
+        || {
+            fs::read_to_string(skills_dir.join("gate-second").join("SKILL.md"))
+                .is_ok_and(|text| text == updated)
+        },
+    );
+
     let (status, removed) = ov(&g, "DELETE", "/api/v1/skills/gate-second", &kappa_key, None);
     assert_eq!(status, 200, "{removed}");
     one_turn(&mut g, "O3", &kappa, &kappa_id, "o3-vanish");
@@ -4120,7 +4188,7 @@ fn gate() {
 
     g.note(
         "O3",
-        "a desk created while the child was ready carried the seed, the Codex activation projected it read-only byte for byte, a skill written and deleted through the stand-in's own route appeared and disappeared on the next turn end, and marketrig skill put and delete wrote and removed one with the projected file already on disk when each command returned",
+        "a desk created while the child was ready carried the seed, the Codex activation projected it read-only byte for byte, a skill written, updated, and deleted through the stand-in's own route appeared, changed, and disappeared on the next turn end, and marketrig skill put and delete wrote and removed one with the projected file already on disk when each command returned",
         json!({ "desk": kappa_id, "projected": payloads(&g, &kappa_id, "SKILLS_PROJECTED").len() }),
     );
 
@@ -4250,7 +4318,10 @@ fn gate() {
     assert_eq!(capture["timeout"], 30);
 
     // The `UNCONFIGURED` form is durable evidence: delta's Codex registration
-    // comes from G28–G32, every one of them launched before any setup row.
+    // comes from G28–G32, every one of them launched before any setup row. The
+    // Claude half of it — no `openviking` entry in `mcp.json` or
+    // `settings.json`, and `OPENVIKING_MEMORY_ENABLED=0` on the runtime
+    // process — is asserted in G30, where such a launch was still live.
     let delta_codex = g.workspace(&delta).join(".codex");
     let unregistered =
         fs::read_to_string(delta_codex.join("config.toml")).expect("delta's config.toml");
@@ -4264,7 +4335,7 @@ fn gate() {
     );
     g.note(
         "O4",
-        "the live Claude launch registered the proxy and merged the plugin's hooks beside MarketRig's with the plugin's own timeouts, the runtime process carried §4.3's environment, the switch back to Codex wrote the config entry and the hooks file, and the R3 desk's unconfigured registration carries neither",
+        "the live Claude launch registered the proxy and merged the plugin's hooks beside MarketRig's with the plugin's own timeouts, the runtime process carried §4.3's environment, the switch back to Codex wrote the config entry and the hooks file, and the R3 desk's unconfigured registration carries neither — its Claude half asserted in G30, where a pre-setup launch was still live",
         json!({ "mcp": mcp["mcpServers"]["openviking"], "hook_events": hooks.keys().collect::<Vec<_>>() }),
     );
 

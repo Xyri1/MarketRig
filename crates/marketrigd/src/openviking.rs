@@ -1485,10 +1485,13 @@ fn valid_skill_name(name: &str) -> bool {
 }
 
 /// The frontmatter `name:` a `SKILL.md` carries, which is the name OpenViking's
-/// own `POST /api/v1/skills` derives (§5.5). Empty when there is none.
+/// own `POST /api/v1/skills` derives (§5.5). Empty when there is none. A file a
+/// Windows editor wrote carries CRLF, so both openings are accepted; `str::lines`
+/// takes the `\r` off every line after that.
 fn frontmatter_name(content: &str) -> &str {
     content
         .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))
         .and_then(|rest| rest.split_once("\n---"))
         .into_iter()
         .flat_map(|(front, _)| front.lines())
@@ -3161,6 +3164,14 @@ mod tests {
             .expect("the replace");
         assert_eq!(fs::read_to_string(&file).unwrap(), skill("second"));
         assert_eq!(fake.lock().unwrap().uploaded.len(), 1, "and no second POST");
+
+        // A `SKILL.md` a Windows editor wrote opens with CRLF; the frontmatter
+        // still names the skill, so the write is not refused.
+        let crlf = "---\r\nname: spread-watch\r\ndescription: d\r\n---\r\n\r\nthird\r\n";
+        ov.put_skill(DESK_A, "spread-watch", crlf)
+            .await
+            .expect("the CRLF replace");
+        assert_eq!(fs::read_to_string(&file).unwrap(), crlf);
 
         ov.delete_skill(DESK_A, "spread-watch")
             .await
