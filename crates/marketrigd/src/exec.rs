@@ -286,7 +286,7 @@ pub async fn execute(
         .runtime()
         .join("scripts")
         .join(format!("{}{}", firing.id, plan.suffix));
-    let finish = attempt(&plan, &script, &firing, quit).await;
+    let finish = attempt(roots, daemon_uuid, &plan, &script, &firing, quit).await;
     let finished_at_ns = now_ns();
 
     let summary = ExecutionSummary {
@@ -343,6 +343,8 @@ pub async fn execute(
 /// Steps 1–6: write the script, spawn contained, feed the document, capture the
 /// streams under their caps, and end on exit, cap breach, timeout, or quit.
 async fn attempt(
+    roots: &Roots,
+    daemon_uuid: &str,
     plan: &Plan,
     script: &Path,
     firing: &FiringRow,
@@ -392,6 +394,23 @@ async fn attempt(
         Err(e) => return Finish::spawn_failed(&executable, e.to_string()),
     };
 
+    // 3a. the pid, recorded before anything else happens to it: a daemon killed
+    //     mid-execution leaves a child the next start's reaper resolves — a
+    //     `process-wrap` child still suspended outside its job included (§4.5).
+    let recorded = child.id();
+    if let Some(pid) = recorded {
+        crate::daemon::record_child(
+            roots,
+            crate::daemon::ChildRecord {
+                pid,
+                kind: crate::daemon::TRIGGER_CODE.to_string(),
+                args: argv.clone(),
+                daemon_uuid: daemon_uuid.to_string(),
+                launched_at_ns: now_ns(),
+            },
+        );
+    }
+
     // 4. the version-1 document, then EOF. Written from its own task so a child
     //    that never reads its input cannot deadlock a document larger than the
     //    pipe buffer.
@@ -426,6 +445,10 @@ async fn attempt(
     };
     if !matches!(end, End::Exited(_) | End::WaitFailed(_)) {
         child.terminate().await;
+    }
+    // The leader is over either way, so no successor should reap its pid.
+    if let Some(pid) = recorded {
+        crate::daemon::forget_child(roots, pid);
     }
     let (stdout, stdout_truncated) = stdout.await.unwrap_or_default();
     let (stderr, stderr_truncated) = stderr.await.unwrap_or_default();
@@ -1309,6 +1332,61 @@ async fn shutdown_records_quit() {
         ("COMPLETE", "QUIT", None, None)
     );
     assert_eq!(prompts_for(&store, "f1").len(), 1);
+}
+
+/// §4.5: a running trigger-code child is a `children.json` record — what a
+/// daemon killed mid-execution leaves for the next start's reaper — and the
+/// record is gone once the execution completes.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_child_is_recorded() {
+    let (_dir, store, roots) = scratch();
+    seed_desk(&store, &roots, "d1", "alpha");
+    let sleeper = if cfg!(windows) {
+        "Start-Sleep 60\n"
+    } else {
+        "sleep 60\n"
+    };
+    seed_firing(&store, "d1", "f1", sleeper, &shell().1, 300, 10);
+    let claimed = claim(&store, "daemon-1").unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let recorded = || -> Vec<Value> {
+        std::fs::read(crate::daemon::children_path(&roots))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+            .and_then(|file| file["children"].as_array().cloned())
+            .unwrap_or_default()
+    };
+
+    let (stop, quit) = no_quit();
+    let run = tokio::spawn({
+        let (store, roots, firing) = (store.clone(), roots.clone(), claimed[0].clone());
+        async move { execute(&store, &roots, "daemon-1", firing, quit).await }
+    });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(child) = recorded().first() {
+            assert_eq!(child["kind"], json!("trigger-code"));
+            assert!(child["pid"].as_u64().is_some_and(|pid| pid > 0));
+            assert_eq!(child["args"][0], json!(shell().1[0]));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the running child was never recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    stop.send(true).unwrap();
+    run.await.unwrap();
+    assert_eq!(execution(&store, "f1").1, "QUIT");
+    assert!(
+        recorded().is_empty(),
+        "the finished child is still recorded"
+    );
 }
 
 /// §4.4: recovery settles a dead daemon's running executions and leaves this

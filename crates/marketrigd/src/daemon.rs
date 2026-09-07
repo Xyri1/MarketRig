@@ -283,6 +283,11 @@ fn mint_credential() -> io::Result<String> {
     }))
 }
 
+/// The [`ChildRecord::kind`] of one trigger-code execution's child, recorded
+/// from the pid's first instant so a daemon killed mid-execution leaves nothing
+/// behind (R2 feature SPEC §4.5). The reaper reads it back.
+pub const TRIGGER_CODE: &str = "trigger-code";
+
 /// `runtime/children.json` (§4.4), written by later milestones' launches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildRecord {
@@ -361,13 +366,22 @@ pub fn reap(path: &Path) -> io::Result<Vec<Value>> {
     Ok(outcomes)
 }
 
-/// macOS: terminate a recorded child only when its pid is alive *and* its
-/// current command line still carries the recorded args — a shim may have
-/// replaced the executable path (per D73).
-#[cfg(target_os = "macos")]
+/// Terminate a recorded child only when its pid is alive *and* its current
+/// command line still carries the recorded args — a shim may have replaced the
+/// executable path (per D73).
+///
+/// Windows reaches the check for [`TRIGGER_CODE`] alone: every other kind was
+/// already ended by its Job Object when the dying daemon's handle closed, but
+/// `process-wrap` can leave a trigger-code child suspended outside any job (R2
+/// feature SPEC §4.5), and `TerminateProcess` — what `sysinfo` kills with —
+/// ends a suspended process like any other.
 fn classify(child: &ChildRecord) -> &'static str {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+    #[cfg(not(target_os = "macos"))]
+    if child.kind != TRIGGER_CODE {
+        return "DISCARDED";
+    }
     // No recorded args means no identity evidence, so the pid is never ours to kill.
     if child.args.is_empty() {
         return "PID_RECYCLED";
@@ -393,13 +407,6 @@ fn classify(child: &ChildRecord) -> &'static str {
     } else {
         "PID_RECYCLED"
     }
-}
-
-/// Windows: the Job Object already ended the children, so records are discarded
-/// without a check (per D73).
-#[cfg(not(target_os = "macos"))]
-fn classify(_child: &ChildRecord) -> &'static str {
-    "DISCARDED"
 }
 
 /// `runtime/endpoint.json` (§5.1): the discovery pointer, never proof of
@@ -635,9 +642,9 @@ fn reap_identity_check() {
 fn reap_identity_check() {
     let (dir, _roots) = scratch();
     let path = dir.path().join(CHILDREN);
-    let record = |pid: u32| ChildRecord {
+    let record = |pid: u32, kind: &str| ChildRecord {
         pid,
-        kind: "TEST_SLEEPER".to_string(),
+        kind: kind.to_string(),
         args: vec!["--marker".to_string()],
         daemon_uuid: "0199-previous".to_string(),
         launched_at_ns: 1000,
@@ -645,16 +652,27 @@ fn reap_identity_check() {
     fs::write(
         &path,
         serde_json::to_vec(&ChildrenFile {
-            children: vec![record(std::process::id()), record(4_294_967_294)],
+            children: vec![
+                record(std::process::id(), "TEST_SLEEPER"),
+                record(4_294_967_294, "TEST_SLEEPER"),
+                // A trigger-code child is checked instead of discarded: this
+                // one's pid is gone, the next one's belongs to a live process
+                // whose command line is not the recorded one.
+                record(4_294_967_294, TRIGGER_CODE),
+                record(std::process::id(), TRIGGER_CODE),
+            ],
         })
         .unwrap(),
     )
     .unwrap();
 
-    // Windows discards without a check: the Job Object already ended them.
+    // Windows discards every other kind without a check: the Job Object already
+    // ended them.
     let outcomes = reap(&path).unwrap();
-    assert_eq!(outcomes.len(), 2);
-    assert!(outcomes.iter().all(|o| o["outcome"] == "DISCARDED"));
+    assert_eq!(outcomes.len(), 4);
+    assert!(outcomes[..2].iter().all(|o| o["outcome"] == "DISCARDED"));
+    assert_eq!(outcomes[2]["outcome"], "NOT_RUNNING");
+    assert_eq!(outcomes[3]["outcome"], "PID_RECYCLED");
     // reap classifies only; start() drops the file after the recovery commit.
     assert!(path.exists());
 }
