@@ -677,6 +677,78 @@ fn reap_identity_check() {
     assert!(path.exists());
 }
 
+/// The kill arm on both platforms: a real long-lived child whose recorded args
+/// the identity check accepts is terminated, not merely classified. Windows
+/// reaches it for [`TRIGGER_CODE`] alone, and this is the one test that proves
+/// the `TerminateProcess` behind `sysinfo::Process::kill` there.
+#[cfg(test)]
+#[test]
+fn reap_kills_a_recorded_trigger_code_child() {
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    // Kills the sleeper even when an assertion below panics first.
+    struct Guard(Child);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    // A cfg-specific long-lived process; the recorded args are the ones the
+    // identity check will find on its live command line. Windows: no
+    // `timeout.exe`, which refuses a redirected stdin.
+    #[cfg(windows)]
+    let (program, args) = (
+        "powershell.exe",
+        ["-NoProfile", "-Command", "Start-Sleep", "-Seconds", "63"].as_slice(),
+    );
+    #[cfg(not(windows))]
+    let (program, args) = ("/bin/sleep", ["63"].as_slice());
+
+    let (dir, _roots) = scratch();
+    let path = dir.path().join(CHILDREN);
+    let mut sleeper = Guard(
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    fs::write(
+        &path,
+        serde_json::to_vec(&ChildrenFile {
+            children: vec![ChildRecord {
+                pid: sleeper.0.id(),
+                kind: TRIGGER_CODE.to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                daemon_uuid: "0199-previous".to_string(),
+                launched_at_ns: 1000,
+            }],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let outcomes = reap(&path).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0]["pid"], sleeper.0.id());
+    assert_eq!(outcomes[0]["outcome"], "TERMINATED");
+
+    // The classification is not the evidence: the process itself is gone.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while sleeper.0.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the reaped {program} child is still running"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn reap_outcomes_reach_the_recovery_event() {
