@@ -1,17 +1,20 @@
-//! The acceptance experiment: E1 … E4, the attended scenarios.
+//! The acceptance experiment: E1 … E4 and E6, the attended scenarios.
 //!
 //! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3,
-//! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3, and root `sdd/SPEC.md` §17,
-//! per D75. One operator-attended run per platform-and-runtime cell, on real
-//! Yahoo and a real runtime CLI, with MCP registration performed by hand (R1
-//! keeps it operator-performed, feature SPEC §8).
+//! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3,
+//! `sdd/features/openviking-continuity/SPEC.md` §7.3, and root `sdd/SPEC.md`
+//! §17, per D75. One operator-attended run per platform-and-runtime cell, on
+//! real Yahoo and a real runtime CLI, with MCP registration performed by hand
+//! (R1 keeps it operator-performed, feature SPEC §8).
 //!
 //! **Operator variable:** `MARKETRIG_EXPERIMENT` selects the cell — `codex` runs
-//! E1 and E3, `claude` runs E2 and E3. Unset or anything else skips them all
-//! cleanly, which is what CI and every unattended `cargo test` do. A cell's two
-//! scenarios run one after the other on their own daemons, desks, and bundles:
-//! they share the operator's terminal, so the harness serializes them. The
-//! instructions are printed, so run the selected cell with output:
+//! E1, E3, E4, and E6; `claude` runs E2 and the same three. Unset or anything
+//! else skips them all cleanly, which is what CI and every unattended `cargo
+//! test` do; E6 additionally skips with evidence unless the operator's
+//! prerequisites and provider are named. A cell's scenarios run one after the
+//! other on their own daemons, desks, and bundles: they share the operator's
+//! terminal, so the harness serializes them. The instructions are printed, so
+//! run the selected cell with output:
 //!
 //! ```text
 //! MARKETRIG_EXPERIMENT=codex cargo test -p marketrig-acceptance --test experiment -- --nocapture
@@ -910,6 +913,618 @@ fn delivery(scenario: &str, cell: &str, runtime: &str, other: &str) {
 
     console.detach();
     finish(&mut g, scenario, daemon, &desk_id);
+}
+
+// ---------------------------------------------------------------------------
+// E6 — OpenViking memory, skills, and the closed loop, attended
+// (`sdd/features/openviking-continuity/SPEC.md` §7.3)
+// ---------------------------------------------------------------------------
+
+/// The two prerequisites the operator names (§1.2) and the locked wheel
+/// directory MarketRig provisions from, offline (§1.3): the wheel set
+/// `node scripts/openviking-wheels.mjs --python <python3.12>` produced.
+const OPENVIKING: [&str; 3] = [
+    "MARKETRIG_EXPERIMENT_PYTHON",
+    "MARKETRIG_EXPERIMENT_NODE",
+    "MARKETRIG_EXPERIMENT_WHEELS",
+];
+
+/// The provider the real child reasons and embeds with (§2.1). The key is read,
+/// never printed and never written to the bundle (root §16).
+const MEMORY: [&str; 4] = [
+    "MARKETRIG_EXPERIMENT_MEMORY_BASE_URL",
+    "MARKETRIG_EXPERIMENT_MEMORY_API_KEY",
+    "MARKETRIG_EXPERIMENT_MEMORY_LLM_MODEL",
+    "MARKETRIG_EXPERIMENT_MEMORY_EMBEDDING_MODEL",
+];
+
+#[test]
+fn e6_codex_cli() {
+    continuity("E6", "codex", "Codex CLI", "claude");
+}
+
+#[test]
+fn e6_claude_code() {
+    continuity("E6", "claude", "Claude Code", "codex");
+}
+
+/// **E6 — the loop closes on real OpenViking** (§7.3). The cell provisions the
+/// real environment offline from the operator's wheel set, starts the real
+/// child on the real provider, and drives one session through a closed cycle to
+/// a lesson and a skill, a resumed session, and a switch to the other runtime.
+///
+/// What MarketRig itself does is mechanical and asserted: the offline install,
+/// the child's readiness, the desk's user, the projection, and the same skills
+/// under the other runtime's own path. What the agent does is inconclusive.
+/// Capture is inconclusive by construction: the desk key is derived from the
+/// seed in the credential store and lives only in the daemon's memory and the
+/// runtime's process environment (§3.1), so the harness cannot authenticate to
+/// the real server the way the gate does against the stand-in — it records the
+/// plugin's own state and logs as evidence and asks the operator to confirm
+/// from inside the session, where that identity is.
+fn continuity(scenario: &str, cell: &str, runtime: &str, other: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e6-{cell}"));
+    let value = |name: &str| std::env::var(name).unwrap_or_default();
+    let missing: Vec<&str> = OPENVIKING
+        .iter()
+        .chain(MEMORY.iter())
+        .copied()
+        .filter(|name| value(name).trim().is_empty())
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: unset — {}. E6 needs the Python 3.12 and Node paths, \
+             the locked wheel directory, and the real provider; see \
+             crates/marketrig-acceptance/EXPERIMENT.md §1.",
+            missing.join(", ")
+        );
+        g.inconclusive(
+            scenario,
+            "the cell's OpenViking variables are unset, so E6 did not run",
+            json!({ "missing": missing }),
+        );
+        return;
+    }
+
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    // The runtime, the provider, then the installation — all through REST, the
+    // way the desktop's Settings tab does (§8).
+    let (status, row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{cell}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["state"], "AVAILABLE",
+        "the cell's runtime must be installed and discoverable: {row}"
+    );
+
+    let (status, provider) = g.api_redacted(
+        scenario,
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        &json!({
+            "base_url": value(MEMORY[0]), "api_key": value(MEMORY[1]),
+            "llm_model": value(MEMORY[2]), "embedding_model": value(MEMORY[3]),
+        })
+        .to_string(),
+    );
+    assert_eq!(status, 200, "the provider must answer: {provider}");
+    assert_eq!(provider["api_key_present"], true, "{provider}");
+    assert!(
+        provider.get("api_key").is_none(),
+        "the key never comes back: {provider}"
+    );
+    let dimension = provider["embedding_dimension"].as_i64().unwrap_or_default();
+    assert!(
+        dimension > 0,
+        "the save measures the embedding dimension with one real request (§2.1): {provider}"
+    );
+
+    // Offline provisioning from the locked wheel set, then the real child's own
+    // readiness (§1.3, §2.2). Both are minutes, and both are mechanical.
+    let (status, claimed) = g.api(
+        scenario,
+        &endpoint,
+        "PUT",
+        "/openviking/setup",
+        Some(
+            &json!({
+                "python": value(OPENVIKING[0]), "node": value(OPENVIKING[1]),
+                "wheels": value(OPENVIKING[2]),
+            })
+            .to_string(),
+        ),
+    );
+    assert_eq!(
+        status, 202,
+        "both prerequisites must validate (§1.2): {claimed}"
+    );
+    let installation = |g: &Harness| g.call(&endpoint, "GET", "/openviking", None).1;
+    assert!(
+        waited(PATIENCE, "the offline provisioning to finish", || {
+            installation(&g)["setup"]["state"] != "PROVISIONING"
+        }),
+        "provisioning did not finish within the cell's patience: {}",
+        installation(&g)
+    );
+    let installed = installation(&g);
+    assert_eq!(
+        installed["setup"]["state"], "AVAILABLE",
+        "the locked wheel set must install offline on this interpreter (§1.3): {installed}"
+    );
+    assert!(
+        waited(PATIENCE, "the child to answer /ready", || {
+            installation(&g)["child"] == "READY"
+        }),
+        "the real openviking-server never reached READY: {}",
+        installation(&g)
+    );
+    assert!(
+        g.event_kinds()
+            .iter()
+            .any(|kind| kind == "OPENVIKING_STARTED"),
+        "readiness appends OPENVIKING_STARTED (§2.2)"
+    );
+    g.note(
+        scenario,
+        "MarketRig provisioned its own environment offline from the wheels and the real child answered /ready",
+        json!({ "installation": installation(&g), "embedding_dimension": dimension }),
+    );
+
+    let desk = format!("{cell}-e6-{}", marketrig_acceptance::now_secs());
+    let (status, created) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/desks",
+        Some(&json!({ "name": desk, "runtime": cell }).to_string()),
+    );
+    assert_eq!(status, 201, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+
+    // A desk created while the child is READY gets its user, its key, and the
+    // seeded skill at the end of creation (§3.2, §5.3) — the premise of
+    // everything the session is about to be asked to do.
+    assert!(
+        waited(SETTLES, "the desk's OpenViking user", || {
+            !kinds(&g, &desk_id, "DESK_MEMORY_PROVISIONED").is_empty()
+        }),
+        "a desk created while the child is READY is provisioned at creation (§3.2)"
+    );
+
+    // Mechanical, and it names the instrument the operator trades: a cycle only
+    // closes on a market the real feed is observing.
+    let quotes = format!("/desks/{desk_id}/market/quotes");
+    let live = |g: &Harness| -> Option<String> {
+        g.call(&endpoint, "GET", &quotes, None).1["quotes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|quote| quote["health"] == "LIVE")
+            .and_then(|quote| quote["instrument_id"].as_str().map(str::to_owned))
+    };
+    assert!(
+        waited(SETTLES, "a live observation from Yahoo", || {
+            live(&g).is_some()
+        }),
+        "the real feed never produced an observation; this is a mechanical failure"
+    );
+    let instrument = live(&g).expect("a live instrument");
+
+    let workspace = g.workspace(&desk);
+    let home = g
+        .out
+        .join("data")
+        .join("openviking")
+        .join("plugin")
+        .join(&desk_id);
+    let doctor = workspace
+        .join(".marketrig")
+        .join("plugins")
+        .join(format!("openviking-{cell}"))
+        .join("scripts")
+        .join("ov-memory-doctor.mjs");
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — memory and skills on real OpenViking (feature SPEC §7.3)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:       {desk}\n\
+         Runtime:    {runtime} {version} at {path}\n\
+         Python:     {python}\n\
+         Node:       {node}\n\
+         Wheels:     {wheels}\n\
+         Provider:   {base} — llm {llm}, embeddings {embedding} ({dimension} dimensions)\n\
+         Instrument: {instrument}   (LIVE on the real feed right now)\n\
+         Data root:  {root}\n\
+         Evidence:   {root}\n\
+         \n\
+         MarketRig has already provisioned its own OpenViking environment offline\n\
+         from those wheels, started the server, and given this desk its own user,\n\
+         its key, and the seeded `desk-improvement` skill. Nothing to register and\n\
+         nothing to start, as in E4: MarketRig launches the runtime itself, with\n\
+         the memory plugin's hooks and the `openviking` MCP server registered, and\n\
+         this console becomes the desk's terminal.\n\
+         \n\
+         1. Answer whatever {runtime} asks on first launch, as in E4, and nothing\n\
+         \x20  more.\n\
+         \n\
+         2. Ask the session to buy one unit of {instrument} through `submit_order`\n\
+         \x20  and then to sell that same unit. That closes one position cycle, and\n\
+         \x20  MarketRig queues its EVALUATION prompt and delivers it.\n\
+         \n\
+         3. Let the session do what its constitution says: state the lesson plainly\n\
+         \x20  in the conversation — that is what gets captured — and write it into\n\
+         \x20  a skill with the `openviking` tools (`write` on\n\
+         \x20  viking://~/skills/<name>/SKILL.md). Do not write either yourself, and\n\
+         \x20  do not edit `.agents/skills/`: it is MarketRig's read-only projection\n\
+         \x20  and an edit there must be refused.\n\
+         \n\
+         4. Confirm the capture yourself, from inside the session, which is where\n\
+         \x20  this desk's OpenViking identity is:\n\
+         \n\
+         \x20      node {doctor}\n\
+         \n\
+         \x20  The harness holds no desk key and records this aspect INCONCLUSIVE\n\
+         \x20  either way. That report, and the plugin's own state and logs under\n\
+         \x20  {home}, are the evidence.\n\
+         \n\
+         5. When the harness says so, it ends the session and resumes the thread.\n\
+         \x20  Ask the new session what this desk learned — it must reach for the\n\
+         \x20  `openviking` `search` tool — and to read its own skill back. Let the\n\
+         \x20  first session finish a turn before that: a Claude `--resume` only\n\
+         \x20  succeeds once the earlier session ended one.\n\
+         \n\
+         6. The harness then switches the desk to {other} and stops. The same skill\n\
+         \x20  must be readable through {other}'s own path.\n\
+         \n\
+         The harness waits up to {patience} minutes per step. While this console is\n\
+         \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
+         \x20  terminal with `pkill -f deps/experiment-`, then `stty sane` here.\n\
+         ===========================================================================\n",
+        version = row["version"].as_str().unwrap_or_default(),
+        path = row["executable_path"].as_str().unwrap_or_default(),
+        python = value(OPENVIKING[0]),
+        node = value(OPENVIKING[1]),
+        wheels = value(OPENVIKING[2]),
+        base = value(MEMORY[0]),
+        llm = value(MEMORY[2]),
+        embedding = value(MEMORY[3]),
+        root = g.out.display(),
+        doctor = doctor.display(),
+        home = home.display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e6.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; the environment is provisioned and the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "instrument": instrument,
+                "openviking_home": home.display().to_string() }),
+    );
+
+    let console = console::attach(&endpoint, &desk_id);
+
+    let (status, activated) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/activate"),
+        Some(r#"{"mode":"NEW"}"#),
+    );
+    assert_eq!(status, 202, "the runtime must be activatable: {activated}");
+
+    // The projection runs before the launch, so the seeded skill is on disk
+    // whatever the operator does next (§5.2, §5.3).
+    let seeded = workspace
+        .join(".agents")
+        .join("skills")
+        .join("desk-improvement")
+        .join("SKILL.md");
+    assert!(
+        waited(SETTLES, "the seeded skill's projection", || {
+            seeded.is_file()
+        }),
+        "activation projects the desk's skills before the session starts (§5.2): {}",
+        seeded.display()
+    );
+    let before = skills(&workspace);
+
+    if !waited(PATIENCE, "the session to become ready", || {
+        !kinds(&g, &desk_id, "SESSION_READY").is_empty()
+    }) {
+        g.inconclusive(
+            scenario,
+            "the launch never reached readiness — the operator may not have answered its first-launch questions",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    g.note(
+        scenario,
+        "MarketRig started the runtime with the memory plugin registered and the launch reached readiness",
+        json!({ "activation": kinds(&g, &desk_id, "SESSION_STARTED"), "skills": before }),
+    );
+
+    // --- The agent's own half (root §17) ------------------------------------
+    if !waited(PATIENCE, "the session to close one position cycle", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+            &[&desk_id],
+        ) >= 1
+    }) {
+        g.inconclusive(
+            scenario,
+            "no position cycle was closed within the cell's patience",
+            json!({ "prompts": prompt_states(&g, &desk_id) }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let cycle: String = g.scalar(
+        "SELECT id FROM position_cycles WHERE desk_id = ?1 ORDER BY closed_at_ns LIMIT 1",
+        &[&desk_id],
+    );
+    if waited(PATIENCE, "the evaluation prompt to be delivered", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION' \
+             AND state = 'DELIVERED'",
+            &[&desk_id],
+        ) >= 1
+    }) {
+        assert_delivery(&g, &desk_id);
+        g.note(
+            scenario,
+            "a round trip closed a cycle and MarketRig delivered its evaluation to the session",
+            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the evaluation prompt was not delivered within the cell's patience",
+            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+        );
+    }
+
+    // (a) Capture. Inconclusive by construction: see this function's own note.
+    g.inconclusive(
+        scenario,
+        "whether the turn was captured under this desk's OpenViking user is the operator's to confirm \
+         from inside the session — the harness holds no desk key",
+        json!({
+            "confirm": format!("node {}", doctor.display()),
+            "plugin_state": plugin_state(&home),
+        }),
+    );
+
+    // (b) The skill, which reaches the workspace only through MarketRig's own
+    // projection after SESSION_TURN_ENDED (§5.2).
+    let learned = waited(
+        PATIENCE,
+        "a skill written or revised through the openviking tools",
+        || skills(&workspace) != before,
+    );
+    let after = skills(&workspace);
+    if learned {
+        let changed: Vec<&String> = after
+            .iter()
+            .filter(|(name, files)| before.get(*name) != Some(files))
+            .map(|(name, _)| name)
+            .collect();
+        for name in &changed {
+            let skill = workspace
+                .join(".agents")
+                .join("skills")
+                .join(name)
+                .join("SKILL.md");
+            assert!(
+                skill.is_file(),
+                "a projected skill carries its SKILL.md (§5.2): {}",
+                skill.display()
+            );
+        }
+        g.note(
+            scenario,
+            "the session's skill write reached the workspace through MarketRig's projection",
+            json!({ "changed": changed, "skills": after,
+                    "turn_ends": kinds(&g, &desk_id, "SESSION_TURN_ENDED").len() }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "no skill was written or revised within the cell's patience",
+            json!({ "skills": after,
+                    "turn_ends": kinds(&g, &desk_id, "SESSION_TURN_ENDED").len(),
+                    "failures": kinds(&g, &desk_id, "SKILLS_PROJECTION_FAILED") }),
+        );
+    }
+
+    // --- The later session: the same thread, the same skills (§5.2, §7.3) ---
+    let (status, ended) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/exit"),
+        None,
+    );
+    assert!(
+        matches!(status, 202 | 409 | 502),
+        "exit answers the process, says there was none, or says its shutdown continues: {ended}"
+    );
+    println!(
+        "\r\n{scenario}: resuming the thread — ask the new session what this desk learned, and to read its own skill.\r\n"
+    );
+    let projections = kinds(&g, &desk_id, "SKILLS_PROJECTED").len();
+    let (status, activated) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/activate"),
+        Some(r#"{"mode":"CONTINUE"}"#),
+    );
+    assert_eq!(
+        status, 202,
+        "the desk's thread must be resumable: {activated}"
+    );
+    if waited(SETTLES, "the resumed activation's projection", || {
+        kinds(&g, &desk_id, "SKILLS_PROJECTED").len() > projections
+    }) {
+        assert_eq!(
+            skills(&workspace),
+            after,
+            "a resumed activation projects the same skills (§5.2)"
+        );
+        g.note(
+            scenario,
+            "the resumed activation projected the desk's skills again, unchanged",
+            json!({ "skills": after }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the resumed activation projected nothing within the cell's patience",
+            json!({ "failures": kinds(&g, &desk_id, "SKILLS_PROJECTION_FAILED") }),
+        );
+    }
+    g.inconclusive(
+        scenario,
+        "whether the resumed session found the lesson through `search` is the operator's to confirm on the console",
+        json!({ "cycle": cycle,
+                "expect": "the session reaches for the openviking `search` tool and answers from what the earlier session said" }),
+    );
+
+    // The other runtime reads the same skills through its own path (§5.1): the
+    // `.claude/skills` link on Claude Code, `.agents/skills/` on Codex.
+    let (status, other_row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{other}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{other_row}");
+    if other_row["state"] == "AVAILABLE" {
+        let (status, switched) = g.api(
+            scenario,
+            &endpoint,
+            "POST",
+            &format!("/desks/{desk_id}/session/switch"),
+            Some(&json!({ "runtime": other }).to_string()),
+        );
+        assert_eq!(status, 200, "{switched}");
+        assert_eq!(switched["selected_runtime"], other);
+        let root = match other {
+            "claude" => workspace.join(".claude").join("skills"),
+            _ => workspace.join(".agents").join("skills"),
+        };
+        for name in after.keys() {
+            let skill = root.join(name).join("SKILL.md");
+            assert!(
+                std::fs::read(&skill).is_ok_and(|bytes| !bytes.is_empty()),
+                "the other runtime reads the same skill through its own path (§5.1): {}",
+                skill.display()
+            );
+        }
+        g.note(
+            scenario,
+            "the desk switched runtimes and the same skills are readable through the other runtime's own path",
+            json!({ "switched": switched, "path": root.display().to_string(),
+                    "skills": after.keys().collect::<Vec<_>>() }),
+        );
+    } else {
+        g.inconclusive(
+            scenario,
+            "the other runtime is not installed on this machine, so the switch leg was not run",
+            json!({ "runtime": other_row }),
+        );
+    }
+
+    g.note(
+        scenario,
+        "the plugin's own state and logs are in the bundle",
+        json!({ "openviking_home": home.display().to_string(), "files": plugin_state(&home) }),
+    );
+    console.detach();
+    finish(&mut g, scenario, daemon, &desk_id);
+}
+
+/// The projected skill tree by skill name (§5.2): per file its path inside the
+/// tree, its size, and a content sum, so an edit that keeps a file's length
+/// still reads as a change. It is all the harness can see of the desk's
+/// OpenViking skills without the desk key.
+fn skills(workspace: &std::path::Path) -> std::collections::BTreeMap<String, Vec<String>> {
+    let root = workspace.join(".agents").join("skills");
+    let mut tree = std::collections::BTreeMap::new();
+    for skill in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        if !skill.path().is_dir() {
+            continue;
+        }
+        let mut files = Vec::new();
+        let mut dirs = vec![skill.path()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                let sum: u64 = bytes.iter().map(|byte| u64::from(*byte)).sum();
+                let named = path.strip_prefix(&root).unwrap_or(&path).display();
+                files.push(format!("{named} {} {sum}", bytes.len()));
+            }
+        }
+        files.sort();
+        tree.insert(skill.file_name().to_string_lossy().into_owned(), files);
+    }
+    tree
+}
+
+/// The plugin's own state, pending queue, and `logs/` under `OPENVIKING_HOME`
+/// (§4.3), which the bundle already holds: the data root *is* the evidence
+/// directory (root §17), so this only names what landed there.
+fn plugin_state(home: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut dirs = vec![home.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            found.push(
+                path.strip_prefix(home)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
+    found.sort();
+    found
 }
 
 /// One desk's events of a kind, oldest first, as payloads.
