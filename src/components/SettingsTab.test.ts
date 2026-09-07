@@ -11,8 +11,13 @@ vi.mock("@tauri-apps/plugin-autostart", () => ({
 
 import { flushPromises } from "@vue/test-utils";
 import { enable, isEnabled } from "@tauri-apps/plugin-autostart";
-import { installFakeDaemon } from "../test/fakeDaemon";
+import {
+  FakeWebSocket,
+  installFakeDaemon,
+  installFakeWebSocket,
+} from "../test/fakeDaemon";
 import { client } from "../client/client.gen";
+import { useEvents } from "../composables/useEvents";
 import { mountWithI18n } from "../test/mountWithI18n";
 import SettingsTab from "./SettingsTab.vue";
 
@@ -24,8 +29,18 @@ const policy = {
   updated_at_ns: 1,
 };
 
+/** `GET /openviking`; a test swaps it for the row the daemon would answer. */
+function status(
+  setup: Record<string, unknown>,
+  child = "NOT_STARTED",
+): Record<string, unknown> {
+  return { setup, child, desks: {} };
+}
+
 let put: string | null = null;
 let runtimes: unknown[] = [];
+let ov: Record<string, unknown>;
+let setupAnswer: () => { status: number; body?: unknown };
 
 beforeEach(() => {
   put = null;
@@ -35,6 +50,8 @@ beforeEach(() => {
     { runtime: "codex", state: "AVAILABLE", version: "1.0.0" },
     { runtime: "claude", state: "UNAVAILABLE" },
   ];
+  ov = status({ state: "UNCONFIGURED" });
+  setupAnswer = () => ({ status: 202, body: { state: "PROVISIONING" } });
   client.setConfig({ baseUrl: "http://127.0.0.1:7100" });
   installFakeDaemon({
     "GET /runtimes": () => ({ status: 200, body: { runtimes } }),
@@ -46,6 +63,9 @@ beforeEach(() => {
         embedding_model: "m-2",
       },
     }),
+    "GET /openviking": () => ({ status: 200, body: ov }),
+    "PUT /openviking/setup": () => setupAnswer(),
+    "POST /openviking/retry": () => ({ status: 202, body: ov }),
     "GET /settings/policies": () => ({ status: 200, body: policy }),
     "PUT /settings/policies": (request) => {
       put = request.body;
@@ -106,4 +126,112 @@ it("leaves autostart alone once a runtime is AVAILABLE", async () => {
   await flushPromises();
 
   expect(enable).not.toHaveBeenCalled();
+});
+
+it("provisions from Settings and follows the row out of PROVISIONING", async () => {
+  vi.useFakeTimers();
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
+    "UNCONFIGURED",
+  );
+
+  await wrapper
+    .get('[data-testid="openviking-python"]')
+    .setValue("/opt/py/bin/python3.12");
+  await wrapper.get('[data-testid="openviking-node"]').setValue("/opt/n/node");
+  ov = status({
+    state: "PROVISIONING",
+    python_path: "/opt/py/bin/python3.12",
+    node_path: "/opt/n/node",
+  });
+  await wrapper.get('[data-testid="openviking"] form').trigger("submit");
+  await flushPromises();
+
+  expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
+    "PROVISIONING",
+  );
+  expect(
+    wrapper.get('[data-testid="openviking-setup"]').attributes("disabled"),
+  ).toBeDefined();
+
+  // The 2 s refetch, not a reload, is what shows the finished environment.
+  ov = status(
+    {
+      state: "AVAILABLE",
+      python_path: "/opt/py/bin/python3.12",
+      python_version: "3.12",
+      node_path: "/opt/n/node",
+    },
+    "READY",
+  );
+  await vi.advanceTimersByTimeAsync(2_000);
+  await flushPromises();
+
+  expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
+    "AVAILABLE READY",
+  );
+  expect(
+    wrapper.get('[data-testid="openviking-setup"]').attributes("disabled"),
+  ).toBeUndefined();
+  vi.useRealTimers();
+});
+
+it("shows a PYTHON_UNSUPPORTED refusal beside the fields", async () => {
+  setupAnswer = () => ({
+    status: 400,
+    body: {
+      code: "PYTHON_UNSUPPORTED",
+      message: "That interpreter reports 3.11; MarketRig needs 3.12.",
+    },
+  });
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  await wrapper
+    .get('[data-testid="openviking-python"]')
+    .setValue("/opt/py/bin/python3.11");
+  await wrapper.get('[data-testid="openviking"] form').trigger("submit");
+  await flushPromises();
+
+  expect(wrapper.get('[data-testid="openviking-error"]').text()).toContain(
+    "3.11",
+  );
+  expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
+    "UNCONFIGURED",
+  );
+});
+
+it("turns UNAVAILABLE with Retry when the tail reports a loss", async () => {
+  installFakeWebSocket();
+  const { connect, disconnect } = useEvents();
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  expect(wrapper.find('[data-testid="openviking-retry"]').exists()).toBe(false);
+
+  connect(7100, "b");
+  FakeWebSocket.instances[0].open();
+  ov = status(
+    {
+      state: "UNAVAILABLE",
+      failure_code: "CHILD_FAILED",
+      failure_message: "openviking-server: address already in use",
+    },
+    "LOST",
+  );
+  FakeWebSocket.instances[0].message(
+    JSON.stringify({
+      id: "e-1",
+      kind: "OPENVIKING_LOST",
+      occurred_at_ns: 1,
+      payload: { exit_code: 1 },
+    }),
+  );
+  await flushPromises();
+
+  expect(wrapper.get('[data-testid="openviking-failure"]').text()).toContain(
+    "address already in use",
+  );
+  expect(wrapper.find('[data-testid="openviking-retry"]').exists()).toBe(true);
+  disconnect();
 });

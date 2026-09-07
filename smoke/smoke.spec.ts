@@ -139,6 +139,14 @@ describe("the packaged desktop", () => {
       "the Settings tab to show",
       async () => await $('[data-testid="runtime-path-codex"]').isExisting(),
     );
+
+    // The wiped root leaves OpenViking UNCONFIGURED: both path fields empty
+    // and no Retry (OpenViking feature SPEC §8).
+    expect(await $('[data-testid="openviking-python"]').getValue()).toBe("");
+    expect(await $('[data-testid="openviking-node"]').getValue()).toBe("");
+    expect(await $('[data-testid="openviking-retry"]').isExisting()).toBe(
+      false,
+    );
   });
 
   it("2 — registers the stand-in runtime, starts a desk, and shows its banner", async () => {

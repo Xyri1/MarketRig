@@ -87,6 +87,13 @@
       "path": "Path to the executable",
       "submit": "Use this path"
     },
+    "openviking": {
+      "title": "Memory",
+      "python": "Path to Python 3.12",
+      "node": "Path to Node 22 or newer",
+      "setup": "Set up",
+      "retry": "Retry"
+    },
     "memory": {
       "title": "Memory provider",
       "baseUrl": "Base URL",
@@ -151,6 +158,10 @@
     },
     "CONTROL_PLANE_LOST": {
       "title": "A runtime control plane was lost",
+      "body": "{detail}"
+    },
+    "OPENVIKING_UNAVAILABLE": {
+      "title": "Memory is unavailable",
       "body": "{detail}"
     },
     "TRIGGER_MISSED": {

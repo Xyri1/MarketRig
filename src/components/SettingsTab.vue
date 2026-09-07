@@ -22,13 +22,22 @@ import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   memoryProvider,
   memoryProviderRow,
+  openviking,
+  openvikingRetry,
+  openvikingSetup,
   policies,
   putPolicies,
   runtimeDiscover,
   runtimeRetry,
   runtimes as listRuntimes,
 } from "../client";
-import type { Envelope, Provider, Resource, Runtime } from "../client";
+import type {
+  Envelope,
+  OpenVikingStatus,
+  Provider,
+  Resource,
+  Runtime,
+} from "../client";
 import { useDaemon } from "../composables/useDaemon";
 import { useEvents } from "../composables/useEvents";
 import { selectTrigger } from "../deskState";
@@ -40,6 +49,10 @@ const { quit } = useDaemon();
 const rows = ref<Runtime[]>([]);
 const explicit = reactive(new Map<string, string>());
 const memory = ref<Provider | null>(null);
+const ov = ref<OpenVikingStatus | null>(null);
+const paths = reactive({ python: "", node: "" });
+const setupFailure = ref("");
+let provisioning: ReturnType<typeof setInterval> | null = null;
 const policy = ref<Resource | null>(null);
 const autostart = ref(false);
 const failure = ref("");
@@ -66,6 +79,40 @@ async function loadMemory(): Promise<void> {
   form.base_url = answer.data?.base_url ?? "";
   form.llm = answer.data?.llm_model ?? "";
   form.embedding = answer.data?.embedding_model ?? "";
+}
+
+/** The row and the child's live state; `PROVISIONING` polls itself (§8). */
+async function loadOpenViking(): Promise<void> {
+  const answer = await openviking();
+  if (refused(answer.error)) return;
+  ov.value = answer.data ?? null;
+  paths.python = answer.data?.setup.python_path ?? "";
+  paths.node = answer.data?.setup.node_path ?? "";
+  if (ov.value?.setup.state === "PROVISIONING") {
+    provisioning ??= setInterval(() => void loadOpenViking(), 2_000);
+  } else if (provisioning) {
+    clearInterval(provisioning);
+    provisioning = null;
+  }
+}
+
+async function provision(): Promise<void> {
+  setupFailure.value = "";
+  const answer = await openvikingSetup({
+    body: { python: paths.python, node: paths.node },
+  });
+  // A setup refusal names the field the operator got wrong, so it shows there
+  // instead of in the tab's one failure line (§8).
+  if (answer.error) {
+    setupFailure.value = (answer.error as Envelope).message;
+    return;
+  }
+  await loadOpenViking();
+}
+
+async function retryChild(): Promise<void> {
+  refused((await openvikingRetry()).error);
+  await loadOpenViking();
 }
 
 async function loadPolicies(): Promise<void> {
@@ -111,12 +158,29 @@ async function toggleAutostart(on: boolean): Promise<void> {
 const off = [
   on(["RUNTIME_DISCOVERED", "RUNTIME_UNAVAILABLE"], () => void loadRuntimes()),
   on("OPENVIKING_CONFIGURED", () => void loadMemory()),
+  on(
+    [
+      "OPENVIKING_PROVISIONED",
+      "OPENVIKING_STARTED",
+      "OPENVIKING_LOST",
+      "OPENVIKING_UNAVAILABLE",
+    ],
+    () => void loadOpenViking(),
+  ),
   on("POLICY_CHANGED", () => void loadPolicies()),
 ];
-onUnmounted(() => off.forEach((stop) => stop()));
+onUnmounted(() => {
+  off.forEach((stop) => stop());
+  if (provisioning) clearInterval(provisioning);
+});
 
 onMounted(async () => {
-  await Promise.all([loadRuntimes(), loadMemory(), loadPolicies()]);
+  await Promise.all([
+    loadRuntimes(),
+    loadMemory(),
+    loadOpenViking(),
+    loadPolicies(),
+  ]);
   // First launch — no runtime discovered yet — turns autostart on once.
   // ponytail: "first launch" is read as "no AVAILABLE runtime", so an operator
   // who disables autostart before discovering one gets it re-enabled next
@@ -187,6 +251,62 @@ onMounted(async () => {
           </button>
         </form>
       </div>
+    </section>
+
+    <section v-if="ov" class="flex flex-col gap-2" data-testid="openviking">
+      <p class="text-xs text-ink-muted">{{ t("settings.openviking.title") }}</p>
+      <p class="terminal text-sm wrap-anywhere">
+        {{ ov.setup.state }} {{ ov.child }}
+      </p>
+      <p
+        v-if="ov.setup.failure_message"
+        class="terminal text-sm wrap-anywhere"
+        data-testid="openviking-failure"
+      >
+        {{ ov.setup.failure_code }} {{ ov.setup.failure_message }}
+      </p>
+      <form class="flex flex-col gap-2" @submit.prevent="provision()">
+        <input
+          v-model="paths.python"
+          class="terminal rounded-control border border-line px-2 py-1"
+          data-testid="openviking-python"
+          :aria-label="t('settings.openviking.python')"
+          :placeholder="t('settings.openviking.python')"
+        />
+        <input
+          v-model="paths.node"
+          class="terminal rounded-control border border-line px-2 py-1"
+          data-testid="openviking-node"
+          :aria-label="t('settings.openviking.node')"
+          :placeholder="t('settings.openviking.node')"
+        />
+        <p
+          v-if="setupFailure"
+          class="terminal text-xs"
+          data-testid="openviking-error"
+        >
+          {{ setupFailure }}
+        </p>
+        <div class="flex gap-2">
+          <button
+            type="submit"
+            class="rounded-control border border-line px-2 py-1"
+            data-testid="openviking-setup"
+            :disabled="ov.setup.state === 'PROVISIONING'"
+          >
+            {{ t("settings.openviking.setup") }}
+          </button>
+          <button
+            v-if="ov.setup.state === 'UNAVAILABLE'"
+            type="button"
+            class="rounded-control border border-line px-2 py-1"
+            data-testid="openviking-retry"
+            @click="retryChild()"
+          >
+            {{ t("settings.openviking.retry") }}
+          </button>
+        </div>
+      </form>
     </section>
 
     <section v-if="memory" class="flex flex-col gap-2">
