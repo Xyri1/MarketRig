@@ -12,6 +12,7 @@ pub mod log;
 pub mod memory;
 pub mod node;
 pub mod openviking;
+pub mod plugin;
 pub mod policy;
 pub mod runtime;
 pub mod schedule;
@@ -146,6 +147,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             mcp_path,
             test_data_root,
             startup.daemon_uuid.clone(),
+            openviking.clone(),
         );
         let dispatcher = dispatch::Dispatcher::new(
             startup.store.clone(),
@@ -157,6 +159,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
                     search_path.clone(),
                     terminals.clone(),
                     channels.clone(),
+                    openviking.clone(),
                     adapter_events,
                 )),
             },

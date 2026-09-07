@@ -258,6 +258,12 @@ pub struct OpenViking {
     /// §2.2's readiness deadline in milliseconds; a check shortens it so a
     /// deadline miss costs a second rather than two minutes.
     ready_deadline_ms: AtomicU64,
+    /// Desks whose last projection failed, so §5.2's event is appended once per
+    /// failure streak rather than once per turn.
+    projection_failed: Mutex<BTreeSet<String>>,
+    /// §5.2's coalescing: a desk is present while a projection is in flight,
+    /// and its value is whether one is queued behind it.
+    refresh: Mutex<BTreeMap<String, bool>>,
     /// Notified at every child readiness. The skills projection (§5.2) is the
     /// waiter C55 adds.
     pub ready: Arc<tokio::sync::Notify>,
@@ -275,6 +281,8 @@ impl OpenViking {
             live: Mutex::new(Live::default()),
             announced: Mutex::new(BTreeSet::new()),
             ready_deadline_ms: AtomicU64::new(READY_DEADLINE_MS),
+            projection_failed: Mutex::new(BTreeSet::new()),
+            refresh: Mutex::new(BTreeMap::new()),
             ready: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -1306,12 +1314,467 @@ impl OpenViking {
     }
 
     /// §5.3's seed upload: `GET /api/v1/skills/desk-improvement` missing means
-    /// `POST /api/v1/skills` with the seed's `SKILL.md` under the desk's key.
-    /// C55 fills this in with the rewritten seed; until then a freshly
-    /// provisioned desk simply starts with no skills of its own.
+    /// `POST /api/v1/skills` with the seed's `SKILL.md` under the desk's key,
+    /// the desk name substituted and nothing else changed.
     async fn upload_seed_skill(&self, desk_id: &str, key: &str) {
-        let _ = (desk_id, key);
+        let Some(port) = self.port() else {
+            return;
+        };
+        let name = match crate::desk::get(&self.store, desk_id) {
+            Ok(desk) => desk.name,
+            Err(e) => {
+                tracing::warn!(desk = desk_id, error = %e, "reading the desk to seed failed");
+                return;
+            }
+        };
+        let seeded = match self
+            .user_get(port, key, "skills/desk-improvement", &[])
+            .await
+        {
+            // Already there: the seed is written once and never rewritten.
+            Ok(Some(_)) => return,
+            Ok(None) => {
+                let body = json!({ "data": crate::desk::SEED_SKILL.replace("<name>", &name) });
+                self.user_post(port, key, "skills", body).await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = seeded {
+            tracing::warn!(desk = desk_id, error = %e, "seeding desk-improvement failed");
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The runtime launch (§4.3)
+// ---------------------------------------------------------------------------
+
+/// What one runtime launch takes from OpenViking (§4.3).
+pub struct RuntimeLaunch {
+    /// The validated Node path — `Some` exactly when the launch registers the
+    /// plugins.
+    pub node: Option<PathBuf>,
+    /// The environment the runtime process carries, inherited by every hook and
+    /// by the MCP proxy.
+    pub env: Vec<(String, String)>,
+}
+
+impl OpenViking {
+    /// §4.3: the registration and the environment for one desk's launch. The
+    /// desk's key is the single predicate — without it the plugins have no
+    /// credential to speak with, so the launch carries no registration entries
+    /// and `OPENVIKING_MEMORY_ENABLED=0`.
+    ///
+    /// ponytail: §2.2 would register the plugins during `STARTING` too, on the
+    /// strength of their own pending queue; a key that outlives a restart (§3.2
+    /// makes it deterministic) would let that happen without a second predicate.
+    pub fn launch(&self, desk_id: &str) -> RuntimeLaunch {
+        let off = RuntimeLaunch {
+            node: None,
+            env: vec![("OPENVIKING_MEMORY_ENABLED".to_string(), "0".to_string())],
+        };
+        let row = match setup_row(&self.store) {
+            Ok(row) if row.state == "AVAILABLE" => row,
+            Ok(_) => return off,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading the OpenViking row for a launch failed");
+                return off;
+            }
+        };
+        let (Some(node), Some(key)) = (row.node_path, self.desk_key(desk_id)) else {
+            return off;
+        };
+        let home = self.roots.data.join(HOME).join("plugin").join(desk_id);
+        let _ = fs::create_dir_all(&home);
+        let text = |path: &Path| path.to_string_lossy().to_string();
+        let mut env = vec![
+            ("OPENVIKING_API_KEY".to_string(), key),
+            ("OPENVIKING_ACCOUNT".to_string(), ACCOUNT.to_string()),
+            ("OPENVIKING_USER".to_string(), Self::desk_user(desk_id)),
+            ("OPENVIKING_HOME".to_string(), text(&home)),
+            // Two files that do not exist, so `~/.openviking/` is never read.
+            (
+                "OPENVIKING_CONFIG_FILE".to_string(),
+                text(&home.join("absent-ov.conf")),
+            ),
+            (
+                "OPENVIKING_CLI_CONFIG_FILE".to_string(),
+                text(&home.join("absent-ovcli.conf")),
+            ),
+            ("OPENVIKING_MEMORY_ENABLED".to_string(), "1".to_string()),
+        ];
+        // The last known port; before the child has one the rest still stands.
+        if let Some(port) = self.port() {
+            env.push((
+                "OPENVIKING_URL".to_string(),
+                format!("http://127.0.0.1:{port}"),
+            ));
+        }
+        env.sort();
+        RuntimeLaunch {
+            node: Some(PathBuf::from(node)),
+            env,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The skills projection (§5.2)
+// ---------------------------------------------------------------------------
+
+/// One skill as the projection writes it: `SKILL.md` and its auxiliary files.
+struct Skill {
+    name: String,
+    content: String,
+    files: Vec<(String, String)>,
+}
+
+/// §5.2: a kebab or snake identifier, no path separators. Validated before any
+/// write, because the name is a directory the server chose.
+fn valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The same rule for an auxiliary file's relative path: `/`-separated segments
+/// under the skill's own directory and nothing that could climb out of it.
+fn valid_skill_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 255
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && segment.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+}
+
+/// §5.2's permissions: files `0444` and directories `0555` on macOS, the
+/// READONLY attribute on every file on Windows. Everything *inside* `dir`,
+/// bottom-up; the directory itself is sealed by the caller once it is in place,
+/// because renaming a directory rewrites its `..` entry and a `0555` directory
+/// refuses that.
+fn seal(dir: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            seal(&path)?;
+            // Windows carries the attribute on files only.
+            if cfg!(unix) {
+                set_readonly(&path, true)?;
+            }
+        } else {
+            set_readonly(&path, true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Clears them again, top-down, so the tree can be deleted: Windows refuses to
+/// delete a READONLY file and a `0555` directory refuses the unlink.
+fn unseal(path: &Path) {
+    let _ = set_readonly(path, false);
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            unseal(&entry.path());
+        }
+    }
+}
+
+fn set_readonly(path: &Path, readonly: bool) -> std::io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(readonly);
+    fs::set_permissions(path, permissions)
+}
+
+/// §5.2's write and atomic swap. The previous tree survives every failure
+/// before the second rename, and is put back if that rename fails.
+fn write_projection(workspace: &Path, skills: &[Skill]) -> std::io::Result<()> {
+    let agents = workspace.join(".agents");
+    let live = agents.join("skills");
+    let stamp = uuid::Uuid::now_v7().to_string();
+    let tmp = agents.join(format!("skills.tmp-{stamp}"));
+    let old = agents.join(format!("skills.old-{stamp}"));
+
+    fs::create_dir_all(&tmp)?;
+    for skill in skills {
+        let dir = tmp.join(&skill.name);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("SKILL.md"), &skill.content)?;
+        for (path, content) in &skill.files {
+            let target = dir.join(path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(target, content)?;
+        }
+    }
+    seal(&tmp)?;
+
+    let existed = fs::symlink_metadata(&live).is_ok();
+    if existed {
+        // Before the swap, so the rename is allowed to rewrite the directory's
+        // `..` entry and the delete below is allowed at all (Windows refuses to
+        // delete a READONLY file).
+        unseal(&live);
+        fs::rename(&live, &old)?;
+    }
+    if let Err(e) = fs::rename(&tmp, &live) {
+        if existed {
+            let _ = fs::rename(&old, &live);
+        }
+        unseal(&tmp);
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    if cfg!(unix) {
+        set_readonly(&live, true)?;
+    }
+    if existed {
+        unseal(&old);
+        let _ = fs::remove_dir_all(&old);
+    }
+    Ok(())
+}
+
+impl OpenViking {
+    /// One call with a desk's own key. `Ok(None)` is a `404`.
+    async fn user_get(
+        &self,
+        port: u16,
+        key: &str,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Option<Value>, String> {
+        let mut url = reqwest::Url::parse(&format!("http://127.0.0.1:{port}/api/v1/{path}"))
+            .map_err(|e| e.to_string())?;
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query.iter().copied());
+        }
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(key)
+            .timeout(ADMIN_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| self.memory.redact(&e.to_string()))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        self.result(response).await.map(Some)
+    }
+
+    async fn user_post(
+        &self,
+        port: u16,
+        key: &str,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let response = self
+            .http
+            .post(format!("http://127.0.0.1:{port}/api/v1/{path}"))
+            .bearer_auth(key)
+            .timeout(ADMIN_TIMEOUT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| self.memory.redact(&e.to_string()))?;
+        self.result(response).await
+    }
+
+    /// The `{status, result}` envelope, redacted on every path.
+    async fn result(&self, response: reqwest::Response) -> Result<Value, String> {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!(
+                "HTTP {status}: {}",
+                self.memory.redact(&first_line(&text))
+            ));
+        }
+        let body: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("{e}: {}", self.memory.redact(&first_line(&text))))?;
+        Ok(body.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// §5.2's fetch: the user's own skills with their content and files. The
+    /// listing merges `viking://agent/skills`, so only the user's own root is
+    /// projected. Answers the skills and the invalid names that were skipped.
+    async fn fetch_skills(&self, desk_id: &str) -> Result<(Vec<Skill>, Vec<String>), String> {
+        let (port, key) = {
+            let live = self.live();
+            if live.state != LiveState::Ready {
+                return Err("the OpenViking child is not ready".to_string());
+            }
+            match (live.port, live.keys.get(desk_id).cloned()) {
+                (Some(port), Some(key)) => (port, key),
+                _ => return Err("the desk has no OpenViking key".to_string()),
+            }
+        };
+        let listing = self
+            .user_get(port, &key, "skills", &[])
+            .await?
+            .unwrap_or(Value::Null);
+        let mut names = Vec::new();
+        let mut skipped = Vec::new();
+        for entry in listing["skills"].as_array().unwrap_or(&Vec::new()) {
+            let root = entry["root_uri"].as_str().unwrap_or_default();
+            if !root.starts_with("viking://user/") {
+                continue;
+            }
+            let name = entry["name"].as_str().unwrap_or_default();
+            if valid_skill_name(name) {
+                names.push(name.to_string());
+            } else {
+                skipped.push(name.to_string());
+            }
+        }
+
+        let mut skills = Vec::new();
+        for name in names {
+            let detail = self
+                .user_get(
+                    port,
+                    &key,
+                    &format!("skills/{name}"),
+                    &[("include_content", "true"), ("include_files", "true")],
+                )
+                .await?
+                .ok_or_else(|| {
+                    format!("skill {name} disappeared between the list and the fetch")
+                })?;
+            let mut files = Vec::new();
+            for file in detail["files"].as_array().unwrap_or(&Vec::new()) {
+                let path = file["path"].as_str().unwrap_or_default();
+                let uri = file["uri"].as_str().unwrap_or_default();
+                if file["is_dir"].as_bool().unwrap_or(false)
+                    || path == "SKILL.md"
+                    || uri.is_empty()
+                    || !valid_skill_path(path)
+                {
+                    continue;
+                }
+                let content = self
+                    .user_get(port, &key, "content/read", &[("uri", uri)])
+                    .await?
+                    .ok_or_else(|| format!("{path} of skill {name} could not be read"))?;
+                files.push((
+                    path.to_string(),
+                    content.as_str().unwrap_or_default().to_string(),
+                ));
+            }
+            skills.push(Skill {
+                content: detail["content"].as_str().unwrap_or_default().to_string(),
+                name,
+                files,
+            });
+        }
+        Ok((skills, skipped))
+    }
+
+    /// §5.2 before every activation, new or resume, and after every turn.
+    /// Never blocks and never fails the activation: every outcome is an event.
+    pub async fn project_skills(self: &Arc<Self>, desk_id: &str) {
+        let workspace = match crate::desk::get(&self.store, desk_id) {
+            Ok(desk) => PathBuf::from(desk.workspace_path),
+            Err(e) => {
+                tracing::warn!(desk = desk_id, error = %e, "reading the desk to project failed");
+                return;
+            }
+        };
+        let outcome = match self.fetch_skills(desk_id).await {
+            Ok((skills, skipped)) => write_projection(&workspace, &skills)
+                .map(|()| (skills.len(), skipped))
+                .map_err(|e| e.to_string()),
+            Err(reason) => Err(reason),
+        };
+        match outcome {
+            Ok((count, skipped)) => {
+                self.projection_failed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(desk_id);
+                self.projection_event(
+                    desk_id,
+                    "SKILLS_PROJECTED",
+                    json!({ "desk_id": desk_id, "count": count, "skipped": skipped }),
+                );
+            }
+            Err(reason) => {
+                // At most once per failure streak, so an activation that finds
+                // the child gone reports once and a turn's refresh stays quiet.
+                let first = self
+                    .projection_failed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(desk_id.to_string());
+                if first {
+                    self.projection_event(
+                        desk_id,
+                        "SKILLS_PROJECTION_FAILED",
+                        json!({ "desk_id": desk_id, "reason": reason }),
+                    );
+                }
+            }
+        }
+    }
+
+    fn projection_event(&self, desk_id: &str, kind: &'static str, payload: Value) {
+        let (at_ns, desk) = (now_ns(), desk_id.to_string());
+        let recorded = self
+            .store
+            .unit(move |tx| append_event(tx, kind, Some(&desk), at_ns, payload));
+        if let Err(e) = recorded {
+            tracing::warn!(error = %e, "recording {kind} failed");
+        }
+    }
+
+    /// §5.2's turn-end refresh, coalesced: one projection in flight per desk
+    /// and at most one queued behind it.
+    pub fn refresh_skills(self: &Arc<Self>, desk_id: &str) {
+        {
+            let mut refresh = self.refresh.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(queued) = refresh.get_mut(desk_id) {
+                *queued = true;
+                return;
+            }
+            refresh.insert(desk_id.to_string(), false);
+        }
+        let openviking = self.clone();
+        let desk_id = desk_id.to_string();
+        tokio::spawn(async move {
+            loop {
+                openviking.project_skills(&desk_id).await;
+                let mut refresh = openviking.refresh.lock().unwrap_or_else(|e| e.into_inner());
+                match refresh.get_mut(&desk_id) {
+                    Some(queued) if *queued => *queued = false,
+                    _ => {
+                        refresh.remove(&desk_id);
+                        return;
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// An [`OpenViking`] on a scratch root for another module's checks: the row is
+/// `UNCONFIGURED` and there is no child, so every launch is §4.3's off form.
+#[cfg(test)]
+pub(crate) fn unconfigured(store: Store, roots: Roots) -> Arc<OpenViking> {
+    OpenViking::new(
+        Arc::new(crate::memory::seam_memory(store, roots)),
+        "test-daemon".to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,7 +1806,8 @@ mod tests {
             .call(|c| {
                 c.prepare(
                     "SELECT kind, payload FROM operational_events WHERE kind LIKE 'OPENVIKING_%' \
-                     OR kind = 'DESK_MEMORY_PROVISIONED' ORDER BY occurred_at_ns, id",
+                     OR kind LIKE 'SKILLS_%' OR kind = 'DESK_MEMORY_PROVISIONED' \
+                     ORDER BY occurred_at_ns, id",
                 )?
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -2100,5 +2564,377 @@ mod tests {
         }
         assert_eq!(redacted.matches("<redacted>").count(), 4, "{redacted}");
         assert_eq!(ov.memory.redact("nothing to hide"), "nothing to hide");
+    }
+
+    // -- checks 6 and 7: the launch environment and the projection (§9) ------
+
+    /// One skill the fake server holds: `SKILL.md` and its auxiliary files.
+    type FakeSkill = (String, Vec<(String, String)>);
+
+    /// The consumed skills subset (§5.2) over an in-memory store, plus the two
+    /// knobs the checks need: a delay, so coalescing is observable, and a
+    /// request counter.
+    #[derive(Default)]
+    struct FakeSkills {
+        items: BTreeMap<String, FakeSkill>,
+        /// Entries the listing merges that the projection must not write: an
+        /// agent-root skill and an invalid name.
+        noise: bool,
+        delay_ms: u64,
+        listings: usize,
+        uploaded: Vec<String>,
+    }
+
+    type Fake = Arc<Mutex<FakeSkills>>;
+
+    /// Serves the routes §5.2 and §5.3 consume, on a fresh loopback port.
+    async fn fake_skills(state: Fake) -> u16 {
+        use axum::extract::{Path as AxumPath, Query, State};
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        fn lock(state: &Fake) -> std::sync::MutexGuard<'_, FakeSkills> {
+            state.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        let app = axum::Router::new()
+            .route(
+                "/api/v1/skills",
+                axum::routing::get(async |State(state): State<Fake>| {
+                    let (delay, mut skills) = {
+                        let mut fake = lock(&state);
+                        fake.listings += 1;
+                        let skills: Vec<Value> = fake
+                            .items
+                            .keys()
+                            .map(|name| json!({"name": name, "root_uri": "viking://user/u/skills"}))
+                            .collect();
+                        (fake.delay_ms, skills)
+                    };
+                    if lock(&state).noise {
+                        // The listing merges the agent root, which the
+                        // projection drops, and a name it must skip.
+                        skills.push(json!({"name": "shared", "root_uri": "viking://agent/skills"}));
+                        skills.push(
+                            json!({"name": "../escape", "root_uri": "viking://user/u/skills"}),
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    axum::Json(json!({"status": "ok", "result": {"skills": skills}}))
+                })
+                .post(
+                    async |State(state): State<Fake>, axum::Json(body): axum::Json<Value>| {
+                        let data = body["data"].as_str().unwrap_or_default().to_string();
+                        let mut fake = lock(&state);
+                        fake.uploaded.push(data.clone());
+                        fake.items
+                            .insert("desk-improvement".to_string(), (data, Vec::new()));
+                        axum::Json(json!({"status": "ok", "result": {}}))
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/skills/{name}",
+                axum::routing::get(
+                    async |State(state): State<Fake>, AxumPath(name): AxumPath<String>| {
+                        let fake = lock(&state);
+                        let Some((content, files)) = fake.items.get(&name) else {
+                            return StatusCode::NOT_FOUND.into_response();
+                        };
+                        let files: Vec<Value> = files
+                            .iter()
+                            .map(|(path, _)| {
+                                json!({
+                                    "path": path, "is_dir": false,
+                                    "uri": format!("viking://user/u/skills/{name}/{path}"),
+                                })
+                            })
+                            // The manifest carries `SKILL.md` and directories,
+                            // which the projection writes from `content`.
+                            .chain([json!({"path": "SKILL.md", "is_dir": false, "uri": "x"})])
+                            .collect();
+                        axum::Json(json!({"status": "ok", "result": {
+                            "name": name, "content": content, "files": files,
+                        }}))
+                        .into_response()
+                    },
+                ),
+            )
+            .route(
+                "/api/v1/content/read",
+                axum::routing::get(
+                    async |State(state): State<Fake>,
+                           Query(query): Query<BTreeMap<String, String>>| {
+                        let uri = query.get("uri").cloned().unwrap_or_default();
+                        let tail = uri.trim_start_matches("viking://user/u/skills/");
+                        let (name, path) = tail.split_once('/').unwrap_or_default();
+                        let fake = lock(&state);
+                        let content = fake.items.get(name).and_then(|(_, files)| {
+                            files
+                                .iter()
+                                .find(|(p, _)| p == path)
+                                .map(|(_, c)| c.clone())
+                        });
+                        match content {
+                            Some(content) => axum::Json(json!({"status": "ok", "result": content}))
+                                .into_response(),
+                            None => StatusCode::NOT_FOUND.into_response(),
+                        }
+                    },
+                ),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        port
+    }
+
+    /// A desk with a real workspace, and the child state a projection needs:
+    /// `READY`, that port, and the desk's key.
+    fn plant_ready(ov: &Arc<OpenViking>, desk_id: &str, name: &str, port: u16) -> PathBuf {
+        let workspace = ov.roots.desks.join(name);
+        fs::create_dir_all(workspace.join(".agents")).unwrap();
+        let (id, desk, path) = (
+            desk_id.to_string(),
+            name.to_string(),
+            workspace.display().to_string(),
+        );
+        ov.store
+            .unit(move |tx| {
+                tx.execute(
+                    "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, \
+                     ready_at_ns, selected_runtime) VALUES (?1, ?2, 'READY', ?3, 1, 1, 'codex')",
+                    params![id, desk, path],
+                )
+            })
+            .unwrap();
+        let mut live = ov.live();
+        live.state = LiveState::Ready;
+        live.port = Some(port);
+        live.keys
+            .insert(desk_id.to_string(), "desk-key".to_string());
+        workspace
+    }
+
+    fn tree(dir: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            for entry in fs::read_dir(&path).into_iter().flatten().flatten() {
+                let child = entry.path();
+                if child.is_dir() {
+                    stack.push(child);
+                } else {
+                    found.push(
+                        child
+                            .strip_prefix(dir)
+                            .unwrap()
+                            .to_string_lossy()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Check 6's environment set (§4.3), and the off form without a desk key.
+    #[tokio::test]
+    async fn the_launch_environment_is_the_documented_set() {
+        let (dir, ov) = scratch();
+        let off = ov.launch(DESK_A);
+        assert!(off.node.is_none());
+        assert_eq!(
+            off.env,
+            vec![("OPENVIKING_MEMORY_ENABLED".to_string(), "0".to_string())]
+        );
+
+        let node = dir.path().join("bin").join("node");
+        let node_sql = node.display().to_string();
+        ov.store
+            .unit(move |tx| {
+                tx.execute(
+                    "UPDATE openviking_setup SET state = 'AVAILABLE', node_path = ?1 WHERE id = 1",
+                    params![node_sql],
+                )
+            })
+            .unwrap();
+        // The row alone is not enough: without a key the plugins have no
+        // credential, so the launch is still the off form.
+        assert!(ov.launch(DESK_A).node.is_none());
+
+        {
+            let mut live = ov.live();
+            live.state = LiveState::Ready;
+            live.port = Some(4321);
+            live.keys.insert(DESK_A.to_string(), "the-key".to_string());
+        }
+        let launch = ov.launch(DESK_A);
+        assert_eq!(launch.node.as_deref(), Some(node.as_path()));
+        let home = ov.roots.data.join(HOME).join("plugin").join(DESK_A);
+        let text = |path: PathBuf| path.to_string_lossy().to_string();
+        assert_eq!(
+            launch.env,
+            vec![
+                ("OPENVIKING_ACCOUNT".to_string(), ACCOUNT.to_string()),
+                ("OPENVIKING_API_KEY".to_string(), "the-key".to_string()),
+                (
+                    "OPENVIKING_CLI_CONFIG_FILE".to_string(),
+                    text(home.join("absent-ovcli.conf")),
+                ),
+                (
+                    "OPENVIKING_CONFIG_FILE".to_string(),
+                    text(home.join("absent-ov.conf")),
+                ),
+                ("OPENVIKING_HOME".to_string(), text(home.clone())),
+                ("OPENVIKING_MEMORY_ENABLED".to_string(), "1".to_string()),
+                (
+                    "OPENVIKING_URL".to_string(),
+                    "http://127.0.0.1:4321".to_string()
+                ),
+                ("OPENVIKING_USER".to_string(), OpenViking::desk_user(DESK_A)),
+            ]
+        );
+        assert!(home.is_dir(), "the plugin's own home is created");
+    }
+
+    /// Check 7: the rewrite, the swap, the permissions, the skipped name, and
+    /// a failure that leaves the tree alone and reports once.
+    #[tokio::test]
+    async fn the_projection_rewrites_swaps_and_seals() {
+        let (_dir, ov) = scratch();
+        let fake: Fake = Arc::new(Mutex::new(FakeSkills {
+            noise: true,
+            items: BTreeMap::from([
+                (
+                    "desk-improvement".to_string(),
+                    ("# improve\n".to_string(), Vec::new()),
+                ),
+                (
+                    "spread_watch".to_string(),
+                    (
+                        "# watch\n".to_string(),
+                        vec![("refs/notes.md".to_string(), "notes\n".to_string())],
+                    ),
+                ),
+            ]),
+            ..FakeSkills::default()
+        }));
+        let port = fake_skills(fake.clone()).await;
+        let workspace = plant_ready(&ov, DESK_A, "alpha", port);
+        let skills = workspace.join(".agents").join("skills");
+
+        ov.project_skills(DESK_A).await;
+        assert_eq!(
+            tree(&skills),
+            vec![
+                "desk-improvement/SKILL.md",
+                "spread_watch/SKILL.md",
+                "spread_watch/refs/notes.md",
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(skills.join("spread_watch").join("refs").join("notes.md")).unwrap(),
+            "notes\n"
+        );
+        // The agent root is not this desk's, and an invalid name is skipped and
+        // named rather than written.
+        let projected = payload(&ov.store, "SKILLS_PROJECTED");
+        assert_eq!(projected["count"], json!(2));
+        assert_eq!(projected["skipped"], json!(["../escape"]));
+        assert!(!skills.join("shared").exists());
+
+        // Permissions: read-only files on both platforms, sealed directories on
+        // the platform that has them.
+        let file = skills.join("desk-improvement").join("SKILL.md");
+        assert!(fs::metadata(&file).unwrap().permissions().readonly());
+        assert!(
+            fs::write(&file, "mine").is_err(),
+            "the projection is read-only"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&file), 0o444);
+            assert_eq!(mode(&skills), 0o555);
+            assert_eq!(mode(&skills.join("spread_watch").join("refs")), 0o555);
+        }
+
+        // A second projection replaces the tree wholesale: the removed skill's
+        // sealed directory goes with it.
+        {
+            let mut state = fake.lock().unwrap();
+            state.items.remove("spread_watch");
+            state
+                .items
+                .insert("fresh".to_string(), ("# fresh\n".to_string(), Vec::new()));
+        }
+        ov.project_skills(DESK_A).await;
+        assert_eq!(
+            tree(&skills),
+            vec!["desk-improvement/SKILL.md", "fresh/SKILL.md"]
+        );
+        assert_eq!(tree(&workspace.join(".agents")).len(), 2, "no leftovers");
+        assert_eq!(count(&ov.store, "SKILLS_PROJECTION_FAILED"), 0);
+
+        // A child that is not `READY` leaves the tree exactly as it is and is
+        // reported at most once per failure streak.
+        ov.live().state = LiveState::Lost;
+        ov.project_skills(DESK_A).await;
+        ov.project_skills(DESK_A).await;
+        assert_eq!(
+            tree(&skills),
+            vec!["desk-improvement/SKILL.md", "fresh/SKILL.md"]
+        );
+        assert_eq!(count(&ov.store, "SKILLS_PROJECTION_FAILED"), 1);
+        assert_eq!(count(&ov.store, "SKILLS_PROJECTED"), 2);
+    }
+
+    /// Check 7's coalescing: one projection in flight per desk, one queued.
+    #[tokio::test]
+    async fn the_turn_end_refresh_is_coalesced() {
+        let (_dir, ov) = scratch();
+        let fake: Fake = Arc::new(Mutex::new(FakeSkills {
+            delay_ms: 300,
+            ..FakeSkills::default()
+        }));
+        let port = fake_skills(fake.clone()).await;
+        plant_ready(&ov, DESK_A, "alpha", port);
+
+        for _ in 0..4 {
+            ov.refresh_skills(DESK_A);
+        }
+        wait_until("the refresh never drained", || {
+            ov.refresh
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        })
+        .await;
+        assert_eq!(fake.lock().unwrap().listings, 2, "one ran, one was queued");
+    }
+
+    /// Check 5's seed upload and check 8's byte-for-byte seed: the desk name is
+    /// the only substitution, and a skill that is already there is left alone.
+    #[tokio::test]
+    async fn the_seed_skill_is_uploaded_once() {
+        let (_dir, ov) = scratch();
+        let fake: Fake = Arc::new(Mutex::new(FakeSkills::default()));
+        let port = fake_skills(fake.clone()).await;
+        plant_ready(&ov, DESK_A, "alpha", port);
+
+        ov.upload_seed_skill(DESK_A, "desk-key").await;
+        assert_eq!(
+            fake.lock().unwrap().uploaded,
+            vec![crate::desk::SEED_SKILL.replace("<name>", "alpha")]
+        );
+
+        // Present now, so a second provisioning uploads nothing.
+        ov.upload_seed_skill(DESK_A, "desk-key").await;
+        assert_eq!(fake.lock().unwrap().uploaded.len(), 1);
     }
 }

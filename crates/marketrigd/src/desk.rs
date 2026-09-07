@@ -16,10 +16,14 @@ use crate::store::{Store, StoreError, now_ns};
 /// The MarketRig-owned Claude Code compatibility shim, exactly (§7.2, per D20).
 const SHIM: &str = "@AGENTS.md\n";
 
-/// The seeded constitution and improvement skill, byte-identical to the R4
-/// feature SPEC §5.1 and §5.2 blocks. `<name>` is the desk name.
+/// The seeded constitution: the R4 feature SPEC §5.1 block with the three
+/// sections `openviking-continuity` §5.4 rewrites. `<name>` is the desk name.
 const SEED_AGENTS: &str = include_str!("../seed/AGENTS.md");
-const SEED_SKILL: &str = include_str!("../seed/desk-improvement.SKILL.md");
+
+/// The seeded improvement skill, uploaded into the desk's OpenViking user
+/// rather than written into the workspace (`openviking-continuity` §5.3).
+/// `<name>` is the desk name.
+pub(crate) const SEED_SKILL: &str = include_str!("../seed/desk-improvement.SKILL.md");
 
 /// The one `failure_code` R0 records: every bootstrap step fails the same way.
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
@@ -137,8 +141,11 @@ fn skills_link(workspace: &Path) -> PathBuf {
     workspace.join(".claude").join("skills")
 }
 
-/// Creation step 2 (§7.2, R4 §5): the four artifacts in order, each only when
-/// absent, so a half-written workspace completes and a retry rewrites nothing.
+/// Creation step 2 (§7.2, `openviking-continuity` §5.3): the seeds in order,
+/// each only when absent, so a half-written workspace completes and a retry
+/// rewrites nothing. `desk-improvement` is no longer a file here: it is
+/// uploaded into the desk's OpenViking user and reaches `.agents/skills/`
+/// through the projection (`openviking-continuity` §5.2).
 fn bootstrap(workspace: &Path, name: &str) -> io::Result<()> {
     fs::create_dir_all(workspace)?;
     let agents = workspace.join("AGENTS.md");
@@ -146,13 +153,8 @@ fn bootstrap(workspace: &Path, name: &str) -> io::Result<()> {
         fs::write(&agents, agents_seed(name))?;
     }
     reconcile_shim(workspace)?;
-    let skill = skills_dir(workspace)
-        .join("desk-improvement")
-        .join("SKILL.md");
-    if !skill.exists() {
-        fs::create_dir_all(skill.parent().expect("the seeded skill has a parent"))?;
-        fs::write(&skill, SEED_SKILL)?;
-    }
+    crate::plugin::reconcile(workspace)?;
+    fs::create_dir_all(skills_dir(workspace))?;
     reconcile_link(workspace)
 }
 
@@ -275,9 +277,11 @@ pub fn complete_interrupted(store: &Store) -> Result<usize, DeskError> {
     Ok(count)
 }
 
-/// Startup validation (§7.5, R4 §5): for every `READY` desk, reconcile the two
-/// things MarketRig owns — the `CLAUDE.md` shim and the `.claude/skills` link —
-/// and nothing else. A workspace that will not reconcile is logged and left
+/// Startup validation (§7.5, `openviking-continuity` §4.2, §5.3): for every
+/// `READY` desk, reconcile the three things MarketRig owns — the `CLAUDE.md`
+/// shim, the `.claude/skills` link, and the vendored plugin trees — and nothing
+/// else. `.agents/skills/` is rewritten only by the projection and `AGENTS.md`
+/// is never touched. A workspace that will not reconcile is logged and left
 /// alone: it blocks neither another desk nor startup.
 pub fn validate_ready(store: &Store) -> Result<(), DeskError> {
     for desk in query(store, "WHERE state = 'READY' ORDER BY created_at_ns, id")? {
@@ -285,7 +289,10 @@ pub fn validate_ready(store: &Store) -> Result<(), DeskError> {
         if !workspace.is_dir() {
             continue;
         }
-        if let Err(e) = reconcile_shim(workspace).and_then(|()| reconcile_link(workspace)) {
+        if let Err(e) = reconcile_shim(workspace)
+            .and_then(|()| crate::plugin::reconcile(workspace))
+            .and_then(|()| reconcile_link(workspace))
+        {
             tracing::warn!(desk = desk.name, "workspace reconciliation failed: {e}");
         }
     }
@@ -731,13 +738,14 @@ fn name_grammar() {
     }
 }
 
-/// One fenced block of the R4 feature SPEC, read at test time so the seeds
-/// cannot drift from the contract (R4 §5.1, §5.2).
+/// One fenced block of a feature SPEC, read at test time so the seeds cannot
+/// drift from the contract (R4 §5.1, `openviking-continuity` §5.4).
 #[cfg(test)]
-fn spec_block(heading: &str) -> String {
+fn spec_block(spec: &str, heading: &str) -> String {
     let spec = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../sdd/features/r4-memory-skills-loop/SPEC.md"),
+            .join("../../sdd/features")
+            .join(spec),
     )
     .unwrap();
     let section = &spec[spec.find(heading).expect("the heading")..];
@@ -746,17 +754,60 @@ fn spec_block(heading: &str) -> String {
     body[..body.find("\n```").expect("the closing fence") + 1].to_string()
 }
 
+/// A constitution split into its `## ` sections, heading to body.
+#[cfg(test)]
+fn sections(text: &str) -> std::collections::BTreeMap<String, String> {
+    format!("\n{text}")
+        .split("\n## ")
+        .skip(1)
+        .map(|part| {
+            let (heading, body) = part.split_once('\n').unwrap_or((part, ""));
+            (heading.to_string(), body.trim_end().to_string())
+        })
+        .collect()
+}
+
+/// Check 8: the constitution is the R4 §5.1 block with the three sections
+/// `openviking-continuity` §5.4 rewrites, and the improvement skill is the seed
+/// file itself — creation and the upload use it unchanged apart from `<name>`.
 #[cfg(test)]
 #[test]
 fn seeds_are_the_spec_blocks() {
-    assert_eq!(SEED_AGENTS, spec_block("### 5.1 `AGENTS.md`"));
+    let seed = sections(SEED_AGENTS);
+    let r4 = sections(&spec_block(
+        "r4-memory-skills-loop/SPEC.md",
+        "### 5.1 `AGENTS.md`",
+    ));
+    let rewritten = sections(&spec_block(
+        "openviking-continuity/SPEC.md",
+        "### 5.4 The constitution",
+    ));
+    assert_eq!(rewritten.len(), 3, "§5.4 rewrites exactly three sections");
+    assert_eq!(seed.len(), r4.len(), "no section is added or dropped");
+    for (heading, body) in &seed {
+        let expected = rewritten
+            .get(heading)
+            .or_else(|| r4.get(heading))
+            .unwrap_or_else(|| panic!("{heading} is in neither SPEC block"));
+        assert_eq!(body, expected, "the {heading} section");
+    }
+    // The preamble, above the first `## `, is R4's.
+    let preamble = |text: &str| text.split("\n## ").next().unwrap().to_string();
     assert_eq!(
-        SEED_SKILL,
-        spec_block("### 5.2 `.agents/skills/desk-improvement/SKILL.md`")
+        preamble(SEED_AGENTS),
+        preamble(&spec_block(
+            "r4-memory-skills-loop/SPEC.md",
+            "### 5.1 `AGENTS.md`"
+        ))
     );
+
+    // Only `<name>` is substituted, so a skill's own name stays `<skill>`.
     assert_eq!(agents_seed("alpha"), SEED_AGENTS.replace("<name>", "alpha"));
     assert!(agents_seed("alpha").starts_with("# alpha\n"));
     assert!(!agents_seed("alpha").contains("<name>"));
+    assert!(agents_seed("alpha").contains("viking://~/skills/<skill>/SKILL.md"));
+    assert!(SEED_SKILL.starts_with("---\nname: desk-improvement\n"));
+    assert!(!SEED_SKILL.replace("<name>", "alpha").contains("<name>"));
 }
 
 #[cfg(test)]
@@ -764,9 +815,6 @@ fn seeds_are_the_spec_blocks() {
 fn bootstrap_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("alpha");
-    let skill = skills_dir(&workspace)
-        .join("desk-improvement")
-        .join("SKILL.md");
 
     bootstrap(&workspace, "alpha").unwrap();
     let seeded = fs::read(workspace.join("AGENTS.md")).unwrap();
@@ -778,22 +826,21 @@ fn bootstrap_idempotent() {
         fs::read(workspace.join("CLAUDE.md")).unwrap(),
         b"@AGENTS.md\n"
     );
-    assert_eq!(fs::read_to_string(&skill).unwrap(), SEED_SKILL);
+    // `.agents/skills/` starts empty: `desk-improvement` is uploaded into the
+    // desk's OpenViking user and arrives through the projection (§5.3).
+    assert!(skills_dir(&workspace).is_dir());
+    assert_eq!(fs::read_dir(skills_dir(&workspace)).unwrap().count(), 0);
+    assert!(
+        crate::plugin::dir(&workspace, "claude")
+            .join("hooks/hooks.json")
+            .is_file()
+    );
     assert!(resolves_to_skills(
         &workspace,
         &skills_link_target(&workspace).unwrap().unwrap()
     ));
 
     // One physical directory, reachable through both paths (R4 §5).
-    assert_eq!(
-        fs::read_to_string(
-            skills_link(&workspace)
-                .join("desk-improvement")
-                .join("SKILL.md")
-        )
-        .unwrap(),
-        SEED_SKILL
-    );
     fs::write(skills_link(&workspace).join("through-the-link"), "x").unwrap();
     assert!(skills_dir(&workspace).join("through-the-link").is_file());
 
@@ -805,10 +852,15 @@ fn bootstrap_idempotent() {
         b"@AGENTS.md\n"
     );
 
-    // Agent-owned files survive; the MarketRig-owned shim is reconciled.
+    // Agent-owned files survive; the MarketRig-owned shim and plugin trees are
+    // reconciled, and a skill the projection put there is left alone.
+    let projected = skills_dir(&workspace).join("mine").join("SKILL.md");
+    fs::create_dir_all(projected.parent().unwrap()).unwrap();
+    fs::write(&projected, "mine now\n").unwrap();
     fs::write(workspace.join("AGENTS.md"), "# alpha\n\nmine now\n").unwrap();
     fs::write(workspace.join("CLAUDE.md"), "@SOMETHING-ELSE.md\n").unwrap();
-    fs::write(&skill, "mine now\n").unwrap();
+    let hooks = crate::plugin::dir(&workspace, "codex").join("hooks/hooks.json");
+    fs::write(&hooks, "tampered\n").unwrap();
     bootstrap(&workspace, "alpha").unwrap();
     assert_eq!(
         fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
@@ -818,7 +870,8 @@ fn bootstrap_idempotent() {
         fs::read_to_string(workspace.join("CLAUDE.md")).unwrap(),
         "@AGENTS.md\n"
     );
-    assert_eq!(fs::read_to_string(&skill).unwrap(), "mine now\n");
+    assert_ne!(fs::read_to_string(&hooks).unwrap(), "tampered\n");
+    assert_eq!(fs::read_to_string(&projected).unwrap(), "mine now\n");
 }
 
 #[cfg(test)]

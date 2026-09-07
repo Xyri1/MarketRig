@@ -376,6 +376,7 @@ pub fn hook(
     desk_id: &str,
     body: &str,
     events: Option<AdapterEvents>,
+    openviking: Option<&std::sync::Arc<crate::openviking::OpenViking>>,
 ) -> Result<Hook, DeskError> {
     let desk = desk::get(store, desk_id)?;
     let Some(event) = serde_json::from_str::<Value>(body)
@@ -458,6 +459,11 @@ pub fn hook(
             store.unit(move |tx| {
                 desk::append_event(tx, "SESSION_TURN_ENDED", Some(&desk_id), at_ns, json!({}))
             })?;
+            // The turn may have written a skill through the plugin's tools,
+            // which the daemon never sees (`openviking-continuity` §5.2).
+            if let Some(openviking) = openviking {
+                openviking.refresh_skills(&desk.id);
+            }
         }
         _ => {}
     }
@@ -591,7 +597,7 @@ fn hook_ingress_records_the_documented_rows() {
             .unwrap()
     };
     let (adapter_events, mut confirmations) = tokio::sync::mpsc::unbounded_channel();
-    let post = |body: &str| hook(&store, "d1", body, Some(adapter_events.clone())).unwrap();
+    let post = |body: &str| hook(&store, "d1", body, Some(adapter_events.clone()), None).unwrap();
 
     // An unparseable body — and a JSON scalar — is refused; nothing is recorded.
     assert!(matches!(post("not json"), Hook::Unparseable));

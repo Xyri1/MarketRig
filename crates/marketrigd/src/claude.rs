@@ -11,9 +11,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::openviking::OpenViking;
 use crate::session::{Activation, Adapter, AdapterEvent, AdapterEvents, DeliverOutcome};
 use crate::store::Store;
 use crate::terminal::{self, Spawn};
@@ -134,11 +135,16 @@ impl Channels {
 
 /// Writes `mcp.json` and, when the CLI is there to run them, `settings.json`
 /// into `<launch>/<desk-id>/`, both 0600 (per D69). Answers both paths.
+///
+/// `plugin` is the validated Node path and the desk's OpenViking plugin
+/// directory when this launch registers the plugin (`openviking-continuity`
+/// §4.3); `None` leaves both files exactly as R3 wrote them.
 pub fn write_launch_files(
     launch_dir: &Path,
     desk_id: &str,
     mcp_adapter: &Path,
     cli: Option<&Path>,
+    plugin: Option<(&Path, &Path)>,
 ) -> std::io::Result<(PathBuf, Option<PathBuf>)> {
     let dir = launch_dir.join(desk_id);
     std::fs::create_dir_all(&dir)?;
@@ -151,23 +157,26 @@ pub fn write_launch_files(
         );
     }
     let adapter = mcp_adapter.to_string_lossy();
+    let mut servers = json!({
+        "marketrig": {
+            "command": adapter,
+            "args": ["--desk", desk_id],
+            "env": env,
+        },
+        "marketrig-channel": {
+            "command": adapter,
+            "args": ["--desk", desk_id, "--channel"],
+            "env": env,
+        },
+    });
+    if let Some((node, plugin)) = plugin {
+        servers["openviking"] = json!({
+            "command": node.to_string_lossy(),
+            "args": [crate::plugin::proxy(plugin)],
+        });
+    }
     let mcp = dir.join("mcp.json");
-    write_private(
-        &mcp,
-        &json!({ "mcpServers": {
-            "marketrig": {
-                "command": adapter,
-                "args": ["--desk", desk_id],
-                "env": env,
-            },
-            "marketrig-channel": {
-                "command": adapter,
-                "args": ["--desk", desk_id, "--channel"],
-                "env": env,
-            },
-        }})
-        .to_string(),
-    )?;
+    write_private(&mcp, &json!({ "mcpServers": servers }).to_string())?;
 
     let settings = match cli {
         None => None,
@@ -182,15 +191,24 @@ pub fn write_launch_files(
                 "command": cli.to_string_lossy(),
                 "args": ["--desk", desk_id, "session", "hook"],
             }]}]);
-            write_private(
-                &path,
-                &json!({ "hooks": {
-                    "SessionStart": hook,
-                    "Notification": hook,
-                    "Stop": hook,
-                }})
-                .to_string(),
-            )?;
+            let mut hooks = serde_json::Map::from_iter([
+                ("SessionStart".to_string(), hook.clone()),
+                ("Notification".to_string(), hook.clone()),
+                ("Stop".to_string(), hook),
+            ]);
+            // The plugin's own entries, beside MarketRig's rather than instead
+            // of them: Claude runs every group an event names (§4.3).
+            if let Some((node, plugin)) = plugin {
+                for (event, groups) in crate::plugin::claude_hooks(node, plugin) {
+                    match hooks.get_mut(&event).and_then(Value::as_array_mut) {
+                        Some(mine) => mine.extend(groups.as_array().cloned().unwrap_or_default()),
+                        None => {
+                            hooks.insert(event, groups);
+                        }
+                    }
+                }
+            }
+            write_private(&path, &json!({ "hooks": hooks }).to_string())?;
             Some(path)
         }
     };
@@ -241,6 +259,9 @@ pub struct Claude {
     search_path: String,
     terminals: std::sync::Arc<terminal::Manager>,
     channels: std::sync::Arc<Channels>,
+    /// The registration, the environment, and the skills projection
+    /// (`openviking-continuity` §4.3, §5.2).
+    openviking: std::sync::Arc<OpenViking>,
     /// §5.3's thirty seconds; a field only so the checks need not wait them.
     channel_wait: Duration,
 }
@@ -254,6 +275,7 @@ impl Claude {
         search_path: String,
         terminals: std::sync::Arc<terminal::Manager>,
         channels: std::sync::Arc<Channels>,
+        openviking: std::sync::Arc<OpenViking>,
         events: AdapterEvents,
     ) -> Self {
         channels.attach_events(events);
@@ -263,6 +285,7 @@ impl Claude {
             search_path,
             terminals,
             channels,
+            openviking,
             channel_wait: CHANNEL_WAIT,
         }
     }
@@ -279,11 +302,22 @@ impl Adapter for Claude {
             .ok_or_else(|| "The claude runtime is not available.".to_string())?;
         let adapter = sibling("marketrig-mcp")
             .ok_or_else(|| "marketrig-mcp is not installed beside marketrigd.".to_string())?;
+
+        // The projection runs before every activation and never fails it
+        // (`openviking-continuity` §5.2).
+        self.openviking.project_skills(&desk.id).await;
+        let launch = self.openviking.launch(&desk.id);
+        let workspace = PathBuf::from(&desk.workspace_path);
+        let plugin = launch
+            .node
+            .as_deref()
+            .map(|node| (node, crate::plugin::dir(&workspace, "claude")));
         let (mcp, settings) = write_launch_files(
             &self.launch_dir,
             &desk.id,
             &adapter,
             sibling("marketrig").as_deref(),
+            plugin.as_ref().map(|(node, dir)| (*node, dir.as_path())),
         )
         .map_err(|e| format!("Cannot write the launch files: {e}."))?;
 
@@ -308,14 +342,16 @@ impl Adapter for Claude {
 
         // §5.3: the bridge may connect before the dispatcher opens the row.
         self.channels.spawning(&desk.id, true);
+        let mut env = crate::session::base_env(&self.search_path, &desk.id);
+        env.extend(launch.env);
         let pid = self
             .terminals
             .spawn(
                 &desk.id,
                 Spawn {
                     argv,
-                    cwd: PathBuf::from(&desk.workspace_path),
-                    env: crate::session::base_env(&self.search_path, &desk.id),
+                    cwd: workspace,
+                    env,
                     cols: COLS,
                     rows: ROWS,
                 },
@@ -399,6 +435,7 @@ mod tests {
             "d1",
             Path::new("/bin/marketrig-mcp"),
             Some(Path::new("/bin/marketrig")),
+            None,
         )
         .unwrap();
         let value: serde_json::Value =
@@ -425,9 +462,19 @@ mod tests {
             }
         }
 
+        // §4.3's `UNCONFIGURED` form: no plugin entry anywhere.
+        assert!(value["mcpServers"].get("openviking").is_none());
+        assert!(hooks["hooks"].as_object().unwrap().len() == 3);
+
         // Without the CLI beside the daemon the launch carries no hooks.
-        let (_, none) =
-            write_launch_files(dir.path(), "d2", Path::new("/bin/marketrig-mcp"), None).unwrap();
+        let (_, none) = write_launch_files(
+            dir.path(),
+            "d2",
+            Path::new("/bin/marketrig-mcp"),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(none.is_none());
         assert!(!dir.path().join("d2").join("settings.json").exists());
 
@@ -443,11 +490,63 @@ mod tests {
             "d3",
             Path::new("/bin/marketrig-mcp"),
             None,
+            None,
         )
         .unwrap();
         assert!(claude.launch_dir.join("d3").exists());
         claude.closed("d3");
         assert!(!claude.launch_dir.join("d3").exists());
+    }
+
+    /// Check 6, Claude's half: the plugin's own hooks land beside MarketRig's
+    /// in exec form with the vendored timeouts, and the proxy is registered.
+    #[test]
+    fn the_plugin_registers_in_the_launch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = dir.path().join("node");
+        let plugin = crate::plugin::dir(&dir.path().join("alpha"), "claude");
+        let (mcp, settings) = write_launch_files(
+            dir.path(),
+            "d1",
+            Path::new("/bin/marketrig-mcp"),
+            Some(Path::new("/bin/marketrig")),
+            Some((&node, &plugin)),
+        )
+        .unwrap();
+
+        let servers: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        assert_eq!(
+            servers["mcpServers"]["openviking"],
+            json!({
+                "command": node.to_string_lossy(),
+                "args": [plugin.join("servers").join("mcp-proxy.mjs").to_string_lossy()],
+            })
+        );
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(settings.unwrap()).unwrap()).unwrap();
+        // MarketRig's own group stays first; the plugin's joins it.
+        let start = &hooks["hooks"]["SessionStart"];
+        assert_eq!(start[0]["hooks"][0]["command"], json!("/bin/marketrig"));
+        assert_eq!(
+            start[1]["hooks"][0]["command"],
+            json!(node.to_string_lossy())
+        );
+        assert_eq!(
+            start[1]["hooks"][0]["args"],
+            json!([plugin
+                .join("scripts")
+                .join("session-start.mjs")
+                .to_string_lossy()])
+        );
+        assert_eq!(start[1]["hooks"][0]["timeout"], json!(120));
+        // An event only the plugin registers arrives on its own.
+        assert_eq!(
+            hooks["hooks"]["PreToolUse"][0]["matcher"],
+            json!("Read|Glob|Grep")
+        );
+        assert_eq!(hooks["hooks"].as_object().unwrap().len(), 10);
     }
 
     #[test]
@@ -463,14 +562,17 @@ mod tests {
         mpsc::UnboundedReceiver<AdapterEvent>,
     ) {
         let (dir, store) = crate::store::open_temp();
+        let roots = crate::store::Roots::resolve(Some(dir.path())).unwrap();
+        roots.create_dirs().unwrap();
         let (events, rx) = mpsc::unbounded_channel();
         let channels = std::sync::Arc::new(Channels::default());
         let mut claude = Claude::new(
-            store,
+            store.clone(),
             dir.path().join("launch"),
             String::new(),
             crate::terminal::Manager::new().0,
             channels,
+            crate::openviking::unconfigured(store, roots),
             events,
         );
         claude.channel_wait = Duration::from_millis(50);

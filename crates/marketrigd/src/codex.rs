@@ -131,6 +131,9 @@ struct Inner {
     token: Mutex<String>,
     /// This daemon's UUID, stamped on the app-server's `children.json` record.
     daemon_uuid: String,
+    /// The registration, the environment, and the skills projection
+    /// (`openviking-continuity` §4.3, §5.2).
+    openviking: Arc<crate::openviking::OpenViking>,
     control: tokio::sync::Mutex<Option<Arc<Client>>>,
     child: Mutex<Option<crate::exec::Contained>>,
     threads: Mutex<Threads>,
@@ -161,6 +164,7 @@ impl Codex {
         mcp_path: PathBuf,
         test_data_root: Option<PathBuf>,
         daemon_uuid: String,
+        openviking: Arc<crate::openviking::OpenViking>,
     ) -> Codex {
         Codex(Arc::new(Inner {
             store,
@@ -174,6 +178,7 @@ impl Codex {
             url: Mutex::new(String::new()),
             token: Mutex::new(String::new()),
             daemon_uuid,
+            openviking,
             control: tokio::sync::Mutex::new(None),
             child: Mutex::new(None),
             threads: Mutex::new(Threads::default()),
@@ -505,7 +510,16 @@ impl Inner {
     /// `<workspace>/.codex/config.toml` with the bundled adapter registered:
     /// `-c mcp_servers.*` on the TUI command line does not reach the remote
     /// thread (spike S), so the app-server reads it from the workspace.
-    fn write_config(&self, workspace: &Path, desk_id: &str) -> Result<(), String> {
+    ///
+    /// `node` is present when this launch registers the OpenViking plugin
+    /// (`openviking-continuity` §4.3): the proxy joins the servers and
+    /// `.codex/hooks.json` is rewritten — or removed, when it does not.
+    fn write_config(
+        &self,
+        workspace: &Path,
+        desk_id: &str,
+        node: Option<&Path>,
+    ) -> Result<(), String> {
         let dir = workspace.join(".codex");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let quote = |s: &str| Value::String(s.to_string()).to_string();
@@ -519,6 +533,23 @@ impl Inner {
                 "env = {{ MARKETRIG_TEST_DATA_ROOT = {} }}\n",
                 quote(&root.display().to_string()),
             ));
+        }
+        let hooks = dir.join("hooks.json");
+        match node {
+            Some(node) => {
+                let plugin = crate::plugin::dir(workspace, "codex");
+                toml.push_str(&format!(
+                    "\n[mcp_servers.openviking-memory]\ncommand = {}\nargs = [{}]\n\
+                     startup_timeout_sec = 30\n",
+                    quote(&node.display().to_string()),
+                    quote(&crate::plugin::proxy(&plugin)),
+                ));
+                std::fs::write(&hooks, crate::plugin::codex_hooks(node, &plugin))
+                    .map_err(|e| e.to_string())?;
+            }
+            None => {
+                let _ = std::fs::remove_file(&hooks);
+            }
         }
         std::fs::write(dir.join("config.toml"), toml).map_err(|e| e.to_string())
     }
@@ -580,13 +611,24 @@ impl Adapter for Codex {
         let client = self.client().await?;
         drop(client);
         let executable = inner.executable()?;
-        inner.write_config(&workspace, desk_id)?;
+
+        // The projection runs before every activation and never fails it
+        // (`openviking-continuity` §5.2).
+        inner.openviking.project_skills(desk_id).await;
+        let launch = inner.openviking.launch(desk_id);
+        inner.write_config(&workspace, desk_id, launch.node.as_deref())?;
 
         let url = inner.url.lock().expect("url").clone();
         let mut argv = vec![executable.display().to_string()];
         if let Some(thread) = resume {
             argv.push("resume".to_string());
             argv.push(thread.to_string());
+        }
+        if launch.node.is_some() {
+            // The daemon writes and rewrites these hooks itself, so Codex's
+            // per-definition hook trust has nothing to grant (§4.3); the flag
+            // is honored by `codex` and `codex resume` alike.
+            argv.push("--dangerously-bypass-hook-trust".to_string());
         }
         argv.extend([
             "--remote".to_string(),
@@ -601,6 +643,7 @@ impl Adapter for Codex {
         let token = inner.token.lock().expect("token").clone();
         let mut env = crate::session::base_env(&inner.search_path, desk_id);
         env.push(("MARKETRIG_CODEX_WS_TOKEN".to_string(), token));
+        env.extend(launch.env);
 
         {
             let mut threads = inner.threads.lock().expect("threads");
@@ -929,14 +972,15 @@ mod tests {
         let (terminals, _exits) = terminal::Manager::new();
         let (events, rx) = mpsc::unbounded_channel();
         let mut codex = Codex::new(
-            store,
-            roots,
+            store.clone(),
+            roots.clone(),
             terminals,
             events,
             String::new(),
             PathBuf::from("marketrig-mcp"),
             Some(dir.path().to_path_buf()),
             "test-daemon".to_string(),
+            crate::openviking::unconfigured(store, roots),
         );
         Arc::get_mut(&mut codex.0).unwrap().connect_url = Some(url);
         (dir, codex, rx, workspace)
@@ -959,6 +1003,54 @@ mod tests {
             "id": thread, "cwd": cwd.display().to_string(),
             "ephemeral": ephemeral, "status": {"type": status}}}})
         .to_string()
+    }
+
+    /// Check 6, Codex's half: the proxy joins `config.toml` and `hooks.json` is
+    /// written from the vendored file with absolute paths and its own timeouts;
+    /// a launch that does not register removes the file again.
+    #[tokio::test]
+    async fn the_plugin_registers_in_the_workspace_files() {
+        let (dir, codex, _rx, workspace) = fixture(String::new());
+        let node = dir.path().join("node");
+        let plugin = crate::plugin::dir(&workspace, "codex");
+        let quoted =
+            |path: PathBuf| serde_json::Value::String(path.display().to_string()).to_string();
+
+        codex.0.write_config(&workspace, "d1", Some(&node)).unwrap();
+        let config = std::fs::read_to_string(workspace.join(".codex/config.toml")).unwrap();
+        assert!(config.contains("[mcp_servers.openviking-memory]"));
+        assert!(config.contains(&format!("command = {}", quoted(node.clone()))));
+        assert!(config.contains(&format!(
+            "args = [{}]",
+            quoted(plugin.join("servers").join("mcp-proxy.mjs"))
+        )));
+        assert!(config.contains("startup_timeout_sec = 30"));
+
+        let hooks: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(workspace.join(".codex/hooks.json")).unwrap(),
+        )
+        .unwrap();
+        let field = if cfg!(windows) {
+            "commandWindows"
+        } else {
+            "command"
+        };
+        let stop = &hooks["hooks"]["Stop"][0];
+        assert_eq!(stop["matcher"], json!("*"));
+        assert_eq!(stop["hooks"][0]["timeout"], json!(30));
+        assert_eq!(
+            stop["hooks"][0][field],
+            json!(format!(
+                "\"{}\" \"{}\"",
+                node.display(),
+                plugin.join("scripts").join("auto-capture.mjs").display()
+            ))
+        );
+
+        codex.0.write_config(&workspace, "d1", None).unwrap();
+        assert!(!workspace.join(".codex/hooks.json").exists());
+        let config = std::fs::read_to_string(workspace.join(".codex/config.toml")).unwrap();
+        assert!(!config.contains("openviking"));
     }
 
     #[tokio::test]
@@ -999,6 +1091,10 @@ mod tests {
         let config = std::fs::read_to_string(workspace.join(".codex/config.toml")).unwrap();
         assert!(config.contains("[mcp_servers.marketrig]"));
         assert!(config.contains(r#"args = ["--desk", "d1"]"#));
+        // Check 6's `UNCONFIGURED` form: no plugin entry, no hooks file, and no
+        // trust bypass on the command line.
+        assert!(!config.contains("openviking"));
+        assert!(!workspace.join(".codex/hooks.json").exists());
 
         // Gate: an active turn holds the prompt even while the status is idle.
         script.active.store(true, Ordering::SeqCst);

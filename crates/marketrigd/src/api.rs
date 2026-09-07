@@ -899,7 +899,13 @@ async fn session_hook(
         ));
     }
     Ok(
-        match crate::session::hook(&state.store, &desk_id, &body, state.channels.events())? {
+        match crate::session::hook(
+            &state.store,
+            &desk_id,
+            &body,
+            state.channels.events(),
+            Some(&state.openviking),
+        )? {
             crate::session::Hook::Accepted => {
                 (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
             }

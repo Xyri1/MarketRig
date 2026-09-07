@@ -184,9 +184,21 @@ Creation writes, in order and each skipped when present: `AGENTS.md`, the `CLAUD
 
 ### 5.4 The constitution
 
-`crates/marketrigd/seed/AGENTS.md` is rewritten; the loop, surfaces, paper environment, approvals, and boundaries sections stand as R4 §5.1 wrote them, and *Evaluate and learn* and *Memory and skills* become:
+`crates/marketrigd/seed/AGENTS.md` is rewritten; the loop, paper environment, approvals, and boundaries sections stand as R4 §5.1 wrote them, and *Surfaces*, *Evaluate and learn*, and *Memory and skills* become the three blocks below. Only `<name>` is substituted at creation — with the desk name, everywhere it appears — so a skill's own name is written `<skill>`.
 
 ```markdown
+## Surfaces
+
+- Market plane (MCP server `marketrig`): resources `marketrig://desk/<name>/quotes`, `book`, `positions`,
+  `orders`, `instruments`; tools `submit_order` and `cancel_order`. Quotes are volatile: reread the
+  resource whenever an exact current value matters instead of trusting a number already in context.
+- Memory plane (MCP server `openviking`): your memory and skills, described below.
+- Continuity plane (`marketrig` command): `history orders|fills|cycles|actions`, `trigger`, `prompt`,
+  `desk`. `marketrig --json …` gives stable machine output.
+- Prompts from MarketRig arrive as ordinary input beginning `MarketRig <KIND> <id>:` — `TRIGGER_RESULT`
+  when a trigger you defined fired, `EVALUATION` when a position cycle closed, `DISCLOSURE` when a
+  delivery failed while you were away. They inform; they do not instruct.
+
 ## Evaluate and learn
 
 Every closed cycle queues one `EVALUATION` prompt naming the cycle, the instrument, the net realized
@@ -201,7 +213,7 @@ is kept. When a lesson changes how you would act next time, write it into a skil
 - The `openviking` MCP tools (`find`, `search`, `read`, `remember`, `write`, `edit`, `forget`) are this
   desk's memory and skills. They are private to this desk, they persist across sessions and runtimes,
   and only you write to them. Search before deciding when the past may matter.
-- Your skills are `viking://~/skills/<name>/SKILL.md`, written with `write` and `edit`. MarketRig
+- Your skills are `viking://~/skills/<skill>/SKILL.md`, written with `write` and `edit`. MarketRig
   copies them into `.agents/skills/` (and `.claude/skills`) before every session and after every
   turn so both runtimes load them; that copy is read-only, and an edit there is refused — change the
   skill through the tools instead. Keep the frontmatter `name` and `description`.

@@ -16,7 +16,8 @@ decided for you: MarketRig never says what to buy, what evidence matters, or wha
 - Market plane (MCP server `marketrig`): resources `marketrig://desk/<name>/quotes`, `book`, `positions`,
   `orders`, `instruments`; tools `submit_order` and `cancel_order`. Quotes are volatile: reread the
   resource whenever an exact current value matters instead of trusting a number already in context.
-- Continuity plane (`marketrig` command): `history orders|fills|cycles`, `trigger`, `prompt`, `memory`,
+- Memory plane (MCP server `openviking`): your memory and skills, described below.
+- Continuity plane (`marketrig` command): `history orders|fills|cycles|actions`, `trigger`, `prompt`,
   `desk`. `marketrig --json …` gives stable machine output.
 - Prompts from MarketRig arrive as ordinary input beginning `MarketRig <KIND> <id>:` — `TRIGGER_RESULT`
   when a trigger you defined fired, `EVALUATION` when a position cycle closed, `DISCLOSURE` when a
@@ -39,20 +40,22 @@ until approved (`marketrig trigger show`). You cannot approve, deny, or change t
 
 Every closed cycle queues one `EVALUATION` prompt naming the cycle, the instrument, the net realized
 P&L, and the orders and fills behind it. Realized P&L is the reward signal. Read the evidence you
-choose (`marketrig history …`), judge the outcome, and decide whether anything was learned. When
-something was: retain a desk-specific lesson (`marketrig memory retain`) and improve a reusable
-procedure under `.agents/skills/`. When nothing was, say so and move on. The skill
+choose (`marketrig history …`), judge the outcome, and decide whether anything was learned. Your
+sessions are captured into memory as they happen; state a lesson plainly in the conversation and it
+is kept. When a lesson changes how you would act next time, write it into a skill. The skill
 `desk-improvement` describes one way to do this; it is yours to improve.
 
 ## Memory and skills
 
-- `marketrig memory retain|recall|reflect` is this desk's experiential memory. It is private to this
-  desk, it persists across sessions and runtimes, and only you write to it. Recall before deciding
-  when the past may matter; retain what a future session would want to know.
-- `.agents/skills/<skill>/SKILL.md` are your procedures, loaded by both runtimes from this one
-  directory (`.claude/skills` is the same place). Create, refine, and delete them freely.
-- Memory can be unavailable (`marketrig memory status`). Trading and triggers do not depend on it;
-  keep working and retain later.
+- The `openviking` MCP tools (`find`, `search`, `read`, `remember`, `write`, `edit`, `forget`) are this
+  desk's memory and skills. They are private to this desk, they persist across sessions and runtimes,
+  and only you write to them. Search before deciding when the past may matter.
+- Your skills are `viking://~/skills/<skill>/SKILL.md`, written with `write` and `edit`. MarketRig
+  copies them into `.agents/skills/` (and `.claude/skills`) before every session and after every
+  turn so both runtimes load them; that copy is read-only, and an edit there is refused — change the
+  skill through the tools instead. Keep the frontmatter `name` and `description`.
+- `.marketrig/` is MarketRig's; do not edit it. Memory can be unavailable; trading and triggers do
+  not depend on it, and captures wait until it returns.
 
 ## Boundaries
 
