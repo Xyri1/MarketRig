@@ -25,3 +25,6 @@ backend/.acceptance/
 # WebdriverIO smoke logs
 logs/
 .DS_Store
+
+# OpenViking wheel sets (scripts/openviking-wheels.mjs); the lockfiles are committed
+/openviking-wheels/*/

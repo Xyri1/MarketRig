@@ -54,22 +54,6 @@ export type Approval = {
 };
 
 /**
- * The `memory_child` row plus the liveness that is never durable (§3).
- */
-export type Child = {
-    executable_path?: string | null;
-    failure_code?: string | null;
-    failure_message?: string | null;
-    live: LiveState;
-    pid?: number | null;
-    /**
-     * `UNCONFIGURED` | `AVAILABLE` | `UNAVAILABLE`.
-     */
-    state: string;
-    validated_at_ns?: number | null;
-};
-
-/**
  * One desk row plus the read-time workspace derivation (§7.5). Field names and
  * omit-when-null behavior are the §6 `Desk` resource.
  */
@@ -119,17 +103,11 @@ export type Envelope = {
 };
 
 /**
- * The child's liveness (§6): memory only, `NOT_STARTED` after every start.
- */
-export type LiveState = 'NOT_STARTED' | 'STARTING' | 'READY' | 'LOST';
-
-/**
- * The `memory_provider` row, secrets-free by construction (§3).
+ * The `memory_provider` row, secrets-free by construction.
  */
 export type Provider = {
     api_key_present: boolean;
     base_url?: string | null;
-    embedding_locked_at_ns?: number | null;
     embedding_model?: string | null;
     llm_model?: string | null;
 };
@@ -162,14 +140,6 @@ export type Runtime = {
     state: string;
     validated_at_ns?: number | null;
     version?: string | null;
-};
-
-/**
- * `GET /memory` (§3): both installation rows in the order the CLI prints them.
- */
-export type Status = {
-    child: Child;
-    provider: Provider;
 };
 
 export type ApprovalsData = {
@@ -463,106 +433,6 @@ export type QuotesErrors = {
 export type QuotesError = QuotesErrors[keyof QuotesErrors];
 
 export type QuotesResponses = {
-    200: unknown;
-};
-
-export type DeskMemoryData = {
-    body?: never;
-    path: {
-        desk_id: string;
-    };
-    query?: never;
-    url: '/desks/{desk_id}/memory';
-};
-
-export type DeskMemoryErrors = {
-    401: Envelope;
-    404: Envelope;
-    409: Envelope;
-    503: Envelope;
-};
-
-export type DeskMemoryError = DeskMemoryErrors[keyof DeskMemoryErrors];
-
-export type DeskMemoryResponses = {
-    200: unknown;
-};
-
-export type MemoryRecallData = {
-    body: unknown;
-    path: {
-        desk_id: string;
-    };
-    query?: never;
-    url: '/desks/{desk_id}/memory/recall';
-};
-
-export type MemoryRecallErrors = {
-    400: Envelope;
-    401: Envelope;
-    404: Envelope;
-    409: Envelope;
-    422: Envelope;
-    502: Envelope;
-    503: Envelope;
-    504: Envelope;
-};
-
-export type MemoryRecallError = MemoryRecallErrors[keyof MemoryRecallErrors];
-
-export type MemoryRecallResponses = {
-    200: unknown;
-};
-
-export type MemoryReflectData = {
-    body: unknown;
-    path: {
-        desk_id: string;
-    };
-    query?: never;
-    url: '/desks/{desk_id}/memory/reflect';
-};
-
-export type MemoryReflectErrors = {
-    400: Envelope;
-    401: Envelope;
-    404: Envelope;
-    409: Envelope;
-    422: Envelope;
-    502: Envelope;
-    503: Envelope;
-    504: Envelope;
-};
-
-export type MemoryReflectError = MemoryReflectErrors[keyof MemoryReflectErrors];
-
-export type MemoryReflectResponses = {
-    200: unknown;
-};
-
-export type MemoryRetainData = {
-    body: unknown;
-    path: {
-        desk_id: string;
-    };
-    query?: never;
-    url: '/desks/{desk_id}/memory/retain';
-};
-
-export type MemoryRetainErrors = {
-    400: Envelope;
-    401: Envelope;
-    404: Envelope;
-    409: Envelope;
-    422: Envelope;
-    502: Envelope;
-    503: Envelope;
-    504: Envelope;
-};
-
-export type MemoryRetainError = MemoryRetainErrors[keyof MemoryRetainErrors];
-
-export type MemoryRetainResponses = {
     200: unknown;
 };
 
@@ -1037,46 +907,25 @@ export type HealthResponses = {
     200: unknown;
 };
 
-export type MemoryStatusData = {
+export type MemoryProviderRowData = {
     body?: never;
     path?: never;
     query?: never;
-    url: '/memory';
+    url: '/memory/provider';
 };
 
-export type MemoryStatusErrors = {
+export type MemoryProviderRowErrors = {
     401: Envelope;
     503: Envelope;
 };
 
-export type MemoryStatusError = MemoryStatusErrors[keyof MemoryStatusErrors];
+export type MemoryProviderRowError = MemoryProviderRowErrors[keyof MemoryProviderRowErrors];
 
-export type MemoryStatusResponses = {
-    200: Status;
+export type MemoryProviderRowResponses = {
+    200: Provider;
 };
 
-export type MemoryStatusResponse = MemoryStatusResponses[keyof MemoryStatusResponses];
-
-export type MemoryDiscoverData = {
-    body: unknown;
-    path?: never;
-    query?: never;
-    url: '/memory/discover';
-};
-
-export type MemoryDiscoverErrors = {
-    400: Envelope;
-    401: Envelope;
-    503: Envelope;
-};
-
-export type MemoryDiscoverError = MemoryDiscoverErrors[keyof MemoryDiscoverErrors];
-
-export type MemoryDiscoverResponses = {
-    200: Child;
-};
-
-export type MemoryDiscoverResponse = MemoryDiscoverResponses[keyof MemoryDiscoverResponses];
+export type MemoryProviderRowResponse = MemoryProviderRowResponses[keyof MemoryProviderRowResponses];
 
 export type MemoryProviderData = {
     body: unknown;
@@ -1088,7 +937,6 @@ export type MemoryProviderData = {
 export type MemoryProviderErrors = {
     400: Envelope;
     401: Envelope;
-    409: Envelope;
     502: Envelope;
     503: Envelope;
 };
@@ -1113,7 +961,6 @@ export type MemoryModelsErrors = {
     409: Envelope;
     502: Envelope;
     503: Envelope;
-    504: Envelope;
 };
 
 export type MemoryModelsError = MemoryModelsErrors[keyof MemoryModelsErrors];
@@ -1121,26 +968,6 @@ export type MemoryModelsError = MemoryModelsErrors[keyof MemoryModelsErrors];
 export type MemoryModelsResponses = {
     200: unknown;
 };
-
-export type MemoryRetryData = {
-    body?: never;
-    path?: never;
-    query?: never;
-    url: '/memory/retry';
-};
-
-export type MemoryRetryErrors = {
-    401: Envelope;
-    503: Envelope;
-};
-
-export type MemoryRetryError = MemoryRetryErrors[keyof MemoryRetryErrors];
-
-export type MemoryRetryResponses = {
-    200: Child;
-};
-
-export type MemoryRetryResponse = MemoryRetryResponses[keyof MemoryRetryResponses];
 
 export type QuitData = {
     body?: never;

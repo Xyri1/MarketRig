@@ -182,11 +182,8 @@ pub fn start(roots: Roots) -> Result<Startup, DaemonError> {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
     }
-    // 6b. re-validate an AVAILABLE memory launcher (R4 feature SPEC §2.1),
-    //     skipped under the test data root for the same reason as 6a.
     if std::env::var_os(crate::store::TEST_DATA_ROOT_ENV).is_none() {
         crate::runtime::discover_undiscovered(&store)?;
-        crate::memory::revalidate_available(&store)?;
     }
 
     // 7. bind and mint the per-start bearer.
@@ -391,25 +388,6 @@ fn classify(child: &ChildRecord) -> &'static str {
         .iter()
         .all(|arg| cmd.iter().any(|actual| actual == arg.as_str()))
     {
-        // The memory child daemonizes its PostgreSQL outside its own session and
-        // stops it only from its `SIGTERM` handler; give it the signal and a
-        // moment before the kill, as the live stop does (R4 feature SPEC §2.3).
-        #[cfg(unix)]
-        if child.kind == "memory" {
-            let raw = child.pid as libc::pid_t;
-            // SAFETY: a plain signal send to a pid whose command line we just matched.
-            let alive = || unsafe { libc::kill(raw, 0) == 0 };
-            unsafe {
-                libc::kill(raw, libc::SIGTERM);
-            }
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if !alive() {
-                    return "TERMINATED";
-                }
-            }
-        }
         process.kill();
         "TERMINATED"
     } else {

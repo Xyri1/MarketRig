@@ -169,9 +169,8 @@ impl Contained {
         self.child.wait().await
     }
 
-    /// Whether the leader has already exited, without waiting. The memory
-    /// child's supervisor polls this so the handle can stay where a stop
-    /// reaches it (R4 feature SPEC §2.3).
+    /// Whether the leader has already exited, without waiting: a supervised
+    /// child's watcher polls this so the handle can stay where a stop reaches it.
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
@@ -186,14 +185,12 @@ impl Contained {
     }
 
     /// Asks the leader to end on its own before ending the group: `SIGTERM`,
-    /// then up to `grace` for the exit, then [`Self::terminate`]. For a child
-    /// that daemonizes work outside its own session (the memory child's
-    /// embedded PostgreSQL, started by `pg0` and stopped only from Hindsight's
-    /// `SIGTERM` handler), the signal is the one thing that reaches it.
+    /// then up to `grace` for the exit, then [`Self::terminate`]. This is the
+    /// stop the OpenViking child gets (feature SPEC `openviking-continuity`
+    /// §2.3); uvicorn ends on `SIGTERM`.
     ///
     /// ponytail: on Windows there is no `SIGTERM`, so this is the plain kill and
-    /// a daemonized grandchild survives; a `pg0 stop --name marketrig` run from
-    /// beside the launcher is the upgrade the day Windows E5 shows the orphan.
+    /// a daemonized grandchild would survive.
     pub async fn terminate_gracefully(&mut self, grace: std::time::Duration) {
         #[cfg(unix)]
         if let Some(pid) = self.id() {

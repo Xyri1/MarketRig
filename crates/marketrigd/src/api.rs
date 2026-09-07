@@ -50,8 +50,8 @@ pub struct ApiState {
     /// Activation policy and the delivery queue, shared with the dispatcher
     /// task so a route and the queue start sessions exactly one way (§6, §7).
     pub dispatch: Arc<crate::dispatch::Dispatcher>,
-    /// The memory child, its provider settings, and the desk-scoped operations
-    /// (R4 feature SPEC §2, §3, §4).
+    /// The memory provider settings and the credential seam (feature SPEC
+    /// `openviking-continuity` §1.1).
     pub memory: Arc<crate::memory::Memory>,
     /// The events tail's one publisher (R5 feature SPEC §4.1).
     pub events: Arc<crate::events::Publisher>,
@@ -91,15 +91,8 @@ const HTTP_PATHS: &[&str] = &[
     "/runtimes",
     "/runtimes/{runtime}/discover",
     "/runtimes/{runtime}/retry",
-    "/memory",
     "/memory/provider",
     "/memory/provider/models",
-    "/memory/discover",
-    "/memory/retry",
-    "/desks/{desk_id}/memory",
-    "/desks/{desk_id}/memory/retain",
-    "/desks/{desk_id}/memory/recall",
-    "/desks/{desk_id}/memory/reflect",
     "/desks/{desk_id}/prompts",
     "/desks/{desk_id}/prompts/{prompt_id}",
     "/settings/policies",
@@ -151,15 +144,8 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(runtimes))
     .routes(routes!(runtime_discover))
     .routes(routes!(runtime_retry))
-    .routes(routes!(memory_status))
-    .routes(routes!(memory_provider))
+    .routes(routes!(memory_provider_row, memory_provider))
     .routes(routes!(memory_models))
-    .routes(routes!(memory_discover))
-    .routes(routes!(memory_retry))
-    .routes(routes!(desk_memory))
-    .routes(routes!(memory_retain))
-    .routes(routes!(memory_recall))
-    .routes(routes!(memory_reflect))
     .routes(routes!(list_prompts))
     .routes(routes!(show_prompt))
     .routes(routes!(policies, put_policies))
@@ -397,24 +383,15 @@ impl IntoResponse for TriggerError {
     }
 }
 
-/// The R4 §3 and §4.3 code-to-status map, appended the same way.
+/// The provider code-to-status map, appended the same way.
 /// `MemoryError::code()` owns the code; this owns the status.
 impl IntoResponse for MemoryError {
     fn into_response(self) -> Response {
-        // A desk lookup, a desk's state, or a bad attribution keeps R1's map.
-        if let MemoryError::Desk(e) = self {
-            return e.into_response();
-        }
         let status = match &self {
             MemoryError::Validation(_) => StatusCode::BAD_REQUEST,
-            MemoryError::Unconfigured | MemoryError::EmbeddingModelLocked => StatusCode::CONFLICT,
-            MemoryError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
-            MemoryError::Unavailable(_) | MemoryError::CredentialStoreUnavailable(_) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            MemoryError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            MemoryError::Unconfigured => StatusCode::CONFLICT,
+            MemoryError::CredentialStoreUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             MemoryError::Error(_) | MemoryError::ProviderUnreachable(_) => StatusCode::BAD_GATEWAY,
-            MemoryError::Desk(_) => unreachable!("answered above"),
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -1264,10 +1241,11 @@ async fn runtime_retry(
     Ok(Json(row).into_response())
 }
 
-// The memory installation routes (R4 feature SPEC §2.1, §3). The desk-scoped
-// operations are C31's; nothing here starts the child.
+// The memory provider routes (feature SPEC `openviking-continuity` §1.1).
+// Every Hindsight route — the child, its discovery and retry, and the four
+// desk-scoped operations — went with migration 7.
 
-/// One request body, or the §4.3 `VALIDATION` that describes the shape.
+/// One request body, or the `VALIDATION` that describes the shape.
 fn memory_request<T: serde::de::DeserializeOwned>(
     headers: &HeaderMap,
     body: &str,
@@ -1285,64 +1263,17 @@ fn memory_request<T: serde::de::DeserializeOwned>(
 
 #[utoipa::path(
     get,
-    path = "/memory",
+    path = "/memory/provider",
     responses(
-        (status = 200, body = memory::Status),
+        (status = 200, body = memory::Provider),
         (status = 401, body = Envelope),
         (status = 503, body = Envelope),
     )
 )]
-async fn memory_status(
+async fn memory_provider_row(
     State(state): State<Arc<ApiState>>,
-) -> Result<Json<memory::Status>, MemoryError> {
-    Ok(Json(state.memory.status().await?))
-}
-
-#[derive(Deserialize)]
-struct MemoryDiscoverRequest {
-    executable: PathBuf,
-}
-
-#[utoipa::path(
-    post,
-    path = "/memory/discover",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, body = memory::Child),
-        (status = 400, body = Envelope),
-        (status = 401, body = Envelope),
-        (status = 503, body = Envelope),
-    )
-)]
-async fn memory_discover(
-    State(state): State<Arc<ApiState>>,
-    headers: HeaderMap,
-    body: String,
-) -> Result<Response, MemoryError> {
-    let request: MemoryDiscoverRequest =
-        memory_request(&headers, &body, r#"an "executable" path"#)?;
-    if !request.executable.is_absolute() {
-        return Err(MemoryError::Validation(format!(
-            "The executable path {} must be absolute.",
-            request.executable.display()
-        )));
-    }
-    Ok(Json(state.memory.discover(&request.executable).await?).into_response())
-}
-
-#[utoipa::path(
-    post,
-    path = "/memory/retry",
-    responses(
-        (status = 200, body = memory::Child),
-        (status = 401, body = Envelope),
-        (status = 503, body = Envelope),
-    )
-)]
-async fn memory_retry(
-    State(state): State<Arc<ApiState>>,
-) -> Result<Json<memory::Child>, MemoryError> {
-    Ok(Json(state.memory.retry().await?))
+) -> Result<Json<memory::Provider>, MemoryError> {
+    Ok(Json(state.memory.provider()?))
 }
 
 #[utoipa::path(
@@ -1353,7 +1284,6 @@ async fn memory_retry(
         (status = 200, body = memory::Provider),
         (status = 400, body = Envelope),
         (status = 401, body = Envelope),
-        (status = 409, body = Envelope),
         (status = 502, body = Envelope),
         (status = 503, body = Envelope),
     )
@@ -1380,7 +1310,6 @@ async fn memory_provider(
         (status = 409, body = Envelope),
         (status = 502, body = Envelope),
         (status = 503, body = Envelope),
-        (status = 504, body = Envelope),
     )
 )]
 async fn memory_models(
@@ -1389,123 +1318,6 @@ async fn memory_models(
     Ok(Json(
         serde_json::json!({ "models": state.memory.models().await? }),
     ))
-}
-
-// The desk-scoped memory operations (R4 feature SPEC §4.2). The desk's own
-// refusals — `DESK_NOT_FOUND`, `DESK_NOT_READY`, and `ATTRIBUTION_INVALID` —
-// are the order routes' own checks, carried into `MemoryError` so both shapes
-// answer through the maps they already have.
-
-#[utoipa::path(
-    get,
-    path = "/desks/{desk_id}/memory",
-    responses(
-        (status = 200, body = serde_json::Value),
-        (status = 401, body = Envelope),
-        (status = 404, body = Envelope),
-        (status = 409, body = Envelope),
-        (status = 503, body = Envelope),
-    )
-)]
-async fn desk_memory(
-    State(state): State<Arc<ApiState>>,
-    Path(desk_id): Path<String>,
-) -> Result<Json<serde_json::Value>, MemoryError> {
-    trade::require_ready(&state.store, &desk_id)?;
-    Ok(Json(state.memory.desk_status(&desk_id).await?))
-}
-
-#[utoipa::path(
-    post,
-    path = "/desks/{desk_id}/memory/retain",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, body = serde_json::Value),
-        (status = 400, body = Envelope),
-        (status = 401, body = Envelope),
-        (status = 404, body = Envelope),
-        (status = 409, body = Envelope),
-        (status = 422, body = Envelope),
-        (status = 502, body = Envelope),
-        (status = 503, body = Envelope),
-        (status = 504, body = Envelope),
-    )
-)]
-async fn memory_retain(
-    State(state): State<Arc<ApiState>>,
-    Path(desk_id): Path<String>,
-    headers: HeaderMap,
-    body: String,
-) -> Result<Json<serde_json::Value>, MemoryError> {
-    // Attribution before the desk's own state, as the order routes order it.
-    let source = attribution(&state, &headers, &desk_id)?;
-    trade::require_ready(&state.store, &desk_id)?;
-    let request = memory_request(
-        &headers,
-        &body,
-        r#""content", and optionally "context" and an array of "tags""#,
-    )?;
-    Ok(Json(
-        state.memory.retain_op(&desk_id, request, &source).await?,
-    ))
-}
-
-#[utoipa::path(
-    post,
-    path = "/desks/{desk_id}/memory/recall",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, body = serde_json::Value),
-        (status = 400, body = Envelope),
-        (status = 401, body = Envelope),
-        (status = 404, body = Envelope),
-        (status = 409, body = Envelope),
-        (status = 422, body = Envelope),
-        (status = 502, body = Envelope),
-        (status = 503, body = Envelope),
-        (status = 504, body = Envelope),
-    )
-)]
-async fn memory_recall(
-    State(state): State<Arc<ApiState>>,
-    Path(desk_id): Path<String>,
-    headers: HeaderMap,
-    body: String,
-) -> Result<Json<serde_json::Value>, MemoryError> {
-    trade::require_ready(&state.store, &desk_id)?;
-    let request = memory_request(
-        &headers,
-        &body,
-        r#""query", and optionally a "budget" and an array of "tags""#,
-    )?;
-    Ok(Json(state.memory.recall_op(&desk_id, request).await?))
-}
-
-#[utoipa::path(
-    post,
-    path = "/desks/{desk_id}/memory/reflect",
-    request_body = serde_json::Value,
-    responses(
-        (status = 200, body = serde_json::Value),
-        (status = 400, body = Envelope),
-        (status = 401, body = Envelope),
-        (status = 404, body = Envelope),
-        (status = 409, body = Envelope),
-        (status = 422, body = Envelope),
-        (status = 502, body = Envelope),
-        (status = 503, body = Envelope),
-        (status = 504, body = Envelope),
-    )
-)]
-async fn memory_reflect(
-    State(state): State<Arc<ApiState>>,
-    Path(desk_id): Path<String>,
-    headers: HeaderMap,
-    body: String,
-) -> Result<Json<serde_json::Value>, MemoryError> {
-    trade::require_ready(&state.store, &desk_id)?;
-    let request = memory_request(&headers, &body, r#""query" and optionally a "budget""#)?;
-    Ok(Json(state.memory.reflect_op(&desk_id, request).await?))
 }
 
 fn unknown_runtime(name: &str) -> Response {
@@ -2164,7 +1976,6 @@ pub(crate) struct Served {
     pub(crate) store: Store,
     registry: Arc<crate::node::Registry>,
     channels: Arc<crate::claude::Channels>,
-    memory: Arc<crate::memory::Memory>,
     pub(crate) terminals: Arc<crate::terminal::Manager>,
     pub(crate) events: Arc<crate::events::Publisher>,
     /// Dropping it stops the events publisher with the test.
@@ -2230,7 +2041,6 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         store,
         registry,
         channels,
-        memory,
         terminals,
         events: published,
         _shutdown: shutdown,
@@ -3780,288 +3590,6 @@ async fn channel_socket_needs_an_open_process_and_supersedes() {
     // The survivor is live: it stays open until it goes away itself.
     second.send(Message::Ping(Vec::new().into())).await.unwrap();
     assert!(matches!(second.next().await, Some(Ok(Message::Pong(_)))));
-}
-
-// ---------------------------------------------------------------------------
-// api::memory_routes (R4 feature SPEC §8 check 4, the route half)
-// ---------------------------------------------------------------------------
-
-/// The four desk-scoped memory routes against the in-process fake child
-/// `memory` owns: the desk's own refusals, the attribution the retain metadata
-/// carries, the three answer shapes, and the events (§4.2, §4.3).
-#[cfg(test)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn memory_routes() {
-    let served = serve().await;
-    let base = served.base.clone();
-    let url = |path: &str| format!("{base}{path}");
-    let ok = Some(CREDENTIAL);
-
-    let create = |name: &str| {
-        let (status, body) = call_post(
-            url("/desks"),
-            ok,
-            Some(("application/json", &format!(r#"{{"name":"{name}"}}"#))),
-        );
-        assert_eq!(status, 201, "{body}");
-        json(&body)["id"].as_str().unwrap().to_string()
-    };
-    let alpha = create("alpha");
-    let beta = create("beta");
-
-    // One firing on alpha, planted: §3 owns how a firing comes to exist.
-    let (a, b) = (alpha.clone(), beta.clone());
-    served
-        .store
-        .unit(move |tx| {
-            for (desk, trigger, firing) in [(&a, "t-alpha", "f-alpha"), (&b, "t-beta", "f-beta")] {
-                tx.execute(
-                    "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
-                     enabled, revision, created_at_ns, updated_at_ns) \
-                     VALUES (?1, ?2, 'nightly', 'SCHEDULED', 'ONE_OFF', 'learn', 50, 1, 1, 1, 1)",
-                    rusqlite::params![trigger, desk],
-                )?;
-                tx.execute(
-                    "INSERT INTO firings VALUES (?1, ?2, ?3, 50, 60, 1, 'learn', NULL, NULL)",
-                    rusqlite::params![firing, desk, trigger],
-                )?;
-            }
-            Ok(())
-        })
-        .unwrap();
-
-    // --- No child yet: the installation's own answer, desk-scoped -----------
-    let (status, body) = call_get(url(&format!("/desks/{alpha}/memory")), ok);
-    assert_eq!(status, 200, "{body}");
-    let status_body = json(&body);
-    assert_eq!(status_body["desk_id"], Value::String(alpha.clone()));
-    assert_eq!(status_body["child"]["state"], "UNCONFIGURED");
-    assert_eq!(status_body["child"]["live"], "NOT_STARTED");
-    assert_eq!(status_body["provider"]["api_key_present"], false);
-
-    // Nothing is live, so an operation answers the installation's state (§4.3).
-    expect_envelope(
-        call_post_attributed(
-            url(&format!("/desks/{alpha}/memory/retain")),
-            &[],
-            r#"{"content":"before any child"}"#,
-        ),
-        409,
-        "MEMORY_UNCONFIGURED",
-    );
-
-    // --- With the fake child live -------------------------------------------
-    let fake = crate::memory::fake_child().await;
-    crate::memory::set_ready(&served.memory, &fake).await;
-
-    let retain = url(&format!("/desks/{alpha}/memory/retain"));
-    let (status, body) = call_post_attributed(retain.clone(), &[], r#"{"content":"a lesson"}"#);
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(json(&body), serde_json::json!({ "items_count": 1 }));
-    assert_eq!(
-        fake.last().1["items"][0]["metadata"],
-        serde_json::json!({ "source": "INTERACTIVE", "desk_id": alpha })
-    );
-
-    // A firing of this desk under that trigger: TRIGGER, with both ids.
-    let (status, body) = call_post_attributed(
-        retain.clone(),
-        &[
-            ("X-MarketRig-Trigger-Id", "t-alpha"),
-            ("X-MarketRig-Firing-Id", "f-alpha"),
-        ],
-        r#"{"content":"from a trigger","tags":["lesson"]}"#,
-    );
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        fake.last().1["items"][0]["metadata"],
-        serde_json::json!({
-            "source": "TRIGGER", "desk_id": alpha,
-            "trigger_id": "t-alpha", "firing_id": "f-alpha",
-        })
-    );
-
-    // Any other attribution shape is refused before the child is called (§4.2).
-    for headers in [
-        &[("X-MarketRig-Trigger-Id", "t-alpha")][..],
-        &[
-            ("X-MarketRig-Trigger-Id", "t-beta"),
-            ("X-MarketRig-Firing-Id", "f-beta"),
-        ][..],
-        &[
-            ("X-MarketRig-Trigger-Id", "t-alpha"),
-            ("X-MarketRig-Firing-Id", "f-nowhere"),
-        ][..],
-    ] {
-        expect_envelope(
-            call_post_attributed(retain.clone(), headers, r#"{"content":"refused"}"#),
-            400,
-            "ATTRIBUTION_INVALID",
-        );
-    }
-    assert!(fake.drain().is_empty(), "a refused retain never leaves");
-
-    // --- recall and reflect answer §4.2's shapes ----------------------------
-    let (status, body) = call_post_attributed(
-        url(&format!("/desks/{alpha}/memory/recall")),
-        &[],
-        r#"{"query":"what did I learn","budget":"low"}"#,
-    );
-    assert_eq!(status, 200, "{body}");
-    let results = json(&body)["results"].clone();
-    assert_eq!(
-        results[0]
-            .as_object()
-            .expect("a result object")
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        [
-            "context",
-            "id",
-            "mentioned_at",
-            "metadata",
-            "occurred_start",
-            "tags",
-            "text",
-            "type"
-        ],
-        "exactly §4.2's eight fields"
-    );
-
-    let (status, body) = call_post_attributed(
-        url(&format!("/desks/{alpha}/memory/reflect")),
-        &[],
-        r#"{"query":"what did I learn"}"#,
-    );
-    assert_eq!(status, 200, "{body}");
-    let reflection = json(&body);
-    assert_eq!(reflection["text"], "a reflection");
-    assert_eq!(
-        reflection["based_on"],
-        serde_json::json!([{ "id": "m-1", "text": "a lesson", "type": "experience" }])
-    );
-
-    // --- The desk segment and the desk's state (§4.3) -----------------------
-    let nowhere = uuid::Uuid::now_v7();
-    expect_envelope(
-        call_get(url(&format!("/desks/{nowhere}/memory")), ok),
-        404,
-        "DESK_NOT_FOUND",
-    );
-    expect_envelope(
-        call_post_attributed(
-            url(&format!("/desks/{nowhere}/memory/recall")),
-            &[],
-            r#"{"query":"q"}"#,
-        ),
-        404,
-        "DESK_NOT_FOUND",
-    );
-    served
-        .store
-        .unit(|tx| {
-            tx.execute(
-                "UPDATE desks SET state = 'CREATING', ready_at_ns = NULL WHERE name = 'beta'",
-                [],
-            )
-        })
-        .unwrap();
-    expect_envelope(
-        call_post_attributed(
-            url(&format!("/desks/{beta}/memory/retain")),
-            &[],
-            r#"{"content":"c"}"#,
-        ),
-        409,
-        "DESK_NOT_READY",
-    );
-
-    // --- Bodies and limits both answer VALIDATION (§4.3) --------------------
-    expect_envelope(
-        call_post(
-            retain.clone(),
-            ok,
-            Some(("text/plain", r#"{"content":"c"}"#)),
-        ),
-        400,
-        "VALIDATION",
-    );
-    expect_envelope(
-        call_post_attributed(retain.clone(), &[], r#"{"content":""}"#),
-        400,
-        "VALIDATION",
-    );
-    expect_envelope(
-        call_post_attributed(
-            url(&format!("/desks/{alpha}/memory/recall")),
-            &[],
-            r#"{"query":"q","budget":"enormous"}"#,
-        ),
-        400,
-        "VALIDATION",
-    );
-
-    // --- The child's own failures, through §4.3's map -----------------------
-    fake.arm("reject");
-    expect_envelope(
-        call_post_attributed(retain.clone(), &[], r#"{"content":"c"}"#),
-        422,
-        "MEMORY_REJECTED",
-    );
-    fake.arm("boom");
-    let (status, body) = call_post_attributed(retain.clone(), &[], r#"{"content":"c"}"#);
-    assert_eq!(status, 502, "{body}");
-    assert_eq!(json(&body)["code"], "MEMORY_ERROR");
-    fake.arm("ok");
-
-    // --- The events: counts and attribution, never a word of content --------
-    let seen = served
-        .store
-        .call(|c| {
-            c.prepare(
-                "SELECT kind, desk_id, payload FROM operational_events \
-                 WHERE kind LIKE 'MEMORY_R%' ORDER BY occurred_at_ns, id",
-            )?
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .unwrap();
-    assert_eq!(
-        seen.iter()
-            .map(|(kind, desk, _)| (kind.as_str(), desk.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            ("MEMORY_RETAINED", alpha.as_str()),
-            ("MEMORY_RETAINED", alpha.as_str()),
-            ("MEMORY_RECALLED", alpha.as_str()),
-            ("MEMORY_RECALLED", alpha.as_str()),
-        ]
-    );
-    assert_eq!(
-        json(&seen[1].2),
-        serde_json::json!({
-            "source": "TRIGGER", "trigger_id": "t-alpha", "firing_id": "f-alpha",
-            "items_count": 1, "tags": ["lesson"],
-        })
-    );
-    assert_eq!(
-        json(&seen[2].2),
-        serde_json::json!({ "op": "recall", "results": 1 })
-    );
-    let written: String = seen
-        .iter()
-        .map(|(_, _, payload)| payload.as_str())
-        .collect();
-    for secret in ["a lesson", "from a trigger", "what did I learn"] {
-        assert!(!written.contains(secret), "{secret:?} reached an event");
-    }
 }
 
 // ---------------------------------------------------------------------------

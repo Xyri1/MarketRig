@@ -10,6 +10,9 @@ export default [
       "node_modules/**",
       "target/**",
       "scripts/**",
+      // Upstream's plugin trees, vendored byte for byte (feature SPEC
+      // `openviking-continuity` §4.1); linting them would be linting upstream.
+      "crates/marketrigd/seed/**",
     ],
   },
   js.configs.recommended,

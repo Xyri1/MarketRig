@@ -6,6 +6,8 @@ Every milestone names the evidence that closes it, never a date. A milestone is 
 
 Milestones R0 through R5 are delivered; Milestone R6's design is next.
 
+**Active migration design (2026-09-07):** [Slice 011 — OpenViking memory and skills migration](slices/011-openviking-migration.md) opens the replacement of Hindsight and local canonical skill ownership with OpenViking. Local deployment excludes Docker; a user-installed Python prerequisite is acceptable. Its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) is design complete (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9, 2026-09-07); implementation C50–C58 has not started.
+
 ## Milestone R0 — Workspace, daemon, and desk identity
 
 This milestone realizes the choices recorded per D7, D15, D20, D23, D42, D43, D44, D45, D46, D48, D49, D50, D51, D53, D54, D60, D61, and D73, and settles the daemon's boot contract as D77.

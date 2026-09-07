@@ -72,7 +72,7 @@ it("never notifies a routine result", async () => {
   const stop = installNotifications();
 
   emit("PROMPT_DELIVERED", { kind: "TRIGGER_RESULT" });
-  emit("MEMORY_RETAINED", {});
+  emit("SKILLS_PROJECTED", {});
   emit("SESSION_ATTENTION", { kind: "session_start" });
   await new Promise((resolve) => setTimeout(resolve, 10));
   expect(sendNotification).not.toHaveBeenCalled();

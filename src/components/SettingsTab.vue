@@ -20,17 +20,15 @@ import {
 } from "reka-ui";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
-  memoryDiscover,
   memoryProvider,
-  memoryRetry,
-  memoryStatus,
+  memoryProviderRow,
   policies,
   putPolicies,
   runtimeDiscover,
   runtimeRetry,
   runtimes as listRuntimes,
 } from "../client";
-import type { Envelope, Resource, Runtime, Status } from "../client";
+import type { Envelope, Provider, Resource, Runtime } from "../client";
 import { useDaemon } from "../composables/useDaemon";
 import { useEvents } from "../composables/useEvents";
 import { selectTrigger } from "../deskState";
@@ -41,8 +39,7 @@ const { quit } = useDaemon();
 
 const rows = ref<Runtime[]>([]);
 const explicit = reactive(new Map<string, string>());
-const memory = ref<Status | null>(null);
-const memoryPath = ref("");
+const memory = ref<Provider | null>(null);
 const policy = ref<Resource | null>(null);
 const autostart = ref(false);
 const failure = ref("");
@@ -63,12 +60,12 @@ async function loadRuntimes(): Promise<void> {
 }
 
 async function loadMemory(): Promise<void> {
-  const answer = await memoryStatus();
+  const answer = await memoryProviderRow();
   if (refused(answer.error)) return;
   memory.value = answer.data ?? null;
-  form.base_url = answer.data?.provider.base_url ?? "";
-  form.llm = answer.data?.provider.llm_model ?? "";
-  form.embedding = answer.data?.provider.embedding_model ?? "";
+  form.base_url = answer.data?.base_url ?? "";
+  form.llm = answer.data?.llm_model ?? "";
+  form.embedding = answer.data?.embedding_model ?? "";
 }
 
 async function loadPolicies(): Promise<void> {
@@ -86,18 +83,6 @@ async function discover(runtime: string, path?: string): Promise<void> {
 async function retry(runtime: string): Promise<void> {
   refused((await runtimeRetry({ path: { runtime } })).error);
   await loadRuntimes();
-}
-
-async function discoverMemory(): Promise<void> {
-  refused(
-    (await memoryDiscover({ body: { executable: memoryPath.value } })).error,
-  );
-  await loadMemory();
-}
-
-async function retryMemory(): Promise<void> {
-  refused((await memoryRetry()).error);
-  await loadMemory();
 }
 
 async function saveProvider(): Promise<void> {
@@ -125,15 +110,7 @@ async function toggleAutostart(on: boolean): Promise<void> {
 
 const off = [
   on(["RUNTIME_DISCOVERED", "RUNTIME_UNAVAILABLE"], () => void loadRuntimes()),
-  on(
-    [
-      "MEMORY_CONFIGURED",
-      "MEMORY_STARTED",
-      "MEMORY_LOST",
-      "MEMORY_UNAVAILABLE",
-    ],
-    () => void loadMemory(),
-  ),
+  on("OPENVIKING_CONFIGURED", () => void loadMemory()),
   on("POLICY_CHANGED", () => void loadPolicies()),
 ];
 onUnmounted(() => off.forEach((stop) => stop()));
@@ -215,43 +192,18 @@ onMounted(async () => {
     <section v-if="memory" class="flex flex-col gap-2">
       <p class="text-xs text-ink-muted">{{ t("settings.memory.title") }}</p>
       <p class="terminal text-sm wrap-anywhere">
-        {{ memory.child.state }} {{ memory.child.live }}
-        {{ memory.child.executable_path }}
-      </p>
-      <p class="terminal text-sm wrap-anywhere">
-        {{ memory.provider.base_url }} {{ memory.provider.llm_model }}
-        {{ memory.provider.embedding_model }}
+        {{ memory.base_url }} {{ memory.llm_model }}
+        {{ memory.embedding_model }}
       </p>
       <p class="text-xs text-ink-muted">
         {{
           t(
-            memory.provider.api_key_present
+            memory.api_key_present
               ? "settings.memory.keySet"
               : "settings.memory.keyUnset",
           )
         }}
       </p>
-      <form class="flex gap-2" @submit.prevent="discoverMemory()">
-        <input
-          v-model="memoryPath"
-          class="terminal flex-1 rounded-control border border-line px-2 py-1"
-          :aria-label="t('settings.memory.path')"
-          :placeholder="t('settings.memory.path')"
-        />
-        <button
-          type="submit"
-          class="rounded-control border border-line px-2 py-1"
-        >
-          {{ t("settings.memory.discover") }}
-        </button>
-        <button
-          type="button"
-          class="rounded-control border border-line px-2 py-1"
-          @click="retryMemory()"
-        >
-          {{ t("settings.memory.retry") }}
-        </button>
-      </form>
       <form class="flex flex-col gap-2" @submit.prevent="saveProvider()">
         <input
           v-model="form.base_url"

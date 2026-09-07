@@ -88,12 +88,7 @@
       "submit": "Use this path"
     },
     "memory": {
-      "title": "Memory",
-      "child": "Child",
-      "provider": "Provider",
-      "path": "Path to the memory child",
-      "discover": "Discover",
-      "retry": "Retry",
+      "title": "Memory provider",
       "baseUrl": "Base URL",
       "apiKey": "API key",
       "keySet": "An API key is stored.",
@@ -156,10 +151,6 @@
     },
     "CONTROL_PLANE_LOST": {
       "title": "A runtime control plane was lost",
-      "body": "{detail}"
-    },
-    "MEMORY_UNAVAILABLE": {
-      "title": "Memory is unavailable",
       "body": "{detail}"
     },
     "TRIGGER_MISSED": {

@@ -38,15 +38,12 @@ beforeEach(() => {
   client.setConfig({ baseUrl: "http://127.0.0.1:7100" });
   installFakeDaemon({
     "GET /runtimes": () => ({ status: 200, body: { runtimes } }),
-    "GET /memory": () => ({
+    "GET /memory/provider": () => ({
       status: 200,
       body: {
-        child: { state: "UNCONFIGURED", live: "NOT_STARTED" },
-        provider: {
-          api_key_present: false,
-          llm_model: "m-1",
-          embedding_model: "m-2",
-        },
+        api_key_present: false,
+        llm_model: "m-1",
+        embedding_model: "m-2",
       },
     }),
     "GET /settings/policies": () => ({ status: 200, body: policy }),

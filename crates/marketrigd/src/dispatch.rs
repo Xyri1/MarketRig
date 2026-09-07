@@ -823,7 +823,7 @@ fn orientation(desk: &Desk) -> String {
     format!(
         "You are the trading agent of the MarketRig desk {name}. Its workspace is {workspace}, \
          and its durable instructions are {workspace}/AGENTS.md. The marketrig command is your \
-         continuity plane: records, triggers, memory, and prompts. Its market resources are \
+         continuity plane: records, triggers, and prompts. Its market resources are \
          {resources}. Nothing has been decided for you — what do you have in mind?\n",
         name = desk.name,
         workspace = desk.workspace_path,

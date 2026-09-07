@@ -84,7 +84,6 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
     let memory = Arc::new(memory::Memory::new(
         startup.store.clone(),
         startup.roots.clone(),
-        startup.daemon_uuid.clone(),
     )?);
     if !memory.seam {
         memory::set_platform_store();
@@ -232,9 +231,6 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
         )
         .await;
         let _ = tokio::time::timeout_at(deadline, codex.stop()).await;
-        // The memory child goes after the terminals and the app-server, inside
-        // the same bound (R4 feature SPEC §2.3).
-        let _ = tokio::time::timeout_at(deadline, memory.stop_child()).await;
         let _ = dispatcher.quit_rows();
         let _ = tokio::time::timeout_at(
             deadline,

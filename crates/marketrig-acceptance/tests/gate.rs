@@ -1,16 +1,14 @@
-//! The acceptance gate: scenarios G1–G41, in order, in one test.
+//! The acceptance gate: scenarios G1–O10, in order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
 //! (the stand-in feed and G12–G20) and `sdd/features/r2-scheduled-triggers/SPEC.md`
 //! §10 (the `trigger-code` binary and G21–G26) and
 //! `sdd/features/r3-runtime-delivery/SPEC.md` §9 (the `runtime-standin` binary
-//! and G27–G32) and `sdd/features/r4-memory-skills-loop/SPEC.md` §7 (the
-//! `memory-standin` binary and G33–G37) and
-//! `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1 (the approval
-//! policies, the events tail, and G38–G41), per D75, R0-7, R1-9, R2-8, R3-8,
-//! R4-7, R5-8. The
-//! harness drives
+//! and G27–G32) and `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1
+//! (the approval policies, the events tail, and O7–O10, renumbered from
+//! G33–G37s slot by `openviking-continuity` §7.2), per D75, R0-7, R1-9, R2-8,
+//! R3-8, R5-8. The harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
 //! files, and read-only SQLite. It never links `marketrigd` or `marketrig` as
@@ -352,104 +350,14 @@ fn alive(pid: i64) -> bool {
     }
 }
 
-/// A loopback port to hand a helper the gate starts itself.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("a loopback port")
-        .local_addr()
-        .expect("its address")
-        .port()
-}
-
-/// A helper process the gate started, killed however the run ends.
-struct Killed(std::process::Child);
-
-impl Drop for Killed {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// The daemon-scoped events of one kind — the memory installation's own, which
-/// belong to no desk (R4 §2.1, §2.3) — oldest first.
+/// The daemon-scoped events of one kind — the ones that belong to no desk —
+/// oldest first.
 fn global(g: &Harness, kind: &str) -> Vec<Value> {
     g.events()
         .into_iter()
         .filter(|e| e.desk_id.is_none() && e.kind == kind)
         .map(|e| e.payload)
         .collect()
-}
-
-/// `marketrig` run from a desk workspace, the way the session's own shell would
-/// run it (R4 §7.2's G35).
-fn cli_in(g: &Harness, dir: &std::path::Path, args: &[&str]) -> (i32, String, String) {
-    let done = g
-        .command(&g.cli.clone())
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .expect("run marketrig");
-    (
-        done.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&done.stdout).into_owned(),
-        String::from_utf8_lossy(&done.stderr).into_owned(),
-    )
-}
-
-/// A secret reaches none of the three places R4 §7.2 names — the database file
-/// (its journal included), the log root, and the events listing — nor the
-/// evidence bundle the gate itself writes.
-#[track_caller]
-fn nowhere(g: &Harness, what: &str, secret: &str) {
-    assert!(
-        !secret.is_empty(),
-        "{what} is empty, so this proves nothing"
-    );
-    let mut searched: Vec<(String, Vec<u8>)> = Vec::new();
-    for entry in fs::read_dir(g.out.join("data"))
-        .expect("the data directory")
-        .flatten()
-    {
-        let path = entry.path();
-        if path.to_string_lossy().contains("marketrig.sqlite3") {
-            searched.push((
-                path.display().to_string(),
-                fs::read(&path).unwrap_or_default(),
-            ));
-        }
-    }
-    let mut roots = vec![g.out.join("logs")];
-    while let Some(dir) = roots.pop() {
-        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                roots.push(path);
-            } else {
-                searched.push((
-                    path.display().to_string(),
-                    fs::read(&path).unwrap_or_default(),
-                ));
-            }
-        }
-    }
-    let events: String = g
-        .events()
-        .iter()
-        .map(|e| format!("{} {:?} {}\n", e.kind, e.desk_id, e.payload))
-        .collect();
-    searched.push(("the events listing".to_string(), events.into_bytes()));
-    let observations = g.out.join("observations.jsonl");
-    searched.push((
-        observations.display().to_string(),
-        fs::read(&observations).unwrap_or_default(),
-    ));
-    for (where_, bytes) in searched {
-        assert!(
-            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
-            "{what} reached {where_}"
-        );
-    }
 }
 
 async fn resource_text(service: &RunningService<RoleClient, ()>, uri: &str) -> String {
@@ -1778,9 +1686,9 @@ fn gate() {
     let daemon8 = g.spawn("G21");
     endpoint = daemon8.endpoint.clone();
     // R5's installed default gates trigger code (R5 feature SPEC §2), while the
-    // R2–R4 chain is written against R2's fixed Always allow. The prologue sets
+    // R2–R3 chain is written against R2's fixed Always allow. The prologue sets
     // it once for this database root — the row outlives every daemon on it — and
-    // G38 puts the default back (R5 feature SPEC §7.1).
+    // O7 puts the default back (R5 feature SPEC §7.1).
     let (status, allowed) = g.api(
         "G21",
         &endpoint,
@@ -3624,680 +3532,17 @@ fn gate() {
     );
 
     // ======================================================================
-    // R4 (feature SPEC `r4-memory-skills-loop` §7.2). The chain continues on the
-    // same root with `memory-standin` (§7.1) in both of its roles: the memory
-    // launcher the daemon starts, registered by explicit path exactly as the
-    // runtimes are, and — started by the gate itself, once, on its own port —
-    // the provider whose model list the daemon fetches. Its knobs ride in the
-    // `memory` object of the same script file the runtime stand-in reads, so
-    // rewriting that file arms the next start of either.
-    // ======================================================================
-    let launcher = g.memory_standin.display().to_string();
-    let models_port = free_port();
-    let provider_base = format!("http://127.0.0.1:{models_port}/v1");
-    // A key shaped like the provider's own, so G33's grep is looking for
-    // something a leak would actually carry.
-    let key = "sk-gate-1f4c0b7a9e2d5836";
-    let provider = |embedding: &str| {
-        json!({
-            "base_url": &provider_base, "api_key": key,
-            "llm_model": "stand-in-llm", "embedding_model": embedding,
-        })
-        .to_string()
-    };
-    let armed = |memory: Value| json!({ "memory": memory });
-    g.script(armed(json!({})));
-    let _models = Killed(
-        g.command(&g.memory_standin.clone())
-            .args(["--models", &models_port.to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("the provider stand-in starts"),
-    );
-
-    // --- G33 — configuration and secrets ------------------------------------
-    let daemon15 = g.spawn("G33");
-    endpoint = daemon15.endpoint.clone();
-    let (status, unconfigured) = g.api("G33", &endpoint, "GET", "/memory", None);
-    assert_eq!(status, 200, "{unconfigured}");
-    assert_eq!(unconfigured["child"]["state"], "UNCONFIGURED");
-    assert_eq!(unconfigured["child"]["live"], "NOT_STARTED");
-    assert_eq!(unconfigured["provider"]["api_key_present"], false);
-
-    let explicit_launcher = json!({ "executable": launcher }).to_string();
-    let (status, available) = g.api(
-        "G33",
-        &endpoint,
-        "POST",
-        "/memory/discover",
-        Some(&explicit_launcher),
-    );
-    assert_eq!(status, 200, "{available}");
-    assert_eq!(available["state"], "AVAILABLE", "{available}");
-    assert_eq!(available["executable_path"], launcher.as_str());
-    assert!(
-        available["validated_at_ns"]
-            .as_i64()
-            .is_some_and(|ns| ns > 0)
-    );
-
-    let missing = json!({ "executable": g.out.join("no-such-launcher") }).to_string();
-    let (status, gone) = g.api("G33", &endpoint, "POST", "/memory/discover", Some(&missing));
-    assert_eq!(status, 200, "{gone}");
-    assert_eq!(gone["state"], "UNAVAILABLE");
-    assert_eq!(gone["failure_code"], "NOT_FOUND");
-    // The failed probe is the row every later scenario would inherit, so the
-    // stand-in goes back in.
-    let (_, back) = g.api(
-        "G33",
-        &endpoint,
-        "POST",
-        "/memory/discover",
-        Some(&explicit_launcher),
-    );
-    assert_eq!(back["state"], "AVAILABLE", "{back}");
-
-    let (status, saved) = g.api_redacted(
-        "G33",
-        &endpoint,
-        "PUT",
-        "/memory/provider",
-        &provider("stand-in-embedding"),
-    );
-    assert_eq!(status, 200, "{saved}");
-    assert_eq!(saved["base_url"], provider_base.as_str());
-    assert_eq!(saved["api_key_present"], true);
-    assert!(
-        saved.get("api_key").is_none(),
-        "the key never comes back: {saved}"
-    );
-    let configured = global(&g, "MEMORY_CONFIGURED");
-    assert!(
-        configured
-            .iter()
-            .any(|payload| payload["what"] == "child" && payload["state"] == "AVAILABLE"),
-        "{configured:?}"
-    );
-    assert!(
-        configured
-            .iter()
-            .any(|payload| payload["what"] == "provider"
-                && payload["base_url"] == provider_base.as_str()
-                && payload["embedding_model"] == "stand-in-embedding"),
-        "{configured:?}"
-    );
-
-    let models = "/memory/provider/models";
-    let (status, listed) = g.api("G33", &endpoint, "GET", models, None);
-    assert_eq!(status, 200, "{listed}");
-    assert_eq!(
-        listed["models"],
-        json!(["stand-in-llm", "stand-in-embedding"])
-    );
-    g.script(armed(json!({ "models_error": true })));
-    let (status, unreachable) = g.api("G33", &endpoint, "GET", models, None);
-    assert_eq!(status, 502, "{unreachable}");
-    assert_eq!(unreachable["code"], "PROVIDER_UNREACHABLE");
-    g.script(armed(json!({})));
-    let (status, fresh) = g.api("G33", &endpoint, "GET", models, None);
-    assert_eq!(status, 200, "{fresh}");
-    assert_eq!(
-        fresh["models"], listed["models"],
-        "the list is never cached"
-    );
-    nowhere(&g, "the provider key", key);
-    g.note(
-        "G33",
-        "the launcher was discovered by explicit path and refused as NOT_FOUND, the provider was stored with its key held back, the model list was live and never cached, and the key reached neither the database, the log root, nor an event",
-        json!({ "child": back, "provider": saved, "models": fresh["models"] }),
-    );
-
-    // --- G34 — two desks, one lesson ----------------------------------------
-    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert!(printed.contains("state: AVAILABLE"), "{printed:?}");
-    assert!(
-        printed.contains("live: NOT_STARTED"),
-        "the child is never started by status (§2.2): {printed:?}"
-    );
-    assert!(printed.contains("api_key_present: true"), "{printed:?}");
-
-    let lesson = "AAPL gapped through the open and the market order paid for it";
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "retain",
-        &alpha,
-        "--content",
-        lesson,
-        "--tag",
-        "lesson",
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(printed.trim(), "retained 1 item");
-    let started = global(&g, "MEMORY_STARTED");
-    assert_eq!(started.len(), 1, "the first retain started the child");
-    assert!(started[0]["pid"].as_i64().is_some_and(|pid| pid > 0));
-    let retained = payloads(&g, &ids[0], "MEMORY_RETAINED");
-    assert_eq!(retained.len(), 1);
-    assert_eq!(retained[0]["source"], "INTERACTIVE");
-    assert_eq!(retained[0]["items_count"], 1);
-    assert_eq!(retained[0]["tags"], json!(["lesson"]));
-    assert!(retained[0]["trigger_id"].is_null(), "{}", retained[0]);
-    assert!(
-        !serde_json::to_string(&retained[0])
-            .unwrap_or_default()
-            .contains("gapped"),
-        "no event carries what was retained (§4.2)"
-    );
-
-    // The first retain locked the embedding model (§3).
-    let (status, locked) = g.api_redacted(
-        "G34",
-        &endpoint,
-        "PUT",
-        "/memory/provider",
-        &provider("another-embedding"),
-    );
-    assert_eq!(status, 409, "{locked}");
-    assert_eq!(locked["code"], "EMBEDDING_MODEL_LOCKED");
-
-    let query = "gapped market order";
-    let (exit, printed, stderr) = g.cli(&["memory", "recall", &alpha, "--query", query]);
-    assert_eq!(exit, 0, "{stderr}");
-    let columns: Vec<&str> = printed.trim().split('\t').collect();
-    assert_eq!(
-        columns.len(),
-        3,
-        "one tab-separated line per result: {printed:?}"
-    );
-    assert!(!columns[0].is_empty());
-    assert_eq!(columns[1], "experience");
-    assert_eq!(columns[2], lesson);
-    let (exit, machine) = g.cli_json(
-        "G34",
-        &["--json", "memory", "recall", &alpha, "--query", query],
-    );
-    assert_eq!(exit, 0, "{machine}");
-    assert_eq!(machine["results"][0]["metadata"]["source"], "INTERACTIVE");
-    assert_eq!(
-        machine["results"][0]["metadata"]["desk_id"],
-        ids[0].as_str()
-    );
-    let (exit, printed, stderr) = g.cli(&["memory", "recall", &beta, "--query", query]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(
-        printed.trim(),
-        "no results",
-        "another desk's bank knows nothing of it (§4.1)"
-    );
-
-    // A firing's own retain: the CLI the script runs sends R2's two attribution
-    // headers from the environment the daemon handed it (§4.2, §4.4).
-    let retain_script = script(
-        &g,
-        "g34-retain",
-        "retain the desk learned to wait out the open",
-    );
-    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
-    let (exit, scheduled) = g.cli_json(
-        "G34",
-        &[
-            "--json",
-            "trigger",
-            "create",
-            &gamma,
-            "--name",
-            "g34-retain",
-            "--brief",
-            "a retain from a firing",
-            "--at",
-            &at,
-            "--code",
-            &retain_script,
-            "--arg",
-            &runner,
-            "--arg",
-            "{script}",
-            "--timeout",
-            "60",
-        ],
-    );
-    assert_eq!(exit, 0, "{scheduled}");
-    let scheduled_id = scheduled["id"].as_str().expect("id").to_owned();
-    let scheduled_firing = await_firing(&g, &scheduled_id, 0);
-    await_execution(&g, &scheduled_firing, Duration::from_secs(60));
-    let (exit, ran) = g.cli_json(
-        "G34",
-        &["--json", "trigger", "firing", &gamma, &scheduled_firing],
-    );
-    assert_eq!(exit, 0, "{ran}");
-    assert_eq!(ran["execution"]["outcome"], "EXITED", "{ran}");
-    assert_eq!(ran["execution"]["exit_code"], 0, "{ran}");
-    let scheduled_retain = payloads(&g, &gamma_id, "MEMORY_RETAINED");
-    assert_eq!(scheduled_retain.len(), 1);
-    assert_eq!(scheduled_retain[0]["source"], "TRIGGER");
-    assert_eq!(scheduled_retain[0]["trigger_id"], scheduled_id.as_str());
-    assert_eq!(scheduled_retain[0]["firing_id"], scheduled_firing.as_str());
-
-    // Every bearer this run minted, learned from the child's own HOME: the
-    // daemon holds them in memory only, so nothing else could name them.
-    let bearers = fs::read_to_string(g.out.join("data").join("hindsight").join("bearers.txt"))
-        .expect("the stand-in child wrote the bearers it was launched with");
-    let bearers: Vec<&str> = bearers.lines().filter(|line| !line.is_empty()).collect();
-    assert!(!bearers.is_empty(), "the child recorded no bearer");
-    for bearer in &bearers {
-        assert_eq!(bearer.len(), 64, "32 random bytes as hex (§2.2)");
-        nowhere(&g, "the child's bearer", bearer);
-    }
-    nowhere(&g, "the provider key", key);
-    g.note(
-        "G34",
-        "status started nothing, the first retain started the child and locked the embedding model, the lesson came back on its own desk and nowhere else, a firing's script retained through the CLI with both ids, and neither the key nor a bearer reached the database, the log root, or an event",
-        json!({
-            "interactive": retained[0], "scheduled": scheduled_retain[0],
-            "bearers": bearers.len(), "recall": machine["results"],
-        }),
-    );
-
-    // --- G35 — the loop closes ----------------------------------------------
-    // On the desk G28 activated, with the stand-in runtime and the stand-in
-    // feed: a round trip closes a cycle, its evaluation reaches the session as
-    // ordinary input, and the harness then performs the agent's own two steps
-    // through public surfaces — MarketRig never writes either of them (per D17).
-    let delta_quotes = format!("/desks/{delta_id}/market/quotes");
-    let delta_orders = format!("/desks/{delta_id}/orders");
-    let (status, quotes) = g.api("G35", &endpoint, "GET", &delta_quotes, None);
-    assert_eq!(status, 200, "{quotes}");
-    within(
-        Duration::from_secs(40),
-        "delta's first AAPL observation",
-        || {
-            quote_of(
-                &g.call(&endpoint, "GET", &delta_quotes, None).1,
-                "AAPL.XNAS",
-            )["health"]
-                == "LIVE"
-        },
-    );
-    let (status, bought) = g.api(
-        "G35",
-        &endpoint,
-        "POST",
-        &delta_orders,
-        Some(&order("g35-buy-aapl", "AAPL.XNAS", "BUY", "MARKET", "1")),
-    );
-    assert_eq!(status, 201, "{bought}");
-    assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
-    let (status, sold) = g.api(
-        "G35",
-        &endpoint,
-        "POST",
-        &delta_orders,
-        Some(&order("g35-sell-aapl", "AAPL.XNAS", "SELL", "MARKET", "1")),
-    );
-    assert_eq!(status, 201, "{sold}");
-    assert_eq!(sold["outcome"]["status"], "FILLED", "{sold}");
-    let cycle: String = g.scalar(
-        "SELECT id FROM position_cycles WHERE desk_id = ?1",
-        &[&delta_id],
-    );
-    within(
-        Duration::from_secs(180),
-        "the closed cycle's evaluation to be delivered",
-        || {
-            g.scalar::<i64>(
-                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION' \
-                 AND state = 'DELIVERED'",
-                &[&delta_id],
-            ) == 1
-        },
-    );
-    let seen = transcript(&rt, &endpoint, &delta_id, Duration::from_secs(60), |text| {
-        text.contains("MarketRig EVALUATION ")
-    });
-    assert!(
-        seen.lines().any(|line| {
-            line.split_once("INPUT ").is_some_and(|(_, framed)| {
-                framed.split_once(": ").is_some_and(|(n, text)| {
-                    n.chars().all(|c| c.is_ascii_digit())
-                        && text.starts_with("MarketRig EVALUATION ")
-                })
-            })
-        }),
-        "the evaluation reached the session as its own input, framed like every other: {seen:?}"
-    );
-    assert!(
-        seen.contains(&cycle),
-        "the delivered evaluation names the cycle: {seen:?}"
-    );
-
-    // The agent's two steps, performed by the harness from the desk workspace.
-    let delta_workspace = g.workspace(&delta);
-    let learned = format!("lesson for cycle {cycle}");
-    let (exit, printed, stderr) = cli_in(
-        &g,
-        &delta_workspace,
-        &[
-            "memory",
-            "retain",
-            &delta,
-            "--content",
-            &learned,
-            "--tag",
-            "lesson",
-        ],
-    );
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(printed.trim(), "retained 1 item");
-    let skill = SKILL
-        .iter()
-        .fold(delta_workspace.clone(), |path, part| path.join(part))
-        .join("SKILL.md");
-    fs::write(
-        &skill,
-        format!(
-            "---\nname: desk-improvement\ndescription: This desk's own procedure.\n---\n\n\
-             # Desk improvement\n\nCycle {cycle} taught this desk to wait out the open.\n"
-        ),
-    )
-    .expect("the agent's own skill edit");
-    let closed = payloads(&g, &delta_id, "MEMORY_RETAINED");
-    assert_eq!(closed.len(), 1, "the lesson landed on that desk only");
-    assert_eq!(closed[0]["source"], "INTERACTIVE");
-    assert_eq!(payloads(&g, &ids[1], "MEMORY_RETAINED").len(), 0);
-    g.note(
-        "G35",
-        "a round trip closed a cycle, its evaluation was delivered to the session and named the cycle on the terminal, and the agent's two steps — one retain and one skill edit — landed on that desk alone",
-        json!({ "cycle": cycle, "retained": closed[0], "transcript": seen }),
-    );
-
-    // --- G36 — the later session --------------------------------------------
-    let (status, ended) = g.api(
-        "G36",
-        &endpoint,
-        "POST",
-        &session_route(&delta_id, "exit"),
-        None,
-    );
-    assert_eq!(status, 202, "{ended}");
-    let sessions = payloads(&g, &delta_id, "SESSION_STARTED").len();
-    let later = one_off(&mut g, "G36", &delta, "g36-later", 2);
-    await_firing(&g, &later, 0);
-    within(
-        Duration::from_secs(120),
-        "the desk to be activated again for the later firing",
-        || payloads(&g, &delta_id, "SESSION_STARTED").len() > sessions,
-    );
-    let resumed = payloads(&g, &delta_id, "SESSION_STARTED")
-        .pop()
-        .expect("the later session");
-    assert_eq!(resumed["mode"], "RESUME", "{resumed}");
-
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "recall",
-        &delta,
-        "--query",
-        &format!("cycle {cycle}"),
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert!(
-        printed.contains(&learned),
-        "the later session recalls the lesson: {printed:?}"
-    );
-    let through_claude = delta_workspace
-        .join(".claude")
-        .join("skills")
-        .join("desk-improvement")
-        .join("SKILL.md");
-    assert!(
-        fs::read_to_string(&through_claude)
-            .expect("the skill through .claude/skills")
-            .contains(&cycle),
-        "the improved skill is loadable through the Claude path (§5)"
-    );
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "recall",
-        &alpha,
-        "--query",
-        &format!("cycle {cycle}"),
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(
-        printed.trim(),
-        "no results",
-        "the other desk of G34 knows nothing of that cycle"
-    );
-
-    let (status, switched) = g.api(
-        "G36",
-        &endpoint,
-        "POST",
-        &session_route(&delta_id, "switch"),
-        Some(r#"{"runtime":"codex"}"#),
-    );
-    assert_eq!(status, 200, "{switched}");
-    assert_eq!(switched["selected_runtime"], "codex");
-    assert_eq!(
-        fs::read_to_string(&skill).expect("the skill on its own path"),
-        fs::read_to_string(&through_claude).expect("the skill through the link"),
-        "one file, both paths, after the switch (§5)"
-    );
-    g.note(
-        "G36",
-        "after an exit a later firing resumed the desk's session, the lesson came back through recall, the improved skill was readable through both paths across a runtime switch, and the other desk returned nothing about the cycle",
-        json!({ "resumed": resumed, "switched": switched, "cycle": cycle }),
-    );
-
-    // --- G37 — Hindsight stopped --------------------------------------------
-    // A provider change stops a live child (§2.3), which is how the gate arms a
-    // start: the next operation starts a child that has read the new script.
-    g.script(armed(json!({ "exit_after_ms": 6_000 })));
-    let (status, rearmed) = g.api_redacted(
-        "G37",
-        &endpoint,
-        "PUT",
-        "/memory/provider",
-        &provider("stand-in-embedding"),
-    );
-    assert_eq!(status, 200, "{rearmed}");
-    let losses = global(&g, "MEMORY_LOST").len();
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "retain",
-        &alpha,
-        "--content",
-        "taken from a child that is about to stop",
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(printed.trim(), "retained 1 item");
-    within(
-        Duration::from_secs(60),
-        "the child's exit to be a loss",
-        || global(&g, "MEMORY_LOST").len() > losses,
-    );
-    let lost = global(&g, "MEMORY_LOST").pop().expect("MEMORY_LOST");
-    assert_eq!(lost["exit_code"], 1, "{lost}");
-    assert!(
-        lost["output_tail_last_line"]
-            .as_str()
-            .is_some_and(|line| line.contains("memory-standin")),
-        "the loss carries the child's own last line: {lost}"
-    );
-    assert_eq!(
-        g.cli_json("G37", &["--json", "memory", "status", &alpha]).1["child"]["state"],
-        "AVAILABLE",
-        "one loss is never the row's failure (§2.3)"
-    );
-
-    // Disarmed, the next operation starts it again and succeeds.
-    g.script(armed(json!({})));
-    let starts = global(&g, "MEMORY_STARTED").len();
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "retain",
-        &alpha,
-        "--content",
-        "taken after the child came back",
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(printed.trim(), "retained 1 item");
-    assert_eq!(
-        global(&g, "MEMORY_STARTED").len(),
-        starts + 1,
-        "the next operation restarted the child once"
-    );
-
-    // Lost twice with no readiness between: the row fails CHILD_FAILED (§2.3).
-    g.script(armed(
-        json!({ "health_after_ms": 600_000, "exit_after_ms": 3_000 }),
-    ));
-    let (status, doomed) = g.api_redacted(
-        "G37",
-        &endpoint,
-        "PUT",
-        "/memory/provider",
-        &provider("stand-in-embedding"),
-    );
-    assert_eq!(status, 200, "{doomed}");
-    for attempt in 1..=2 {
-        let (exit, printed, stderr) = g.cli(&[
-            "memory",
-            "retain",
-            &alpha,
-            "--content",
-            "this one never lands",
-        ]);
-        assert_eq!(exit, 1, "attempt {attempt}: {printed:?}");
-        assert!(
-            stderr.contains("error: MEMORY_UNAVAILABLE:"),
-            "attempt {attempt}: {stderr:?}"
-        );
-    }
-    assert_eq!(
-        global(&g, "MEMORY_UNAVAILABLE").len(),
-        1,
-        "the second loss is the row's failure"
-    );
-    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert!(printed.contains("state: UNAVAILABLE"), "{printed:?}");
-    assert!(
-        printed.contains("failure_code: CHILD_FAILED"),
-        "{printed:?}"
-    );
-    let (exit, printed, stderr) =
-        g.cli(&["memory", "retain", &alpha, "--content", "still refused"]);
-    assert_eq!(exit, 1, "{printed:?}");
-    assert!(stderr.contains("error: MEMORY_UNAVAILABLE:"), "{stderr:?}");
-
-    // Everything else on the same daemon is untouched: a firing, an activation,
-    // and a paper action.
-    // Counted before the trigger exists: the dispatcher wakes on the firing's
-    // own acceptance, so the activation can land before the firing is read.
-    let sessions = payloads(&g, &delta_id, "SESSION_STARTED").len();
-    let unaffected = one_off(&mut g, "G37", &delta, "g37-unaffected", 2);
-    let unaffected_firing = await_firing(&g, &unaffected, 0);
-    within(
-        Duration::from_secs(180),
-        "the firing's result to be delivered with memory unavailable",
-        || {
-            result_prompts(&g, &delta_id, &unaffected_firing)
-                .first()
-                .is_some_and(|id| prompt_state(&g, id).0 == "DELIVERED")
-        },
-    );
-    assert!(
-        payloads(&g, &delta_id, "SESSION_STARTED").len() > sessions,
-        "the delivery activated the desk"
-    );
-    let (status, resting) = g.api(
-        "G37",
-        &endpoint,
-        "POST",
-        &delta_orders,
-        Some(&limit("g37-rest-aapl", "AAPL.XNAS", "BUY", "1", "1.00")),
-    );
-    assert_eq!(status, 201, "{resting}");
-    assert_eq!(resting["outcome"]["status"], "ACCEPTED", "{resting}");
-
-    // Retry re-validates the launcher and the loss counter starts again (§2.1).
-    g.script(armed(json!({})));
-    let (status, retried) = g.api("G37", &endpoint, "POST", "/memory/retry", None);
-    assert_eq!(status, 200, "{retried}");
-    assert_eq!(retried["state"], "AVAILABLE");
-    assert!(retried.get("failure_code").is_none(), "{retried}");
-    let (exit, printed, stderr) = g.cli(&[
-        "memory",
-        "retain",
-        &alpha,
-        "--content",
-        "taken after the retry",
-    ]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert_eq!(printed.trim(), "retained 1 item");
-    let (exit, printed, stderr) = g.cli(&["memory", "status", &alpha]);
-    assert_eq!(exit, 0, "{stderr}");
-    assert!(printed.contains("live: READY"), "{printed:?}");
-
-    // A hard kill with the child live: the successor reaps it by its record.
-    let child_pid =
-        parse(&fs::read_to_string(g.children_path()).expect("children.json"))["children"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|child| child["kind"] == "memory")
-            .and_then(|child| child["pid"].as_i64())
-            .expect("the memory child's record");
-    let dead = daemon15.endpoint.daemon_uuid.clone();
-    let stale = daemon15.endpoint.clone();
-    g.kill("G37", daemon15);
-    g.await_unverifiable(&stale);
-    let daemon16 = g.spawn("G37");
-    let recovery = g.recoveries().pop().expect("a RECOVERY");
-    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
-    assert!(
-        recovery["children"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|child| child["kind"] == "memory" && child["pid"] == json!(child_pid)),
-        "the successor reaped the memory child: {recovery}"
-    );
-    within(
-        Duration::from_secs(60),
-        "no memory-standin process to survive the kill",
-        || !alive(child_pid),
-    );
-    let (exit, after) = g.cli_json("G37", &["--json", "memory", "status", &alpha]);
-    assert_eq!(exit, 0, "{after}");
-    assert_eq!(after["child"]["state"], "AVAILABLE");
-    assert_eq!(
-        after["child"]["live"], "NOT_STARTED",
-        "liveness is memory only (§6)"
-    );
-    assert_eq!(after["desk_id"], ids[0].as_str());
-    g.stop("G37", daemon16);
-    g.note(
-        "G37",
-        "a scripted exit was one loss and the next operation restarted the child, two losses with no readiness between failed the row CHILD_FAILED while a firing, an activation, and a paper action went through untouched, retry brought it back, and a hard kill left no stand-in alive with liveness reading NOT_STARTED again",
-        json!({ "lost": lost, "recovery": recovery, "child_pid": child_pid }),
-    );
-
-    // ======================================================================
     // R5 (feature SPEC `r5-desktop-approval-controls` §7.1). The chain
     // continues on the same root, the same stand-in feed, and the same
     // stand-in runtime, with a fresh daemon: the two approval policies, the
     // events tail with its first-frame credential, and the browser-grade
     // origin check on the three sockets. G21's prologue put trigger code on
-    // Always allow for the whole R2–R4 chain; G38 puts R5's default back.
+    // Always allow for the whole R2–R3 chain; O7 puts R5's default back.
     // ======================================================================
     let eta = format!("eta-{stamp}");
     let theta = format!("theta-{stamp}");
     let iota = format!("iota-{stamp}");
-    let daemon17 = g.spawn("G38");
+    let daemon17 = g.spawn("O7");
     endpoint = daemon17.endpoint.clone();
     let bearer = format!("Bearer {}", endpoint.credential);
     let policies = "/settings/policies";
@@ -4305,8 +3550,8 @@ fn gate() {
     let deny = r#"{"decision":"DENY"}"#;
     let decide = |desk_id: &str, id: &str| format!("/desks/{desk_id}/approvals/{id}");
 
-    // --- G38 — policies and the tail ----------------------------------------
-    let (status, installed) = g.api("G38", &endpoint, "GET", policies, None);
+    // --- O7 — policies and the tail ----------------------------------------
+    let (status, installed) = g.api("O7", &endpoint, "GET", policies, None);
     assert_eq!(status, 200, "{installed}");
     assert_eq!(
         installed["trigger_code_policy"], "ALWAYS_ALLOW",
@@ -4323,7 +3568,7 @@ fn gate() {
     );
 
     let (status, steered) = g.api(
-        "G38",
+        "O7",
         &endpoint,
         "PUT",
         policies,
@@ -4331,7 +3576,7 @@ fn gate() {
     );
     assert_eq!(status, 409, "{steered}");
     assert_eq!(steered["code"], "STEER_DISABLED");
-    let (_, unmoved) = g.api("G38", &endpoint, "GET", policies, None);
+    let (_, unmoved) = g.api("O7", &endpoint, "GET", policies, None);
     assert_eq!(unmoved, installed, "a refused PUT wrote nothing (§2)");
 
     // The tail is read live: this client connects and takes its position
@@ -4346,7 +3591,7 @@ fn gate() {
 
     let changes = global(&g, "POLICY_CHANGED").len();
     let (status, restored) = g.api(
-        "G38",
+        "O7",
         &endpoint,
         "PUT",
         policies,
@@ -4379,7 +3624,7 @@ fn gate() {
 
     let mut fresh: Vec<String> = Vec::new();
     for name in [&eta, &theta] {
-        let (exit, created) = g.cli_json("G38", &["--json", "desk", "create", name]);
+        let (exit, created) = g.cli_json("O7", &["--json", "desk", "create", name]);
         assert_eq!(exit, 0, "{created}");
         assert_eq!(created["state"], "READY");
         fresh.push(created["id"].as_str().expect("id").to_owned());
@@ -4458,7 +3703,7 @@ fn gate() {
 
     // The listing: one desk's own rows, newest first, and `before` paging back
     // through the flood (§4.3).
-    let (exit, listed) = g.cli_json("G38", &["--json", "desk", "events", &eta]);
+    let (exit, listed) = g.cli_json("O7", &["--json", "desk", "events", &eta]);
     assert_eq!(exit, 0, "{listed}");
     assert_eq!(
         listed["events"]
@@ -4470,7 +3715,7 @@ fn gate() {
         ["DESK_READY", "DESK_CREATED"],
         "newest first, and only this desk's (§4.3)"
     );
-    let (exit, one) = g.cli_json("G38", &["--json", "desk", "events", &eta, "--limit", "1"]);
+    let (exit, one) = g.cli_json("O7", &["--json", "desk", "events", &eta, "--limit", "1"]);
     assert_eq!(exit, 0, "{one}");
     assert_eq!(one["events"].as_array().map(Vec::len), Some(1));
     let (exit, printed, stderr) = g.cli(&["desk", "events", &eta]);
@@ -4516,7 +3761,7 @@ fn gate() {
         "three pages, newest first and never overlapping (§4.3)"
     );
     g.note(
-        "G38",
+        "O7",
         "the policies read as installed with steering refused, restoring the default wrote exactly one POLICY_CHANGED that a live tail client received, a reconnect with its cursor replayed exactly the two desk creations then its tail, a subscriber that never read was closed 4408 while one that kept up took the whole flood, and the listing paged back newest first",
         json!({
             "installed": installed, "restored": restored, "change": written[changes],
@@ -4524,24 +3769,24 @@ fn gate() {
         }),
     );
 
-    // --- G39 — trigger code approval ----------------------------------------
+    // --- O8 — trigger code approval ----------------------------------------
     // On a fresh desk under the restored default, with the stand-in runtime
     // G27 registered: nothing about a gated trigger reaches the scheduler
     // until it is approved (§3.2).
-    let (exit, created) = g.cli_json("G39", &["--json", "desk", "create", &iota]);
+    let (exit, created) = g.cli_json("O8", &["--json", "desk", "create", &iota]);
     assert_eq!(exit, 0, "{created}");
     let iota_id = created["id"].as_str().expect("id").to_owned();
-    let gated_script = script(&g, "g39-gated", "env");
+    let gated_script = script(&g, "o8-gated", "env");
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
     let (exit, gated) = g.cli_json(
-        "G39",
+        "O8",
         &[
             "--json",
             "trigger",
             "create",
             &iota,
             "--name",
-            "g39-once",
+            "o8-once",
             "--brief",
             "a script the user has not approved",
             "--at",
@@ -4583,7 +3828,7 @@ fn gate() {
     assert_eq!(firings(&g, &gated_id), 0);
     assert_eq!(payloads(&g, &iota_id, "TRIGGER_MISSED").len(), 0);
     for leaf in ["disable", "enable"] {
-        let (exit, toggled) = g.cli_json("G39", &["--json", "trigger", leaf, &iota, "g39-once"]);
+        let (exit, toggled) = g.cli_json("O8", &["--json", "trigger", leaf, &iota, "o8-once"]);
         assert_eq!(exit, 0, "{toggled}");
         assert!(
             toggled.get("next_occurrence_ns").is_none(),
@@ -4591,7 +3836,7 @@ fn gate() {
         );
     }
 
-    let (status, pending) = g.api("G39", &endpoint, "GET", "/approvals", None);
+    let (status, pending) = g.api("O8", &endpoint, "GET", "/approvals", None);
     assert_eq!(status, 200, "{pending}");
     let item = pending["approvals"]
         .as_array()
@@ -4606,14 +3851,14 @@ fn gate() {
     assert_eq!(item["approval"], "PENDING");
     assert!(item["decided_at_ns"].is_null(), "{item}");
     assert_eq!(item["detail"]["trigger_id"], gated_id.as_str());
-    assert_eq!(item["detail"]["trigger_name"], "g39-once");
+    assert_eq!(item["detail"]["trigger_name"], "o8-once");
     assert_eq!(item["detail"]["argv"], json!([runner, "{script}"]));
     assert!(
         item["detail"].get("source").is_none(),
         "the listing withholds every script (§3.1): {item}"
     );
     let (status, single) = g.api(
-        "G39",
+        "O8",
         &endpoint,
         "GET",
         &format!("/approvals/{snapshot}"),
@@ -4626,7 +3871,7 @@ fn gate() {
     );
 
     let (status, approved) = g.api(
-        "G39",
+        "O8",
         &endpoint,
         "POST",
         &decide(&iota_id, &snapshot),
@@ -4640,7 +3885,7 @@ fn gate() {
         [json!({ "kind": "TRIGGER_CODE", "id": snapshot, "decision": "APPROVE" })]
     );
     let (status, still) = g.api(
-        "G39",
+        "O8",
         &endpoint,
         "GET",
         &format!("/desks/{iota_id}/triggers/{gated_id}"),
@@ -4654,7 +3899,7 @@ fn gate() {
         "an elapsed one-off stays never due through its approval (§3.2): {still}"
     );
     assert_eq!(payloads(&g, &iota_id, "TRIGGER_MISSED").len(), 0);
-    let (exit, shown, stderr) = g.cli(&["trigger", "show", &iota, "g39-once"]);
+    let (exit, shown, stderr) = g.cli(&["trigger", "show", &iota, "o8-once"]);
     assert_eq!(exit, 0, "{stderr}");
     let code_line = shown
         .lines()
@@ -4669,10 +3914,8 @@ fn gate() {
     // because the code did not change (§3.2).
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
     let (exit, rescheduled) = g.cli_json(
-        "G39",
-        &[
-            "--json", "trigger", "update", &iota, "g39-once", "--at", &at,
-        ],
+        "O8",
+        &["--json", "trigger", "update", &iota, "o8-once", "--at", &at],
     );
     assert_eq!(exit, 0, "{rescheduled}");
     assert_eq!(rescheduled["code"]["approval"], "APPROVED");
@@ -4709,17 +3952,17 @@ fn gate() {
     );
 
     // Denied leaves nothing behind, and different code asks again (§3.2).
-    let denied_script = script(&g, "g39-denied", "sleep 1");
+    let denied_script = script(&g, "o8-denied", "sleep 1");
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 3));
     let (exit, refused) = g.cli_json(
-        "G39",
+        "O8",
         &[
             "--json",
             "trigger",
             "create",
             &iota,
             "--name",
-            "g39-denied",
+            "o8-denied",
             "--brief",
             "a script the user refuses",
             "--at",
@@ -4739,7 +3982,7 @@ fn gate() {
         .expect("a snapshot")
         .to_owned();
     let (status, denied) = g.api(
-        "G39",
+        "O8",
         &endpoint,
         "POST",
         &decide(&iota_id, &refused_snapshot),
@@ -4765,15 +4008,15 @@ fn gate() {
         0,
         "a denied trigger leaves no firing, execution, or prompt (§3.2)"
     );
-    let other_script = script(&g, "g39-other", "sleep 2");
+    let other_script = script(&g, "o8-other", "sleep 2");
     let (exit, repatched) = g.cli_json(
-        "G39",
+        "O8",
         &[
             "--json",
             "trigger",
             "update",
             &iota,
-            "g39-denied",
+            "o8-denied",
             "--code",
             &other_script,
             "--arg",
@@ -4794,24 +4037,24 @@ fn gate() {
     // Under Always allow the same create fires unprompted, and its record is
     // no approval at all (§3.1, §3.2).
     let (status, ungated_code) = g.api(
-        "G39",
+        "O8",
         &endpoint,
         "PUT",
         policies,
         Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
     );
     assert_eq!(status, 200, "{ungated_code}");
-    let control_script = script(&g, "g39-control", "env");
+    let control_script = script(&g, "o8-control", "env");
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
     let (exit, control) = g.cli_json(
-        "G39",
+        "O8",
         &[
             "--json",
             "trigger",
             "create",
             &iota,
             "--name",
-            "g39-control",
+            "o8-control",
             "--brief",
             "the ungated control",
             "--at",
@@ -4838,7 +4081,7 @@ fn gate() {
     );
     let control_firing = await_firing(&g, &control_id, 0);
     await_execution(&g, &control_firing, Duration::from_secs(20));
-    let (_, every) = g.api("G39", &endpoint, "GET", "/approvals?state=ALL", None);
+    let (_, every) = g.api("O8", &endpoint, "GET", "/approvals?state=ALL", None);
     assert!(
         every["approvals"]
             .as_array()
@@ -4848,7 +4091,7 @@ fn gate() {
         "a record the policy never gated is not an approval (§3.1): {every}"
     );
     g.note(
-        "G39",
+        "O8",
         "a gated one-off never became due, its instant passed with no firing and no miss, disable and enable changed nothing, approving it left an elapsed one-off undue, a reschedule ran the approved snapshot and its result reached the stand-in session, a denied one left no firing, execution, or prompt while different code asked again, and the same create under Always allow fired unprompted",
         json!({
             "pending": item, "approved": approved, "firing": fired,
@@ -4856,10 +4099,10 @@ fn gate() {
         }),
     );
 
-    // --- G40 — paper order approval -----------------------------------------
-    // On the desk G35 traded, through the desk's own MCP surface (per D4).
+    // --- O9 — paper order approval -----------------------------------------
+    // On the desk O9 trades on, through the desk's own MCP surface (per D4).
     let (status, gated_orders) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "PUT",
         policies,
@@ -4868,7 +4111,9 @@ fn gate() {
     assert_eq!(status, 200, "{gated_orders}");
     assert_eq!(gated_orders["paper_order_policy"], "REQUIRE_APPROVAL");
     let delta_positions = format!("/desks/{delta_id}/positions");
-    let (status, quotes) = g.api("G40", &endpoint, "GET", &delta_quotes, None);
+    let delta_quotes = format!("/desks/{delta_id}/market/quotes");
+    let delta_orders = format!("/desks/{delta_id}/orders");
+    let (status, quotes) = g.api("O9", &endpoint, "GET", &delta_quotes, None);
     assert_eq!(status, 200, "{quotes}");
     for instrument in ["AAPL.XNAS", "600519.XSHG"] {
         within(
@@ -4913,7 +4158,7 @@ fn gate() {
 
     let flat = g.call(&endpoint, "GET", &delta_positions, None).1["positions"].clone();
     let buy = json!({
-        "action_id": "g40-buy-aapl", "instrument_id": "AAPL.XNAS",
+        "action_id": "o9-buy-aapl", "instrument_id": "AAPL.XNAS",
         "side": "BUY", "type": "MARKET", "quantity": "1", "price": null,
     });
     let (errored, answered) = rt.block_on(tool(&orders, "submit_order", buy.clone()));
@@ -4930,7 +4175,7 @@ fn gate() {
     );
     let order_row = gated_order["id"].as_str().expect("the row id").to_owned();
     g.note(
-        "G40",
+        "O9",
         "the desk's MCP submit_order answered PENDING with no order",
         json!({ "record": gated_order }),
     );
@@ -4949,16 +4194,16 @@ fn gate() {
     let (errored, refused_cancel) = rt.block_on(tool(
         &orders,
         "cancel_order",
-        json!({ "client_order_id": "g40-buy-aapl", "action_id": "g40-cancel-aapl" }),
+        json!({ "client_order_id": "o9-buy-aapl", "action_id": "o9-cancel-aapl" }),
     ));
     assert!(errored, "{refused_cancel}");
     assert!(
         refused_cancel.contains("ORDER_PENDING_APPROVAL"),
         "cancelling a pending submit is refused (§3.3): {refused_cancel}"
     );
-    let (exit, actions) = g.cli_json("G40", &["--json", "history", "actions", &delta]);
+    let (exit, actions) = g.cli_json("O9", &["--json", "history", "actions", &delta]);
     assert_eq!(exit, 0, "{actions}");
-    assert_eq!(actions["actions"][0]["action_id"], "g40-buy-aapl");
+    assert_eq!(actions["actions"][0]["action_id"], "o9-buy-aapl");
     assert_eq!(actions["actions"][0]["approval"], "PENDING");
 
     let cycles = g.scalar::<i64>(
@@ -4970,7 +4215,7 @@ fn gate() {
         &[&delta_id],
     );
     let (status, filled) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "POST",
         &decide(&delta_id, &order_row),
@@ -4991,7 +4236,7 @@ fn gate() {
     // A sell to flat closes one cycle and queues one evaluation, exactly as an
     // ungated round trip does (§3.3).
     let (errored, selling) = submit(
-        "g40-sell-aapl",
+        "o9-sell-aapl",
         "SELL",
         "MARKET",
         "AAPL.XNAS",
@@ -5004,7 +4249,7 @@ fn gate() {
         .expect("the row id")
         .to_owned();
     let (status, sold) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "POST",
         &decide(&delta_id, &sell_row),
@@ -5029,7 +4274,7 @@ fn gate() {
 
     // Denied: a terminal outcome and nothing in the sandbox (§3.3).
     let (errored, resting) = submit(
-        "g40-rest-aapl",
+        "o9-rest-aapl",
         "BUY",
         "LIMIT",
         "AAPL.XNAS",
@@ -5042,7 +4287,7 @@ fn gate() {
         .expect("the row id")
         .to_owned();
     let (status, refused_order) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "POST",
         &decide(&delta_id, &resting_row),
@@ -5057,26 +4302,26 @@ fn gate() {
     assert_eq!(
         g.scalar::<i64>(
             "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
-            &[&delta_id, &"g40-rest-aapl"]
+            &[&delta_id, &"o9-rest-aapl"]
         ),
         0,
         "a denied order never reached the sandbox (§3.3)"
     );
 
     // A code-bearing firing's own order is gated the same way and keeps its
-    // attribution (§3.3). Trigger code is Always allow again since G39's
+    // attribution (§3.3). Trigger code is Always allow again since O8's
     // control, so the script runs without a second decision.
-    let ordering_script = script(&g, "g40-order", "order AAPL.XNAS BUY 1");
+    let ordering_script = script(&g, "o9-order", "order AAPL.XNAS BUY 1");
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
     let (exit, ordering) = g.cli_json(
-        "G40",
+        "O9",
         &[
             "--json",
             "trigger",
             "create",
             &delta,
             "--name",
-            "g40-order",
+            "o9-order",
             "--brief",
             "a script whose order the user must approve",
             "--at",
@@ -5098,7 +4343,7 @@ fn gate() {
         &[&delta_id, &ordering_firing],
     );
     let (status, from_trigger) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "GET",
         &format!("/approvals/{ordering_row}"),
@@ -5116,7 +4361,7 @@ fn gate() {
     // Refused after approval is still a record (§3.3): far beyond the 500,000
     // CNY seeded at XSHG.
     let (errored, too_big) = submit(
-        "g40-too-big",
+        "o9-too-big",
         "BUY",
         "MARKET",
         "600519.XSHG",
@@ -5129,7 +4374,7 @@ fn gate() {
         .expect("the row id")
         .to_owned();
     let (status, rejected) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "POST",
         &decide(&delta_id, &big_row),
@@ -5147,7 +4392,7 @@ fn gate() {
 
     // Ungated again, a submit is R1's, and its row was never an approval.
     let (status, ungated_orders) = g.api(
-        "G40",
+        "O9",
         &endpoint,
         "PUT",
         policies,
@@ -5155,7 +4400,7 @@ fn gate() {
     );
     assert_eq!(status, 200, "{ungated_orders}");
     let (errored, straight) = submit(
-        "g40-ungated",
+        "o9-ungated",
         "BUY",
         "LIMIT",
         "AAPL.XNAS",
@@ -5171,7 +4416,7 @@ fn gate() {
         let _ = orders.cancel().await;
     });
     g.note(
-        "G40",
+        "O9",
         "a gated submit answered PENDING with no order and no position, its replay answered the same record, its cancel was refused ORDER_PENDING_APPROVAL, approving it filled and moved the position, a sell to flat closed one cycle and queued one evaluation, a denied order ended DENIED with nothing in the sandbox, a firing's own order was gated with its attribution, an over-balance buy came back APPROVED with the sandbox's refusal in its outcome, and an ungated submit read ALWAYS_ALLOW",
         json!({
             "pending": gated_order, "approved": filled, "denied": refused_order,
@@ -5179,7 +4424,7 @@ fn gate() {
         }),
     );
 
-    // --- G41 — sockets and a hard kill --------------------------------------
+    // --- O10 — sockets and a hard kill --------------------------------------
     // A browser origin outside the allowlist is refused before any upgrade, on
     // all three sockets (§4.4). The header rides along because the channel is
     // header-only and sits behind the bearer layer: with it, what each of the
@@ -5250,20 +4495,20 @@ fn gate() {
         r#"{"trigger_code_policy":"REQUIRE_APPROVAL"}"#,
         r#"{"paper_order_policy":"REQUIRE_APPROVAL"}"#,
     ] {
-        let (status, set) = g.api("G41", &endpoint, "PUT", policies, Some(body));
+        let (status, set) = g.api("O10", &endpoint, "PUT", policies, Some(body));
         assert_eq!(status, 200, "{set}");
     }
-    let survivor_script = script(&g, "g41-survivor", "env");
+    let survivor_script = script(&g, "o10-survivor", "env");
     let at = format!("{}Z", marketrig_acceptance::utc(now() + 3_600));
     let (exit, surviving) = g.cli_json(
-        "G41",
+        "O10",
         &[
             "--json",
             "trigger",
             "create",
             &iota,
             "--name",
-            "g41-survivor",
+            "o10-survivor",
             "--brief",
             "a snapshot that outlives a kill",
             "--at",
@@ -5283,11 +4528,11 @@ fn gate() {
         .expect("a snapshot")
         .to_owned();
     let (status, surviving_order) = g.api(
-        "G41",
+        "O10",
         &endpoint,
         "POST",
         &delta_orders,
-        Some(&limit("g41-survivor", "AAPL.XNAS", "BUY", "1", "1.00")),
+        Some(&limit("o10-survivor", "AAPL.XNAS", "BUY", "1", "1.00")),
     );
     assert_eq!(
         status, 202,
@@ -5320,10 +4565,10 @@ fn gate() {
         .to_owned();
     let dead = daemon17.endpoint.daemon_uuid.clone();
     let stale = daemon17.endpoint.clone();
-    g.kill("G41", daemon17);
+    g.kill("O10", daemon17);
     g.await_unverifiable(&stale);
     drop(before_kill);
-    let daemon18 = g.spawn("G41");
+    let daemon18 = g.spawn("O10");
     endpoint = daemon18.endpoint.clone();
     let recovery = g.recoveries().pop().expect("a RECOVERY");
     assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
@@ -5332,7 +4577,7 @@ fn gate() {
         !names.contains(&surviving_snapshot) && !names.contains(&surviving_row),
         "an undecided record is pure SQLite and recovery says nothing about it (§3.3): {recovery}"
     );
-    let (status, survived) = g.api("G41", &endpoint, "GET", "/approvals", None);
+    let (status, survived) = g.api("O10", &endpoint, "GET", "/approvals", None);
     assert_eq!(status, 200, "{survived}");
     let waiting: Vec<&str> = survived["approvals"]
         .as_array()
@@ -5345,7 +4590,7 @@ fn gate() {
         "both are still PENDING after the restart: {survived}"
     );
     let (status, decided_snapshot) = g.api(
-        "G41",
+        "O10",
         &endpoint,
         "POST",
         &decide(&iota_id, &surviving_snapshot),
@@ -5354,7 +4599,7 @@ fn gate() {
     assert_eq!(status, 200, "{decided_snapshot}");
     assert_eq!(decided_snapshot["approval"], "APPROVED");
     let (status, decided_order) = g.api(
-        "G41",
+        "O10",
         &endpoint,
         "POST",
         &decide(&delta_id, &surviving_row),
@@ -5384,9 +4629,9 @@ fn gate() {
         "only the kill's lost sessions precede the RECOVERY in that unit: {after_kill:?}"
     );
     drop(resumed);
-    g.stop("G41", daemon18);
+    g.stop("O10", daemon18);
     g.note(
-        "G41",
+        "O10",
         "a foreign origin was refused before any upgrade on all three sockets, an allowed origin with a wrong first frame closed 4401, a header-free terminal on a desk with no session closed 4409 while the live viewer of another desk stayed attached, and a hard kill left one undecided record of each kind untouched, unnamed by recovery and decidable on the successor, whose recovery unit — the lost sessions, then the RECOVERY that names them — was the first thing the reconnecting client received",
         json!({
             "snapshot": surviving_snapshot, "order": surviving_row,
@@ -5395,5 +4640,5 @@ fn gate() {
     );
 
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-G41 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-O10 complete", json!({ "evidence": evidence }));
 }

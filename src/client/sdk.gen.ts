@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { ApprovalData, ApprovalErrors, ApprovalResponses, ApprovalsData, ApprovalsErrors, ApprovalsResponses, BookData, BookErrors, BookResponses, CancelOrderData, CancelOrderErrors, CancelOrderResponses, CreateData, CreateErrors, CreateResponses, CreateTriggerData, CreateTriggerErrors, CreateTriggerResponses, DecideApprovalData, DecideApprovalErrors, DecideApprovalResponses, DeleteTriggerData, DeleteTriggerErrors, DeleteTriggerResponses, DeskMemoryData, DeskMemoryErrors, DeskMemoryResponses, EventsData, EventsErrors, EventsResponses, HealthData, HealthErrors, HealthResponses, HistoryActionsData, HistoryActionsErrors, HistoryActionsResponses, HistoryCyclesData, HistoryCyclesErrors, HistoryCyclesResponses, HistoryFillsData, HistoryFillsErrors, HistoryFillsResponses, HistoryOrdersData, HistoryOrdersErrors, HistoryOrdersResponses, InstrumentsData, InstrumentsErrors, InstrumentsResponses, ListData, ListErrors, ListPromptsData, ListPromptsErrors, ListPromptsResponses, ListResponses, ListTriggersData, ListTriggersErrors, ListTriggersResponses, MemoryDiscoverData, MemoryDiscoverErrors, MemoryDiscoverResponses, MemoryModelsData, MemoryModelsErrors, MemoryModelsResponses, MemoryProviderData, MemoryProviderErrors, MemoryProviderResponses, MemoryRecallData, MemoryRecallErrors, MemoryRecallResponses, MemoryReflectData, MemoryReflectErrors, MemoryReflectResponses, MemoryRetainData, MemoryRetainErrors, MemoryRetainResponses, MemoryRetryData, MemoryRetryErrors, MemoryRetryResponses, MemoryStatusData, MemoryStatusErrors, MemoryStatusResponses, OpenOrdersData, OpenOrdersErrors, OpenOrdersResponses, PatchTriggerData, PatchTriggerErrors, PatchTriggerResponses, PoliciesData, PoliciesErrors, PoliciesResponses, PositionsData, PositionsErrors, PositionsResponses, PutPoliciesData, PutPoliciesErrors, PutPoliciesResponses, QuitData, QuitErrors, QuitResponses, QuotesData, QuotesErrors, QuotesResponses, RetryData, RetryErrors, RetryResponses, RuntimeDiscoverData, RuntimeDiscoverErrors, RuntimeDiscoverResponses, RuntimeRetryData, RuntimeRetryErrors, RuntimeRetryResponses, RuntimesData, RuntimesErrors, RuntimesResponses, SessionActivateData, SessionActivateErrors, SessionActivateResponses, SessionData, SessionErrors, SessionExitData, SessionExitErrors, SessionExitResponses, SessionHookData, SessionHookErrors, SessionHookResponses, SessionInterruptData, SessionInterruptErrors, SessionInterruptResponses, SessionResponses, SessionSwitchData, SessionSwitchErrors, SessionSwitchResponses, ShowData, ShowErrors, ShowFiringData, ShowFiringErrors, ShowFiringResponses, ShowPromptData, ShowPromptErrors, ShowPromptResponses, ShowResponses, ShowTriggerData, ShowTriggerErrors, ShowTriggerResponses, SubmitOrderData, SubmitOrderErrors, SubmitOrderResponses, TriggerFiringsData, TriggerFiringsErrors, TriggerFiringsResponses } from './types.gen';
+import type { ApprovalData, ApprovalErrors, ApprovalResponses, ApprovalsData, ApprovalsErrors, ApprovalsResponses, BookData, BookErrors, BookResponses, CancelOrderData, CancelOrderErrors, CancelOrderResponses, CreateData, CreateErrors, CreateResponses, CreateTriggerData, CreateTriggerErrors, CreateTriggerResponses, DecideApprovalData, DecideApprovalErrors, DecideApprovalResponses, DeleteTriggerData, DeleteTriggerErrors, DeleteTriggerResponses, EventsData, EventsErrors, EventsResponses, HealthData, HealthErrors, HealthResponses, HistoryActionsData, HistoryActionsErrors, HistoryActionsResponses, HistoryCyclesData, HistoryCyclesErrors, HistoryCyclesResponses, HistoryFillsData, HistoryFillsErrors, HistoryFillsResponses, HistoryOrdersData, HistoryOrdersErrors, HistoryOrdersResponses, InstrumentsData, InstrumentsErrors, InstrumentsResponses, ListData, ListErrors, ListPromptsData, ListPromptsErrors, ListPromptsResponses, ListResponses, ListTriggersData, ListTriggersErrors, ListTriggersResponses, MemoryModelsData, MemoryModelsErrors, MemoryModelsResponses, MemoryProviderData, MemoryProviderErrors, MemoryProviderResponses, MemoryProviderRowData, MemoryProviderRowErrors, MemoryProviderRowResponses, OpenOrdersData, OpenOrdersErrors, OpenOrdersResponses, PatchTriggerData, PatchTriggerErrors, PatchTriggerResponses, PoliciesData, PoliciesErrors, PoliciesResponses, PositionsData, PositionsErrors, PositionsResponses, PutPoliciesData, PutPoliciesErrors, PutPoliciesResponses, QuitData, QuitErrors, QuitResponses, QuotesData, QuotesErrors, QuotesResponses, RetryData, RetryErrors, RetryResponses, RuntimeDiscoverData, RuntimeDiscoverErrors, RuntimeDiscoverResponses, RuntimeRetryData, RuntimeRetryErrors, RuntimeRetryResponses, RuntimesData, RuntimesErrors, RuntimesResponses, SessionActivateData, SessionActivateErrors, SessionActivateResponses, SessionData, SessionErrors, SessionExitData, SessionExitErrors, SessionExitResponses, SessionHookData, SessionHookErrors, SessionHookResponses, SessionInterruptData, SessionInterruptErrors, SessionInterruptResponses, SessionResponses, SessionSwitchData, SessionSwitchErrors, SessionSwitchResponses, ShowData, ShowErrors, ShowFiringData, ShowFiringErrors, ShowFiringResponses, ShowPromptData, ShowPromptErrors, ShowPromptResponses, ShowResponses, ShowTriggerData, ShowTriggerErrors, ShowTriggerResponses, SubmitOrderData, SubmitOrderErrors, SubmitOrderResponses, TriggerFiringsData, TriggerFiringsErrors, TriggerFiringsResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -67,35 +67,6 @@ export const book = <ThrowOnError extends boolean = false>(options: Options<Book
 export const instruments = <ThrowOnError extends boolean = false>(options: Options<InstrumentsData, ThrowOnError>): RequestResult<InstrumentsResponses, InstrumentsErrors, ThrowOnError> => (options.client ?? client).get<InstrumentsResponses, InstrumentsErrors, ThrowOnError>({ url: '/desks/{desk_id}/market/instruments', ...options });
 
 export const quotes = <ThrowOnError extends boolean = false>(options: Options<QuotesData, ThrowOnError>): RequestResult<QuotesResponses, QuotesErrors, ThrowOnError> => (options.client ?? client).get<QuotesResponses, QuotesErrors, ThrowOnError>({ url: '/desks/{desk_id}/market/quotes', ...options });
-
-export const deskMemory = <ThrowOnError extends boolean = false>(options: Options<DeskMemoryData, ThrowOnError>): RequestResult<DeskMemoryResponses, DeskMemoryErrors, ThrowOnError> => (options.client ?? client).get<DeskMemoryResponses, DeskMemoryErrors, ThrowOnError>({ url: '/desks/{desk_id}/memory', ...options });
-
-export const memoryRecall = <ThrowOnError extends boolean = false>(options: Options<MemoryRecallData, ThrowOnError>): RequestResult<MemoryRecallResponses, MemoryRecallErrors, ThrowOnError> => (options.client ?? client).post<MemoryRecallResponses, MemoryRecallErrors, ThrowOnError>({
-    url: '/desks/{desk_id}/memory/recall',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-export const memoryReflect = <ThrowOnError extends boolean = false>(options: Options<MemoryReflectData, ThrowOnError>): RequestResult<MemoryReflectResponses, MemoryReflectErrors, ThrowOnError> => (options.client ?? client).post<MemoryReflectResponses, MemoryReflectErrors, ThrowOnError>({
-    url: '/desks/{desk_id}/memory/reflect',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
-
-export const memoryRetain = <ThrowOnError extends boolean = false>(options: Options<MemoryRetainData, ThrowOnError>): RequestResult<MemoryRetainResponses, MemoryRetainErrors, ThrowOnError> => (options.client ?? client).post<MemoryRetainResponses, MemoryRetainErrors, ThrowOnError>({
-    url: '/desks/{desk_id}/memory/retain',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
 
 export const openOrders = <ThrowOnError extends boolean = false>(options: Options<OpenOrdersData, ThrowOnError>): RequestResult<OpenOrdersResponses, OpenOrdersErrors, ThrowOnError> => (options.client ?? client).get<OpenOrdersResponses, OpenOrdersErrors, ThrowOnError>({ url: '/desks/{desk_id}/orders', ...options });
 
@@ -201,16 +172,7 @@ export const events = <ThrowOnError extends boolean = false>(options?: Options<E
 
 export const health = <ThrowOnError extends boolean = false>(options?: Options<HealthData, ThrowOnError>): RequestResult<HealthResponses, HealthErrors, ThrowOnError> => (options?.client ?? client).get<HealthResponses, HealthErrors, ThrowOnError>({ url: '/health', ...options });
 
-export const memoryStatus = <ThrowOnError extends boolean = false>(options?: Options<MemoryStatusData, ThrowOnError>): RequestResult<MemoryStatusResponses, MemoryStatusErrors, ThrowOnError> => (options?.client ?? client).get<MemoryStatusResponses, MemoryStatusErrors, ThrowOnError>({ url: '/memory', ...options });
-
-export const memoryDiscover = <ThrowOnError extends boolean = false>(options: Options<MemoryDiscoverData, ThrowOnError>): RequestResult<MemoryDiscoverResponses, MemoryDiscoverErrors, ThrowOnError> => (options.client ?? client).post<MemoryDiscoverResponses, MemoryDiscoverErrors, ThrowOnError>({
-    url: '/memory/discover',
-    ...options,
-    headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-    }
-});
+export const memoryProviderRow = <ThrowOnError extends boolean = false>(options?: Options<MemoryProviderRowData, ThrowOnError>): RequestResult<MemoryProviderRowResponses, MemoryProviderRowErrors, ThrowOnError> => (options?.client ?? client).get<MemoryProviderRowResponses, MemoryProviderRowErrors, ThrowOnError>({ url: '/memory/provider', ...options });
 
 export const memoryProvider = <ThrowOnError extends boolean = false>(options: Options<MemoryProviderData, ThrowOnError>): RequestResult<MemoryProviderResponses, MemoryProviderErrors, ThrowOnError> => (options.client ?? client).put<MemoryProviderResponses, MemoryProviderErrors, ThrowOnError>({
     url: '/memory/provider',
@@ -222,8 +184,6 @@ export const memoryProvider = <ThrowOnError extends boolean = false>(options: Op
 });
 
 export const memoryModels = <ThrowOnError extends boolean = false>(options?: Options<MemoryModelsData, ThrowOnError>): RequestResult<MemoryModelsResponses, MemoryModelsErrors, ThrowOnError> => (options?.client ?? client).get<MemoryModelsResponses, MemoryModelsErrors, ThrowOnError>({ url: '/memory/provider/models', ...options });
-
-export const memoryRetry = <ThrowOnError extends boolean = false>(options?: Options<MemoryRetryData, ThrowOnError>): RequestResult<MemoryRetryResponses, MemoryRetryErrors, ThrowOnError> => (options?.client ?? client).post<MemoryRetryResponses, MemoryRetryErrors, ThrowOnError>({ url: '/memory/retry', ...options });
 
 /**
  * Answers, then asks the daemon to shut down (§4.2). A full or closed channel
