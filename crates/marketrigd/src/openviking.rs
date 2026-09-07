@@ -40,7 +40,10 @@ const HOME: &str = "openviking";
 
 /// The child's readiness poll and its deadline (§2.2).
 const READY_POLL: Duration = Duration::from_millis(500);
-const READY_TIMEOUT: Duration = Duration::from_secs(1);
+// `/ready` runs a live embeddings probe bounded at 10 s upstream, so one poll
+// must outlast it (verified against 0.4.17.1: an unreachable provider answers
+// 503 after the probe, never sooner).
+const READY_TIMEOUT: Duration = Duration::from_secs(15);
 const READY_DEADLINE_MS: u64 = 120_000;
 
 /// How often the supervisor looks for the child's exit (§2.3).
@@ -1072,7 +1075,7 @@ async fn supervise(context: Arc<OpenViking>, generation: u64) {
                 None => return,
             }
         };
-        context.lose(generation, exit_code).await;
+        context.lose(generation, exit_code, None).await;
         return;
     }
 }
@@ -1080,6 +1083,7 @@ async fn supervise(context: Arc<OpenViking>, generation: u64) {
 /// `GET /ready` until `200`, the deadline, or the child's end (§2.2).
 async fn await_ready(context: Arc<OpenViking>, generation: u64, port: u16) {
     let ready = format!("http://127.0.0.1:{port}/ready");
+    let mut reason: Option<String> = None;
     let deadline = tokio::time::Instant::now() + context.ready_deadline();
     loop {
         {
@@ -1088,10 +1092,16 @@ async fn await_ready(context: Arc<OpenViking>, generation: u64, port: u16) {
                 return;
             }
         }
-        let answered = matches!(
-            context.http.get(&ready).timeout(READY_TIMEOUT).send().await,
-            Ok(response) if response.status() == reqwest::StatusCode::OK
-        );
+        let mut answered = false;
+        if let Ok(response) = context.http.get(&ready).timeout(READY_TIMEOUT).send().await {
+            if response.status() == reqwest::StatusCode::OK {
+                answered = true;
+            } else if let Ok(body) = response.text().await {
+                // A 503 names the failing subsystem (the embedding probe, most
+                // often); it is the deadline loss's reason (§2.3).
+                reason = ready_reason(&body);
+            }
+        }
         if answered {
             {
                 let mut live = context.live();
@@ -1124,16 +1134,37 @@ async fn await_ready(context: Arc<OpenViking>, generation: u64, port: u16) {
             return;
         }
         if tokio::time::Instant::now() >= deadline {
-            context.lose(generation, None).await;
+            context.lose(generation, None, reason).await;
             return;
         }
         tokio::time::sleep(READY_POLL).await;
     }
 }
 
+/// The failing checks of a `/ready` 503 body as one line, e.g.
+/// `ready: embedding: error: provider=openai …`; `None` when the body names none.
+fn ready_reason(body: &str) -> Option<String> {
+    let checks = serde_json::from_str::<Value>(body).ok()?;
+    let failing: Vec<String> = checks
+        .get("checks")?
+        .as_object()?
+        .iter()
+        .filter_map(|(name, value)| {
+            let text = value.as_str()?;
+            text.starts_with("error").then(|| format!("{name}: {text}"))
+        })
+        .collect();
+    (!failing.is_empty()).then(|| format!("ready: {}", failing.join("; ")))
+}
+
 impl OpenViking {
     /// §2.3: the attempt is over. There is no automatic restart.
-    async fn lose(self: &Arc<Self>, generation: u64, exit_code: Option<i64>) {
+    async fn lose(
+        self: &Arc<Self>,
+        generation: u64,
+        exit_code: Option<i64>,
+        reason: Option<String>,
+    ) {
         let (child, pid, last) = {
             let mut live = self.live();
             if live.generation != generation
@@ -1142,7 +1173,8 @@ impl OpenViking {
                 return;
             }
             let pid = live.pid.unwrap_or_default();
-            let last = last_line(&String::from_utf8_lossy(&live.output_tail));
+            let last =
+                reason.unwrap_or_else(|| last_line(&String::from_utf8_lossy(&live.output_tail)));
             let child = live.child.take();
             let output_tail = std::mem::take(&mut live.output_tail);
             *live = Live {
@@ -3174,5 +3206,24 @@ mod tests {
             refused(ov.delete_skill(DESK_A, "spread-watch").await.unwrap_err()),
             "OPENVIKING_UNAVAILABLE"
         );
+    }
+}
+
+#[cfg(test)]
+mod ready_reason_checks {
+    use super::ready_reason;
+
+    #[test]
+    fn a_503_body_names_the_failing_check() {
+        let body = r#"{"status":"not_ready","checks":{"agfs":{"status":"ok"},"vectordb":"ok","embedding":"error: provider=openai model=m: Connection error.","ollama":"not_configured"}}"#;
+        assert_eq!(
+            ready_reason(body).as_deref(),
+            Some("ready: embedding: error: provider=openai model=m: Connection error.")
+        );
+        assert_eq!(
+            ready_reason(r#"{"status":"not_ready","reason":"initializing"}"#),
+            None
+        );
+        assert_eq!(ready_reason("not json"), None);
     }
 }

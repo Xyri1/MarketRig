@@ -77,7 +77,8 @@ spawn    <venv>/bin/openviking-server --config <ov.conf> --host 127.0.0.1 --port
               PYTHONUTF8=1, OPENVIKING_CONFIG_FILE=<ov.conf>,
               MARKETRIG_OV_ROOT_KEY=<root key>, MARKETRIG_OV_PROVIDER_KEY=<provider key>
 record   runtime/children.json {pid, argv}
-ready    GET http://127.0.0.1:<port>/ready -> 200, polled every 500 ms, deadline 120 s
+ready    GET http://127.0.0.1:<port>/ready -> 200, polled every 500 ms with a 15 s request bound
+         (the probe embeds once), deadline 120 s; the last 503 body's failing checks are the deadline loss's reason
 ```
 
 Both output streams go to one 4 KiB in-memory tail, never parsed, never logged. `HOME` is redirected as a second fence: with `OPENVIKING_CONFIG_FILE` set the server reads `~/.openviking/` only as a fallback it never reaches, and every home-directory writer in the source is conditional on a feature this file does not enable — the Codex OAuth provider, encryption, local trace output, the ingest subcommand, the local embedder — while the usage-audit database, bot logs, and upload temp resolve under `storage.workspace`. Readiness appends `OPENVIKING_STARTED {port}` and runs §3.2's provisioning. Startup does not wait for readiness: desks, triggers, trading, and activation are served while the child is `STARTING`; an activation during `STARTING` skips the projection (§5.2) and the runtime launches with the plugin registered, whose hooks queue until the child answers.
@@ -92,7 +93,7 @@ Scenarios:
 
 - **Starts with the daemon.** A daemon whose row is `AVAILABLE` shows `OPENVIKING_STARTED` before the first desk activation's `SESSION_STARTED`.
 - **Lost once.** The scripted exit after readiness: `OPENVIKING_LOST`, `UNAVAILABLE` with the last line, a trigger firing, a `submit_order`, and `session/activate` all succeed; `POST /openviking/retry` reaches `READY` and re-provisions desk users (§3.2).
-- **Never on a bad key.** A provider key the endpoint refuses is not a loss: `/ready` answers, the child stays `READY`, and the plugin's commits produce failed tasks OpenViking records.
+- **Bad provider key.** `/ready` runs a live embeddings probe (10 s bound upstream; verified 2026-09-07 on 0.4.17.1: an unreachable or refusing provider answers `503` whose `checks.embedding` names the error), so a provider the endpoint refuses never reaches `READY`: the deadline passes, `OPENVIKING_LOST` carries `ready: embedding: <error>` as its last line, the row is `UNAVAILABLE` with that message, and a corrected `PUT /memory/provider` plus Retry recovers. A key that works at readiness and is refused later is not a loss: the child stays `READY` and the plugin's commits produce failed tasks OpenViking records.
 - **Hard kill.** A daemon killed with a `READY` child: the next start's recovery reaps the recorded pid and starts a fresh child.
 
 ## 3. Tenancy (OV-3)
