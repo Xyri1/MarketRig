@@ -363,3 +363,397 @@ async fn frame_of(socket: &mut Socket) -> Value {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `openviking-standin` (OpenViking feature SPEC §7.1, per OV-7)
+// ---------------------------------------------------------------------------
+
+const OPENVIKING: &str = env!("CARGO_BIN_EXE_openviking-standin");
+
+/// The root key the harness mints per start (§2.2); any 32 bytes of hex.
+const ROOT_KEY: &str = "6f1c0a2b3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
+
+/// The one installation secret (§3.2).
+const SEED: &str = "the-seed";
+
+/// The key OpenViking's documented rule yields for `desk-abc` under account
+/// `marketrig` with [`SEED`]: `b64url("marketrig") . b64url("desk-abc") .
+/// b64url(sha256("desk-abc\0the-seed").hexdigest())`, padding stripped. Taken
+/// from the rule, not from the stand-in, so a drift in either fails here.
+const DESK_ABC_KEY: &str = "bWFya2V0cmln.ZGVzay1hYmM.\
+NWU2NjZjZWQ2Y2ZmMWVjYWFiOWIyOGRjMGE2NzcxMmI5NGI4Yzk3ZGFiZjExMjM2OGYyNGY3M2NlNmQ2ZGExMQ";
+
+/// One SKILL.md, the shape §5.3's seed and §5.2's projection both carry.
+const SKILL: &str = "---\nname: desk-improvement\ndescription: Improve the desk\n---\n\nBody.\n";
+
+/// A running stand-in and its client.
+struct Openviking {
+    child: Child,
+    agent: ureq::Agent,
+    base: String,
+}
+
+impl Openviking {
+    /// Starts it the way the daemon does (§2.2): the rendered config, the root
+    /// key behind the config's `${…}` reference only, and an explicit port.
+    fn start(scratch: &Scratch, script: &str) -> Openviking {
+        let workspace = scratch.0.join("data");
+        let config = scratch.write(
+            "ov.conf",
+            &json!({
+                "server": {
+                    "host": "127.0.0.1",
+                    "port": 0,
+                    "root_api_key": "${MARKETRIG_OV_ROOT_KEY}",
+                },
+                "storage": {"workspace": workspace.display().to_string()},
+            })
+            .to_string(),
+        );
+        let script = scratch.write("script.json", script);
+        let port = free_port();
+        let child = Child(
+            Command::new(OPENVIKING)
+                .args([
+                    "--config",
+                    &config.display().to_string(),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    &port.to_string(),
+                ])
+                .env("MARKETRIG_OV_ROOT_KEY", ROOT_KEY)
+                .env("MARKETRIG_STANDIN_SCRIPT", &script)
+                .spawn()
+                .expect("the stand-in starts"),
+        );
+        let ov = Openviking {
+            child,
+            agent: ureq::Agent::new_with_config(
+                ureq::Agent::config_builder()
+                    .timeout_global(Some(Duration::from_secs(5)))
+                    .http_status_as_error(false)
+                    .build(),
+            ),
+            base: format!("http://127.0.0.1:{port}"),
+        };
+        // Listening is not readiness: `/health` is the liveness probe, and a
+        // scripted `ready_after_ms` is still counting down behind it.
+        for _ in 0..100 {
+            if ov.try_call("GET", "/health", "", None).is_some() {
+                return ov;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the stand-in never listened");
+    }
+
+    /// One call: the status and the parsed envelope.
+    #[track_caller]
+    fn call(&self, method: &str, path: &str, key: &str, body: Option<Value>) -> (u16, Value) {
+        self.try_call(method, path, key, body)
+            .unwrap_or_else(|| panic!("the stand-in answers {method} {path}"))
+    }
+
+    fn try_call(
+        &self,
+        method: &str,
+        path: &str,
+        key: &str,
+        body: Option<Value>,
+    ) -> Option<(u16, Value)> {
+        let url = format!("{}{path}", self.base);
+        let bearer = format!("Bearer {key}");
+        let sent = match method {
+            "GET" | "DELETE" => {
+                let request = match method {
+                    "GET" => self.agent.get(&url),
+                    _ => self.agent.delete(&url),
+                };
+                match key.is_empty() {
+                    true => request.call(),
+                    false => request.header("Authorization", bearer).call(),
+                }
+            }
+            _ => {
+                let request = match method {
+                    "PUT" => self.agent.put(&url),
+                    _ => self.agent.post(&url),
+                }
+                .header("Authorization", bearer)
+                .header("content-type", "application/json");
+                match body {
+                    Some(body) => request.send(body.to_string()),
+                    None => request.send_empty(),
+                }
+            }
+        };
+        let mut response = sent.ok()?;
+        let status = response.status().as_u16();
+        let text = response.body_mut().read_to_string().ok()?;
+        Some((status, serde_json::from_str(&text).unwrap_or(Value::Null)))
+    }
+
+    /// Blocks until `/ready` answers 200, the daemon's own gate (§2.2).
+    fn wait_ready(&self) {
+        for _ in 0..100 {
+            if self.call("GET", "/ready", "", None).0 == 200 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("the stand-in never became ready");
+    }
+
+    /// Account `marketrig` and one desk user, the sequence of §3.2.
+    fn provision(&self, user: &str) -> String {
+        let (status, _) = self.call(
+            "POST",
+            "/api/v1/admin/accounts",
+            ROOT_KEY,
+            Some(json!({"account_id": "marketrig", "admin_user_id": "marketrig-admin"})),
+        );
+        assert!(status == 200 || status == 409, "account: {status}");
+        let (status, _) = self.call(
+            "POST",
+            "/api/v1/admin/accounts/marketrig/users",
+            ROOT_KEY,
+            Some(json!({"user_id": user, "role": "user"})),
+        );
+        assert!(status == 200 || status == 409, "user: {status}");
+        let (status, answer) = self.call(
+            "POST",
+            &format!("/api/v1/admin/accounts/marketrig/users/{user}/key"),
+            ROOT_KEY,
+            Some(json!({"seed": SEED})),
+        );
+        assert_eq!(status, 200, "{answer}");
+        answer["result"]["user_key"]
+            .as_str()
+            .expect("a user key")
+            .to_string()
+    }
+}
+
+#[test]
+fn openviking_discovery_and_the_seeded_key_rule() {
+    let version = Command::new(OPENVIKING)
+        .arg("--version")
+        .output()
+        .expect("--version");
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "openviking-server 0.4.17.1"
+    );
+
+    let scratch = Scratch::new("ov-keys");
+    let ov = Openviking::start(&scratch, "{}");
+    ov.wait_ready();
+    assert_eq!(ov.call("GET", "/health", "", None).0, 200);
+
+    // The seeded key is the documented rule, so the daemon's Retry gets the
+    // same one back and every live session keeps working (OV-3).
+    assert_eq!(ov.provision("desk-abc"), DESK_ABC_KEY);
+    assert_eq!(ov.provision("desk-abc"), DESK_ABC_KEY);
+
+    // `AlreadyExists` is HTTP 409 with the envelope's own code.
+    let (status, answer) = ov.call(
+        "POST",
+        "/api/v1/admin/accounts",
+        ROOT_KEY,
+        Some(json!({"account_id": "marketrig", "admin_user_id": "marketrig-admin"})),
+    );
+    assert_eq!(
+        (status, &answer["error"]["code"]),
+        (409, &json!("ALREADY_EXISTS"))
+    );
+    let (status, answer) = ov.call(
+        "POST",
+        "/api/v1/admin/accounts/marketrig/users",
+        ROOT_KEY,
+        Some(json!({"user_id": "desk-abc", "role": "user"})),
+    );
+    assert_eq!(
+        (status, &answer["error"]["code"]),
+        (409, &json!("ALREADY_EXISTS"))
+    );
+
+    // Auth: no key and a wrong key are both 401; a desk key is no admin; and
+    // ROOT has no user binding, so it reaches no tenant data at all.
+    assert_eq!(ov.call("GET", "/api/v1/skills", "", None).0, 401);
+    assert_eq!(ov.call("GET", "/api/v1/skills", "not-a-key", None).0, 401);
+    assert_eq!(
+        ov.call(
+            "POST",
+            "/api/v1/admin/accounts/marketrig/users",
+            DESK_ABC_KEY,
+            Some(json!({"user_id": "desk-def", "role": "user"})),
+        )
+        .0,
+        403
+    );
+    assert_eq!(ov.call("GET", "/api/v1/skills", ROOT_KEY, None).0, 403);
+    assert_eq!(ov.call("GET", "/api/v1/nope", DESK_ABC_KEY, None).0, 404);
+    drop(ov.child);
+}
+
+#[test]
+fn openviking_keeps_two_desk_users_apart() {
+    let scratch = Scratch::new("ov-tenancy");
+    let ov = Openviking::start(&scratch, "{}");
+    ov.wait_ready();
+    let a = ov.provision("desk-abc");
+    let b = ov.provision("desk-def");
+    assert_ne!(a, b);
+
+    // The seed upload (§5.3), with one auxiliary file beside SKILL.md.
+    let (status, _) = ov.call(
+        "POST",
+        "/api/v1/skills",
+        &a,
+        Some(json!({"data": SKILL, "files": {"notes.md": "aux"}})),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        ov.call("POST", "/api/v1/skills", &a, Some(json!({"data": SKILL})),)
+            .0,
+        409
+    );
+
+    // The listing and the detail, the two calls the projection makes (§5.2).
+    let (_, listed) = ov.call("GET", "/api/v1/skills", &a, None);
+    assert_eq!(listed["result"]["total"], json!(1));
+    assert_eq!(
+        listed["result"]["root_uris"],
+        json!(["viking://user/desk-abc/skills", "viking://agent/skills"])
+    );
+    let skill = &listed["result"]["skills"][0];
+    assert_eq!(skill["name"], json!("desk-improvement"));
+    assert_eq!(skill["description"], json!("Improve the desk"));
+    assert_eq!(skill["type"], json!("skill"));
+
+    let (_, detail) = ov.call(
+        "GET",
+        "/api/v1/skills/desk-improvement?include_content=true&include_files=true",
+        &a,
+        None,
+    );
+    let detail = &detail["result"];
+    assert_eq!(detail["content"], json!(SKILL));
+    assert_eq!(detail["files"][0]["path"], json!("notes.md"));
+    assert_eq!(detail["files"][0]["is_dir"], json!(false));
+    let (_, read) = ov.call(
+        "GET",
+        &format!(
+            "/api/v1/content/read?uri={}",
+            detail["skill_md_uri"].as_str().expect("a uri")
+        ),
+        &a,
+        None,
+    );
+    assert_eq!(read["result"], json!(SKILL));
+    let (_, aux) = ov.call(
+        "GET",
+        &format!(
+            "/api/v1/content/read?uri={}",
+            detail["files"][0]["uri"].as_str().expect("a uri")
+        ),
+        &a,
+        None,
+    );
+    assert_eq!(aux["result"], json!("aux"));
+
+    // Capture: messages, the commit task, and the session read back.
+    let (_, _) = ov.call(
+        "POST",
+        "/api/v1/sessions/s1/messages",
+        &a,
+        Some(json!({"role": "assistant", "content": "AAPL slipped on the open"})),
+    );
+    let (_, committed) = ov.call("POST", "/api/v1/sessions/s1/commit", &a, None);
+    let task = committed["result"]["task_id"].as_str().expect("a task id");
+    let (_, done) = ov.call("GET", &format!("/api/v1/tasks/{task}"), &a, None);
+    assert_eq!(done["result"]["status"], json!("completed"));
+    let (_, session) = ov.call("GET", "/api/v1/sessions/s1", &a, None);
+    assert_eq!(session["result"]["messages"][0]["role"], json!("assistant"));
+
+    let (_, found) = ov.call(
+        "POST",
+        "/api/v1/search/find",
+        &a,
+        Some(json!({"query": "SLIPPED ON THE OPEN"})),
+    );
+    assert_eq!(found["result"]["results"].as_array().map(Vec::len), Some(1));
+
+    // Isolation: B's key reaches nothing of A's, by any route.
+    let (_, listed) = ov.call("GET", "/api/v1/skills", &b, None);
+    assert_eq!(listed["result"]["total"], json!(0));
+    assert_eq!(
+        ov.call("GET", "/api/v1/skills/desk-improvement", &b, None)
+            .0,
+        404
+    );
+    assert_eq!(
+        ov.call(
+            "GET",
+            "/api/v1/content/read?uri=viking://user/desk-abc/skills/desk-improvement/SKILL.md",
+            &b,
+            None,
+        )
+        .0,
+        403
+    );
+    assert_eq!(ov.call("GET", "/api/v1/sessions/s1", &b, None).0, 404);
+    let (_, found) = ov.call(
+        "POST",
+        "/api/v1/search/find",
+        &b,
+        Some(json!({"query": "slipped on the open"})),
+    );
+    assert_eq!(found["result"]["results"], json!([]));
+
+    // A's own writes still land, and the delete is visible in the listing.
+    assert_eq!(
+        ov.call(
+            "PUT",
+            "/api/v1/skills/desk-improvement",
+            &a,
+            Some(json!({"data": SKILL.replace("Body.", "Rewritten.")})),
+        )
+        .0,
+        200
+    );
+    assert_eq!(
+        ov.call("DELETE", "/api/v1/skills/desk-improvement", &a, None)
+            .0,
+        200
+    );
+    let (_, listed) = ov.call("GET", "/api/v1/skills", &a, None);
+    assert_eq!(listed["result"]["total"], json!(0));
+    drop(ov.child);
+}
+
+#[test]
+fn openviking_exits_after_readiness_as_scripted() {
+    let scratch = Scratch::new("ov-exit");
+    let mut ov = Openviking::start(
+        &scratch,
+        // Two seconds, not two hundred milliseconds: the assertion below has to
+        // beat the delay even when the machine is busy compiling something else.
+        r#"{"openviking":{"ready_after_ms":2000,"exit_after_ready_ms":200,"exit_code":7}}"#,
+    );
+
+    // Before the delay elapses `/ready` is the real server's own refusal.
+    let (status, answer) = ov.call("GET", "/ready", "", None);
+    assert_eq!(
+        (status, answer),
+        (
+            503,
+            json!({"status": "not_ready", "reason": "initializing"})
+        )
+    );
+    ov.wait_ready();
+
+    let status = ov.child.0.wait().expect("the scripted exit");
+    assert_eq!(status.code(), Some(7));
+}
