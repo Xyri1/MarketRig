@@ -81,7 +81,7 @@ ready    GET http://127.0.0.1:<port>/ready -> 200, polled every 500 ms with a 15
          (the probe embeds once), deadline 120 s; the last 503 body's failing checks are the deadline loss's reason
 ```
 
-Both output streams go to one 4 KiB in-memory tail, never parsed, never logged. `HOME` is redirected as a second fence: with `OPENVIKING_CONFIG_FILE` set the server reads `~/.openviking/` only as a fallback it never reaches, and every home-directory writer in the source is conditional on a feature this file does not enable — the Codex OAuth provider, encryption, local trace output, the ingest subcommand, the local embedder — while the usage-audit database, bot logs, and upload temp resolve under `storage.workspace`. Readiness appends `OPENVIKING_STARTED {port}` and runs §3.2's provisioning. Startup does not wait for readiness: desks, triggers, trading, and activation are served while the child is `STARTING`; an activation during `STARTING` skips the projection (§5.2) and the runtime launches with the plugin registered, whose hooks queue until the child answers.
+Both output streams go to one 4 KiB in-memory tail, never parsed, never logged. `HOME` is redirected as a second fence: with `OPENVIKING_CONFIG_FILE` set the server reads `~/.openviking/` only as a fallback it never reaches, and every home-directory writer in the source is conditional on a feature this file does not enable — the Codex OAuth provider, encryption, local trace output, the ingest subcommand, the local embedder — while the usage-audit database, bot logs, and upload temp resolve under `storage.workspace`. Readiness appends `OPENVIKING_STARTED {port}` and runs §3.2's provisioning. Startup does not wait for readiness: desks, triggers, trading, and activation are served while the child is `STARTING`; an activation during `STARTING` skips the projection (§5.2) and, because the desk key exists only after readiness provisions the user (§3.2), launches in the `UNCONFIGURED` form of §4.3 — the plugin has no credential to queue with; the next activation after readiness carries it.
 
 ### 2.3 Loss, retry, stop
 
@@ -170,7 +170,8 @@ Skills live at `viking://~/skills/<name>/` under the desk user. `.agents/skills/
 Before every activation, new or resume, and after every `SESSION_TURN_ENDED`, with the desk key:
 
 ```text
-GET  /api/v1/skills                                   -> names
+GET  /api/v1/skills                                   -> names whose root_uri starts with viking://user/
+                                                         (the listing also merges viking://agent/skills, unused)
 GET  /api/v1/skills/<name>?include_content=true&include_files=true   per name
 write <workspace>/.agents/skills.tmp-<uuid>/<name>/SKILL.md + each auxiliary file
 swap  rename .agents/skills -> .agents/skills.old-<uuid>; tmp -> .agents/skills; delete old
@@ -216,7 +217,7 @@ is kept. When a lesson changes how you would act next time, write it into a skil
   and only you write to them. Search before deciding when the past may matter.
 - Your skills are `viking://~/skills/<skill>/SKILL.md`. Write or replace one with
   `marketrig skill put <name> --file <SKILL.md>` and remove one with `marketrig skill delete <name>
-  <skill>`; the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
+  <skill>` (`<name>` is this desk); the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
   `.claude/skills`) before every session and after every turn so both runtimes load them; that copy
   is read-only, and an edit there is refused — write the skill through `marketrig skill` instead.
   Keep the frontmatter `name` and `description`.
@@ -239,7 +240,7 @@ Scenario: **Put, then see.** `marketrig skill put` returns after `.agents/skills
 
 ## 6. Durable schema (migration 7, OV-6)
 
-Migration 7: `DROP TABLE memory_child`; `CREATE TABLE openviking_setup (…) STRICT` per §1.1 with one seeded `UNCONFIGURED` row; `DELETE FROM operational_events WHERE kind LIKE 'MEMORY_%'`; rebuild `operational_events` (root §15's pattern) with the six `MEMORY_*` kinds removed and `OPENVIKING_CONFIGURED`, `OPENVIKING_PROVISIONED`, `OPENVIKING_STARTED`, `OPENVIKING_LOST`, `OPENVIKING_UNAVAILABLE`, `DESK_MEMORY_PROVISIONED`, `SKILLS_PROJECTED`, and `SKILLS_PROJECTION_FAILED` added. `memory_provider` keeps its columns; `embedding_locked_at_ns` is ignored and dropped by a later rebuild. Live child state, the root key, and the desk keys are memory only. Recovery needs no new step.
+Migration 7: `DROP TABLE memory_child`; `CREATE TABLE openviking_setup (…) STRICT` per §1.1 with one seeded `UNCONFIGURED` row; `DELETE FROM operational_events WHERE kind LIKE 'MEMORY_%'`; rebuild `operational_events` (root §15's pattern) with the six `MEMORY_*` kinds removed and `OPENVIKING_CONFIGURED`, `OPENVIKING_PROVISIONED`, `OPENVIKING_STARTED`, `OPENVIKING_LOST`, `OPENVIKING_UNAVAILABLE`, `DESK_MEMORY_PROVISIONED`, `SKILLS_PROJECTED`, and `SKILLS_PROJECTION_FAILED` added. `memory_provider` keeps its columns; `embedding_locked_at_ns` is ignored and dropped by a later rebuild. Migration 8 adds the nullable `memory_provider.embedding_dimension` §2.1 measures. Live child state, the root key, and the desk keys are memory only. Recovery needs no new step.
 
 ## 7. Acceptance (OV-7)
 

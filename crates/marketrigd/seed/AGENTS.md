@@ -52,7 +52,7 @@ is kept. When a lesson changes how you would act next time, write it into a skil
   and only you write to them. Search before deciding when the past may matter.
 - Your skills are `viking://~/skills/<skill>/SKILL.md`. Write or replace one with
   `marketrig skill put <name> --file <SKILL.md>` and remove one with `marketrig skill delete <name>
-  <skill>`; the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
+  <skill>` (`<name>` is this desk); the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
   `.claude/skills`) before every session and after every turn so both runtimes load them; that copy
   is read-only, and an edit there is refused — write the skill through `marketrig skill` instead.
   Keep the frontmatter `name` and `description`.
