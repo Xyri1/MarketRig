@@ -521,8 +521,9 @@ fn python_candidates() -> Vec<PathBuf> {
             "bin/python3.12",
         ));
     }
-    list.push(PathBuf::from("/opt/homebrew/bin/python3.12"));
-    list.push(PathBuf::from("/usr/local/bin/python3.12"));
+    // A bare `/…` is not absolute on Windows, so the POSIX places are cfg-gated.
+    #[cfg(unix)]
+    list.extend(["/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12"].map(PathBuf::from));
     if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
         list.push(local.join(r"Programs\Python\Python312\python.exe"));
         list.extend(newest(
@@ -553,8 +554,8 @@ fn node_candidates() -> Vec<PathBuf> {
         list.extend(newest(home.join(".nvm/versions/node"), "", "bin/node"));
         list.push(home.join(".volta/bin/node"));
     }
-    list.push(PathBuf::from("/opt/homebrew/bin/node"));
-    list.push(PathBuf::from("/usr/local/bin/node"));
+    #[cfg(unix)]
+    list.extend(["/opt/homebrew/bin/node", "/usr/local/bin/node"].map(PathBuf::from));
     if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
         list.extend(newest(
             appdata.join("fnm/node-versions"),

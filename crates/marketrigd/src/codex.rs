@@ -1183,7 +1183,21 @@ mod tests {
                 })
                 .unwrap()
         };
-        let seen = kinds(());
+        // The restart lands behind a failed projection attempt; on a loaded
+        // Windows runner that outlasts the fixed wait above, so poll up to 8 s.
+        let mut seen = kinds(());
+        for _ in 0..40 {
+            if seen
+                .iter()
+                .filter(|k| *k == "CONTROL_PLANE_STARTED")
+                .count()
+                >= 2
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            seen = kinds(());
+        }
         assert!(seen.iter().any(|k| k == "CONTROL_PLANE_LOST"));
         assert_eq!(
             seen.iter()

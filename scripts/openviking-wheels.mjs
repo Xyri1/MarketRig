@@ -105,5 +105,6 @@ if (differs.length && !args.includes('--write-lock')) {
   );
   process.exit(1);
 }
-writeFileSync(lockPath, lines.join('\n') + '\n');
-console.log(`openviking-wheels/${platform}: ${lines.length} wheels, lockfile written`);
+const written = !existsSync(lockPath) || differs.length > 0;
+if (written) writeFileSync(lockPath, lines.join('\n') + '\n');
+console.log(`openviking-wheels/${platform}: ${lines.length} wheels, lockfile ${written ? 'written' : 'unchanged'}`);
