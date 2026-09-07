@@ -6,7 +6,7 @@ Every milestone names the evidence that closes it, never a date. A milestone is 
 
 Milestones R0 through R5 are delivered; Milestone R6's design is next.
 
-**Active migration design (2026-09-07):** [Slice 011 — OpenViking memory and skills migration](slices/011-openviking-migration.md) opens the replacement of Hindsight and local canonical skill ownership with OpenViking. Local deployment excludes Docker; a user-installed Python prerequisite is acceptable. Its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) is design complete (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9, 2026-09-07); C50–C58 are implemented on `master` (2026-09-07) with the gate O1–O10 green on macOS; the Windows evidence and the attended E6 cells remain before the slice freezes and merges back.
+**Active migration design (2026-09-07):** [Slice 011 — OpenViking memory and skills migration](slices/011-openviking-migration.md) opens the replacement of Hindsight and local canonical skill ownership with OpenViking. Local deployment excludes Docker; a user-installed Python prerequisite is acceptable. Its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) is design complete (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9, 2026-09-07); C50–C58 are implemented on `master` (2026-09-07) with the gate O1–O10 green on macOS; Windows evidence is complete (2026-09-07); the attended E6 cells are deferred by decision and remain the one item before the slice freezes and merges back.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
