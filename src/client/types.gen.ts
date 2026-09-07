@@ -103,11 +103,50 @@ export type Envelope = {
 };
 
 /**
+ * The child's liveness (§1.1, §6): memory only, `NOT_STARTED` after every start.
+ */
+export type OpenVikingChildState = 'NOT_STARTED' | 'STARTING' | 'READY' | 'LOST';
+
+/**
+ * The `openviking_setup` row, secrets-free by construction. The schema names
+ * are qualified: `components/schemas` is one namespace for the whole document.
+ */
+export type OpenVikingSetup = {
+    failure_code?: string | null;
+    failure_message?: string | null;
+    node_path?: string | null;
+    node_version?: string | null;
+    provisioned_at_ns?: number | null;
+    python_path?: string | null;
+    python_version?: string | null;
+    state: string;
+    venv_path?: string | null;
+};
+
+/**
+ * `GET /openviking` (§1.1).
+ */
+export type OpenVikingStatus = {
+    child: OpenVikingChildState;
+    /**
+     * One entry per `READY` desk: whether its OpenViking user is provisioned.
+     */
+    desks: {
+        [key: string]: boolean;
+    };
+    setup: OpenVikingSetup;
+};
+
+/**
  * The `memory_provider` row, secrets-free by construction.
  */
 export type Provider = {
     api_key_present: boolean;
     base_url?: string | null;
+    /**
+     * Measured once at save time and written into `ov.conf` (§2.1).
+     */
+    embedding_dimension?: number | null;
     embedding_model?: string | null;
     llm_model?: string | null;
 };
@@ -968,6 +1007,66 @@ export type MemoryModelsError = MemoryModelsErrors[keyof MemoryModelsErrors];
 export type MemoryModelsResponses = {
     200: unknown;
 };
+
+export type OpenvikingData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/openviking';
+};
+
+export type OpenvikingErrors = {
+    401: Envelope;
+};
+
+export type OpenvikingError = OpenvikingErrors[keyof OpenvikingErrors];
+
+export type OpenvikingResponses = {
+    200: OpenVikingStatus;
+};
+
+export type OpenvikingResponse = OpenvikingResponses[keyof OpenvikingResponses];
+
+export type OpenvikingRetryData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/openviking/retry';
+};
+
+export type OpenvikingRetryErrors = {
+    401: Envelope;
+    409: Envelope;
+};
+
+export type OpenvikingRetryError = OpenvikingRetryErrors[keyof OpenvikingRetryErrors];
+
+export type OpenvikingRetryResponses = {
+    202: OpenVikingStatus;
+};
+
+export type OpenvikingRetryResponse = OpenvikingRetryResponses[keyof OpenvikingRetryResponses];
+
+export type OpenvikingSetupData = {
+    body: unknown;
+    path?: never;
+    query?: never;
+    url: '/openviking/setup';
+};
+
+export type OpenvikingSetupErrors = {
+    400: Envelope;
+    401: Envelope;
+    409: Envelope;
+};
+
+export type OpenvikingSetupError = OpenvikingSetupErrors[keyof OpenvikingSetupErrors];
+
+export type OpenvikingSetupResponses = {
+    202: OpenVikingSetup;
+};
+
+export type OpenvikingSetupResponse = OpenvikingSetupResponses[keyof OpenvikingSetupResponses];
 
 export type QuitData = {
     body?: never;

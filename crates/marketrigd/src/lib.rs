@@ -11,6 +11,7 @@ pub mod feed;
 pub mod log;
 pub mod memory;
 pub mod node;
+pub mod openviking;
 pub mod policy;
 pub mod runtime;
 pub mod schedule;
@@ -88,6 +89,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
     if !memory.seam {
         memory::set_platform_store();
     }
+    let openviking = openviking::OpenViking::new(memory.clone(), startup.daemon_uuid.clone());
     let std_listener = startup
         .listener
         .take()
@@ -179,8 +181,13 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             channels,
             dispatch: dispatcher.clone(),
             memory: memory.clone(),
+            openviking: openviking.clone(),
             events,
         });
+        // The OpenViking child starts here — after recovery, before the listener
+        // accepts desk work — and never waits for readiness (feature SPEC
+        // `openviking-continuity` §2.2).
+        openviking.start().await;
         let mut graceful = shut_rx.clone();
         let serving = tokio::spawn(
             axum::serve(listener, router)
@@ -231,6 +238,9 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
         )
         .await;
         let _ = tokio::time::timeout_at(deadline, codex.stop()).await;
+        // The OpenViking child goes after the terminals and the app-server,
+        // inside the same bound (feature SPEC `openviking-continuity` §2.3).
+        let _ = tokio::time::timeout_at(deadline, openviking.stop_child()).await;
         let _ = dispatcher.quit_rows();
         let _ = tokio::time::timeout_at(
             deadline,

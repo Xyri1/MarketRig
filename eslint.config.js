@@ -9,6 +9,10 @@ export default [
       "dist/**",
       "node_modules/**",
       "target/**",
+      // A git worktree is a second checkout with its own checks (AGENTS.md);
+      // linting it here would lint another branch and confuse typescript-eslint
+      // with a second candidate `tsconfig.json`.
+      ".worktrees/**",
       "scripts/**",
       // Upstream's plugin trees, vendored byte for byte (feature SPEC
       // `openviking-continuity` §4.1); linting them would be linting upstream.

@@ -20,6 +20,7 @@ use utoipa_axum::routes;
 
 use crate::desk::{self, Desk, DeskError};
 use crate::memory::{self, MemoryError};
+use crate::openviking::{self, SetupError};
 use crate::policy::{self, DecideError, PolicyError};
 use crate::store::{self, Store};
 use crate::trade::{self, TradeError};
@@ -53,6 +54,9 @@ pub struct ApiState {
     /// The memory provider settings and the credential seam (feature SPEC
     /// `openviking-continuity` §1.1).
     pub memory: Arc<crate::memory::Memory>,
+    /// The OpenViking installation, its child, and the desk keys (feature SPEC
+    /// `openviking-continuity` §1, §2, §3).
+    pub openviking: Arc<crate::openviking::OpenViking>,
     /// The events tail's one publisher (R5 feature SPEC §4.1).
     pub events: Arc<crate::events::Publisher>,
 }
@@ -93,6 +97,9 @@ const HTTP_PATHS: &[&str] = &[
     "/runtimes/{runtime}/retry",
     "/memory/provider",
     "/memory/provider/models",
+    "/openviking",
+    "/openviking/setup",
+    "/openviking/retry",
     "/desks/{desk_id}/prompts",
     "/desks/{desk_id}/prompts/{prompt_id}",
     "/settings/policies",
@@ -146,6 +153,9 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(runtime_retry))
     .routes(routes!(memory_provider_row, memory_provider))
     .routes(routes!(memory_models))
+    .routes(routes!(openviking))
+    .routes(routes!(openviking_setup))
+    .routes(routes!(openviking_retry))
     .routes(routes!(list_prompts))
     .routes(routes!(show_prompt))
     .routes(routes!(policies, put_policies))
@@ -391,7 +401,26 @@ impl IntoResponse for MemoryError {
             MemoryError::Validation(_) => StatusCode::BAD_REQUEST,
             MemoryError::Unconfigured => StatusCode::CONFLICT,
             MemoryError::CredentialStoreUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            MemoryError::Error(_) | MemoryError::ProviderUnreachable(_) => StatusCode::BAD_GATEWAY,
+            MemoryError::Error(_)
+            | MemoryError::ProviderUnreachable(_)
+            | MemoryError::ProviderRejected(_) => StatusCode::BAD_GATEWAY,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The feature SPEC §1.2 code-to-status map, appended the same way.
+/// `SetupError::code()` owns the code; this owns the status.
+impl IntoResponse for SetupError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            SetupError::Validation(_)
+            | SetupError::PythonUnsupported(_)
+            | SetupError::PythonProbeFailed(_)
+            | SetupError::NodeUnsupported(_)
+            | SetupError::NodeProbeFailed(_) => StatusCode::BAD_REQUEST,
+            SetupError::Busy | SetupError::Unconfigured => StatusCode::CONFLICT,
+            SetupError::Error(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -548,6 +577,12 @@ async fn create(
         &body.name,
         selected_runtime,
     )?;
+    // A desk created while the child is `READY` gets its OpenViking user at the
+    // end of creation; every other desk waits for the next readiness (feature
+    // SPEC `openviking-continuity` §3.2). A failure is a warn, never the desk's.
+    if desk.state == "READY" {
+        state.openviking.provision_desk(&desk.id).await;
+    }
     Ok((StatusCode::CREATED, Json(desk)).into_response())
 }
 
@@ -1320,6 +1355,69 @@ async fn memory_models(
     ))
 }
 
+// The OpenViking installation routes (feature SPEC `openviking-continuity`
+// §1.1). The body is taken as a `String` and the content type checked after it
+// is read, like every other R4/R5 route: answering with bytes still unread
+// makes the close a reset, which Windows reports in place of the envelope.
+
+#[utoipa::path(
+    get,
+    path = "/openviking",
+    responses(
+        (status = 200, body = openviking::Status),
+        (status = 401, body = Envelope),
+    )
+)]
+async fn openviking(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<openviking::Status>, SetupError> {
+    Ok(Json(state.openviking.status()?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/openviking/setup",
+    request_body = serde_json::Value,
+    responses(
+        (status = 202, body = openviking::Setup),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
+async fn openviking_setup(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Response, SetupError> {
+    let request = is_json(&headers)
+        .then(|| serde_json::from_str::<openviking::SetupRequest>(&body).ok())
+        .flatten()
+        .ok_or_else(|| {
+            SetupError::Validation(
+                "The request body must be a JSON object with python, node, and an optional \
+                 wheels."
+                    .to_string(),
+            )
+        })?;
+    let row = state.openviking.setup(request).await?;
+    Ok((StatusCode::ACCEPTED, Json(row)).into_response())
+}
+
+#[utoipa::path(
+    post,
+    path = "/openviking/retry",
+    responses(
+        (status = 202, body = openviking::Status),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
+async fn openviking_retry(State(state): State<Arc<ApiState>>) -> Result<Response, SetupError> {
+    let status = state.openviking.retry().await?;
+    Ok((StatusCode::ACCEPTED, Json(status)).into_response())
+}
+
 fn unknown_runtime(name: &str) -> Response {
     envelope(
         StatusCode::NOT_FOUND,
@@ -2005,6 +2103,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     ));
     let channels = Arc::new(crate::claude::Channels::default());
     let memory = Arc::new(crate::memory::seam_memory(store.clone(), roots));
+    let openviking = crate::openviking::OpenViking::new(memory.clone(), DAEMON_UUID.to_string());
     // The events publisher the daemon spawns in `lib.rs::serve`, so `/events`
     // is live here too (R5 feature SPEC §4.1).
     let events = crate::events::Publisher::new(store.clone()).unwrap();
@@ -2027,6 +2126,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
         dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
         memory: memory.clone(),
+        openviking,
         events,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

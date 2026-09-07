@@ -22,9 +22,12 @@ use serde_json::{Value, json};
 use crate::desk::append_event;
 use crate::store::{Roots, Store, StoreError, now_ns};
 
-/// The credential store's service and account (§2.1, per D49).
+/// The credential store's service and accounts (§2.1, per D49). The seed is the
+/// one installation secret desk keys derive from (§3.1), stored beside the
+/// provider key and never rotated.
 const SERVICE: &str = "marketrig";
 const ACCOUNT: &str = "hindsight-provider";
+pub const SEED_ACCOUNT: &str = "openviking-seed";
 
 /// The opaque marker `memory_provider.key_ref` carries once a key is stored.
 const KEY_REF: &str = "marketrig/hindsight-provider";
@@ -32,7 +35,7 @@ const KEY_REF: &str = "marketrig/hindsight-provider";
 /// The seam credential store, inside the relocated runtime directory.
 const CREDENTIALS: &str = "credentials.json";
 
-/// The provider model list's own bound.
+/// The provider model list's and the dimension probe's own bound.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What the daemon puts in place of the stored key in anything it lifts from a
@@ -52,6 +55,13 @@ pub struct Memory {
     /// The provider fetch: never through a machine proxy, never following a
     /// redirect, bounded per request.
     pub http: reqwest::Client,
+    /// The secrets that live in memory only — the child's per-start root key and
+    /// each desk's key (§3.1) — registered here as they are minted so that
+    /// [`Memory::redact`] covers all four of §9 check 10's.
+    ///
+    /// ponytail: an append-only list, one entry per start and per desk; it is
+    /// bounded by the desk count and never read on a hot path.
+    held: std::sync::Mutex<Vec<String>>,
 }
 
 impl Memory {
@@ -61,6 +71,7 @@ impl Memory {
             roots,
             seam: std::env::var_os(crate::store::TEST_DATA_ROOT_ENV).is_some(),
             http: client(),
+            held: std::sync::Mutex::new(Vec::new()),
         })
     }
 }
@@ -81,6 +92,9 @@ pub enum MemoryError {
     Validation(String),
     CredentialStoreUnavailable(String),
     ProviderUnreachable(String),
+    /// The embedding model would not answer with a vector (§2.1): the row is
+    /// not written, so `ov.conf` never carries a guessed dimension.
+    ProviderRejected(String),
     /// A store failure; the daemon's SQLite is in-process and single-writer, so
     /// this is unreachable in practice.
     Error(String),
@@ -93,6 +107,7 @@ impl MemoryError {
             MemoryError::Validation(_) => "VALIDATION",
             MemoryError::CredentialStoreUnavailable(_) => "CREDENTIAL_STORE_UNAVAILABLE",
             MemoryError::ProviderUnreachable(_) => "PROVIDER_UNREACHABLE",
+            MemoryError::ProviderRejected(_) => "PROVIDER_REJECTED",
             MemoryError::Error(_) => "MEMORY_ERROR",
         }
     }
@@ -109,6 +124,10 @@ impl fmt::Display for MemoryError {
                 write!(f, "The credential store is unavailable: {m}")
             }
             MemoryError::ProviderUnreachable(m) => write!(f, "The provider did not answer: {m}"),
+            MemoryError::ProviderRejected(m) => write!(
+                f,
+                "The embedding model answered with no vector, so its dimension is unknown: {m}"
+            ),
         }
     }
 }
@@ -134,11 +153,26 @@ pub struct Provider {
     pub llm_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
+    /// Measured once at save time and written into `ov.conf` (§2.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_dimension: Option<i64>,
     pub api_key_present: bool,
 }
 
-const PROVIDER_SELECT: &str =
-    "SELECT base_url, llm_model, embedding_model, key_ref FROM memory_provider WHERE id = 1";
+impl Provider {
+    /// Whether the child may start on this row (§2.2): every field `ov.conf`
+    /// needs, and a key in the credential store behind `key_ref`.
+    pub fn complete(&self) -> bool {
+        self.base_url.is_some()
+            && self.llm_model.is_some()
+            && self.embedding_model.is_some()
+            && self.embedding_dimension.is_some()
+            && self.api_key_present
+    }
+}
+
+const PROVIDER_SELECT: &str = "SELECT base_url, llm_model, embedding_model, key_ref, \
+                               embedding_dimension FROM memory_provider WHERE id = 1";
 
 fn read_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
     Ok(Provider {
@@ -146,6 +180,7 @@ fn read_provider(row: &rusqlite::Row<'_>) -> rusqlite::Result<Provider> {
         llm_model: row.get(1)?,
         embedding_model: row.get(2)?,
         api_key_present: row.get::<_, Option<String>>(3)?.is_some(),
+        embedding_dimension: row.get(4)?,
     })
 }
 
@@ -181,41 +216,68 @@ impl Memory {
         self.roots.runtime().join(CREDENTIALS)
     }
 
-    /// Writes the provider key. Under the seam it is `runtime/credentials.json`
+    /// Writes one secret. Under the seam the store is `runtime/credentials.json`
     /// (0600, one JSON object keyed by account); otherwise the platform store.
-    pub fn store_key(&self, key: &str) -> Result<(), MemoryError> {
+    pub fn store_secret(&self, account: &str, secret: &str) -> Result<(), MemoryError> {
         if self.seam {
             let path = self.credentials_path();
             let mut map = seam_map(&path)?;
-            map.insert(ACCOUNT.to_string(), key.to_string());
+            map.insert(account.to_string(), secret.to_string());
             return seam_write(&path, &map)
                 .map_err(|e| MemoryError::CredentialStoreUnavailable(e.to_string()));
         }
-        keyring_core::Entry::new(SERVICE, ACCOUNT)
-            .and_then(|entry| entry.set_password(key))
+        keyring_core::Entry::new(SERVICE, account)
+            .and_then(|entry| entry.set_password(secret))
             .map_err(|e| MemoryError::CredentialStoreUnavailable(e.to_string()))
     }
 
-    /// Reads the provider key back, `None` when none was ever stored.
-    pub fn load_key(&self) -> Result<Option<String>, MemoryError> {
+    /// Reads one secret back, `None` when none was ever stored.
+    pub fn load_secret(&self, account: &str) -> Result<Option<String>, MemoryError> {
         if self.seam {
-            return Ok(seam_map(&self.credentials_path())?.remove(ACCOUNT));
+            return Ok(seam_map(&self.credentials_path())?.remove(account));
         }
-        match keyring_core::Entry::new(SERVICE, ACCOUNT).and_then(|entry| entry.get_password()) {
+        match keyring_core::Entry::new(SERVICE, account).and_then(|entry| entry.get_password()) {
             Ok(key) => Ok(Some(key)),
             Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(MemoryError::CredentialStoreUnavailable(e.to_string())),
         }
     }
 
-    /// Replaces every occurrence of the stored key in a message the daemon
-    /// lifted from a child. A message with no key in it, and a store with no key
-    /// in it, both come back unchanged.
-    pub fn redact(&self, message: &str) -> String {
-        match self.load_key() {
-            Ok(Some(key)) => redact_key(&key, message),
-            _ => message.to_string(),
+    /// Writes the provider key.
+    pub fn store_key(&self, key: &str) -> Result<(), MemoryError> {
+        self.store_secret(ACCOUNT, key)
+    }
+
+    /// Reads the provider key back, `None` when none was ever stored.
+    pub fn load_key(&self) -> Result<Option<String>, MemoryError> {
+        self.load_secret(ACCOUNT)
+    }
+
+    /// Registers a memory-only secret — the child's root key, a desk key — so
+    /// [`Memory::redact`] covers it too (§9 check 10).
+    pub fn hold_secret(&self, secret: &str) {
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        if !secret.is_empty() && !held.iter().any(|s| s == secret) {
+            held.push(secret.to_string());
         }
+    }
+
+    /// Replaces every occurrence of the four secrets of §9 check 10 — the
+    /// provider key, the installation seed, the child's root key, and the desk
+    /// keys — in a message the daemon lifted from the child or a plugin. A
+    /// message carrying none of them comes back unchanged.
+    pub fn redact(&self, message: &str) -> String {
+        let mut message = message.to_string();
+        for account in [ACCOUNT, SEED_ACCOUNT] {
+            if let Ok(Some(secret)) = self.load_secret(account) {
+                message = redact_key(&secret, &message);
+            }
+        }
+        let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        for secret in held.iter() {
+            message = redact_key(secret, &message);
+        }
+        message
     }
 }
 
@@ -331,9 +393,45 @@ impl Memory {
         Ok(provider_row(&self.store)?)
     }
 
-    /// `PUT /memory/provider` (§1.1): the key reaches the credential store
-    /// first, so a store failure writes nothing at all; the row and the event
-    /// then commit in one unit. There is no embedding lock.
+    /// One embeddings request for the string `marketrig`, whose vector's length
+    /// is the dimension `ov.conf` writes (§2.1). OpenViking would otherwise
+    /// silently assume 2048 for a model outside OpenAI's three named ones, so a
+    /// provider that will not answer with a vector is `PROVIDER_REJECTED`.
+    async fn measure_dimension(
+        &self,
+        base_url: &str,
+        model: &str,
+        key: Option<&str>,
+    ) -> Result<i64, MemoryError> {
+        let mut request = self
+            .http
+            .post(format!("{base_url}/embeddings"))
+            .timeout(MODELS_TIMEOUT)
+            .json(&json!({ "model": model, "input": "marketrig" }));
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        let rejected = |why: String| MemoryError::ProviderRejected(first_line(&why));
+        let response = request
+            .send()
+            .await
+            .map_err(|e| rejected(self.redact(&e.to_string())))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(MemoryError::ProviderRejected(format!("HTTP {status}")));
+        }
+        let body: Value = response.json().await.map_err(|e| rejected(e.to_string()))?;
+        body["data"][0]["embedding"]
+            .as_array()
+            .filter(|vector| !vector.is_empty())
+            .map(|vector| vector.len() as i64)
+            .ok_or_else(|| rejected("the answer carried no embedding".to_string()))
+    }
+
+    /// `PUT /memory/provider` (§1.1): the dimension is measured first, so a
+    /// provider that cannot serve embeddings writes nothing; then the key
+    /// reaches the credential store, so a store failure writes nothing either;
+    /// the row and the event then commit in one unit. There is no embedding lock.
     pub async fn put_provider(&self, request: ProviderRequest) -> Result<Provider, MemoryError> {
         let base_url = validate_base_url(&request.base_url)?;
         let llm_model = validate_model("llm_model", &request.llm_model)?;
@@ -345,6 +443,13 @@ impl Memory {
         }
 
         let current = provider_row(&self.store)?;
+        let key = match &request.api_key {
+            Some(key) => Some(key.clone()),
+            None => self.load_key()?,
+        };
+        let dimension = self
+            .measure_dimension(&base_url, &embedding_model, key.as_deref())
+            .await?;
         if let Some(key) = &request.api_key {
             self.store_key(key)?;
         }
@@ -354,8 +459,15 @@ impl Memory {
         Ok(self.store.unit(move |tx| {
             tx.execute(
                 "UPDATE memory_provider SET base_url = ?1, llm_model = ?2, embedding_model = ?3, \
-                 key_ref = ?4, updated_at_ns = ?5 WHERE id = 1",
-                params![base_url, llm_model, embedding_model, key_ref, at_ns],
+                 key_ref = ?4, updated_at_ns = ?5, embedding_dimension = ?6 WHERE id = 1",
+                params![
+                    base_url,
+                    llm_model,
+                    embedding_model,
+                    key_ref,
+                    at_ns,
+                    dimension
+                ],
             )?;
             append_event(
                 tx,
@@ -432,6 +544,7 @@ pub(crate) fn seam_memory(store: Store, roots: Roots) -> Memory {
         roots,
         seam: true,
         http: client(),
+        held: std::sync::Mutex::new(Vec::new()),
     }
 }
 
@@ -464,6 +577,25 @@ fn events(store: &Store) -> Vec<(String, Value)> {
 #[cfg(test)]
 const FAKE_KEY: &str = "sk-marketrig-fake-0123456789abcdef";
 
+/// A provider that answers `/embeddings` with a three-element vector, so
+/// `PUT /memory/provider` can measure the dimension (§2.1). The port is the
+/// caller's `base_url`; nothing else of the provider is faked here.
+#[cfg(test)]
+pub(crate) async fn fake_embeddings() -> u16 {
+    let app = axum::Router::new().route(
+        "/v1/embeddings",
+        axum::routing::post(|| async {
+            axum::Json(json!({"data": [{"embedding": [0.1, 0.2, 0.3]}]}))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    port
+}
+
 #[cfg(test)]
 fn request(base_url: &str, api_key: Option<&str>, llm: &str, embedding: &str) -> ProviderRequest {
     ProviderRequest {
@@ -478,6 +610,8 @@ fn request(base_url: &str, api_key: Option<&str>, llm: &str, embedding: &str) ->
 #[tokio::test]
 async fn provider_settings() {
     let (_dir, memory) = scratch();
+    let port = fake_embeddings().await;
+    let base = format!("http://127.0.0.1:{port}/v1");
 
     // Validation refuses every shape §1.1 keeps from R4 §3, and writes nothing.
     for bad in [
@@ -520,15 +654,18 @@ async fn provider_settings() {
     // and the event follow, and the key is in neither.
     let provider = memory
         .put_provider(request(
-            "http://127.0.0.1:9/v1/",
+            &format!("{base}/"),
             Some(FAKE_KEY),
             "llm-1",
             "emb-1",
         ))
         .await
         .unwrap();
-    assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:9/v1"));
+    assert_eq!(provider.base_url.as_deref(), Some(base.as_str()));
     assert_eq!(provider.llm_model.as_deref(), Some("llm-1"));
+    // The dimension is measured, not declared (§2.1).
+    assert_eq!(provider.embedding_dimension, Some(3));
+    assert!(provider.complete());
     assert!(provider.api_key_present);
     assert_eq!(memory.load_key().unwrap().as_deref(), Some(FAKE_KEY));
     assert_eq!(
@@ -548,7 +685,7 @@ async fn provider_settings() {
 
     // api_key omitted keeps the stored key and still changes the models.
     let provider = memory
-        .put_provider(request("http://127.0.0.1:9/v1", None, "llm-2", "emb-1"))
+        .put_provider(request(&base, None, "llm-2", "emb-1"))
         .await
         .unwrap();
     assert!(provider.api_key_present);
@@ -557,10 +694,30 @@ async fn provider_settings() {
 
     // The embedding lock is gone (§1.1): a new embedding model is just a save.
     let provider = memory
-        .put_provider(request("http://127.0.0.1:9/v1", None, "llm-3", "emb-2"))
+        .put_provider(request(&base, None, "llm-3", "emb-2"))
         .await
         .unwrap();
     assert_eq!(provider.embedding_model.as_deref(), Some("emb-2"));
+
+    // A provider that will not serve embeddings is PROVIDER_REJECTED and the
+    // row keeps what it had (§2.1).
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let err = memory
+        .put_provider(request(
+            &format!("http://127.0.0.1:{dead_port}/v1"),
+            None,
+            "llm-4",
+            "emb-3",
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "PROVIDER_REJECTED");
+    assert_eq!(
+        memory.provider().unwrap().llm_model.as_deref(),
+        Some("llm-3")
+    );
 
     // Three accepted PUTs, three events, and the key in none of them.
     let seen = events(&memory.store);
@@ -568,7 +725,7 @@ async fn provider_settings() {
     assert!(seen.iter().all(|(kind, payload)| {
         kind == "OPENVIKING_CONFIGURED"
             && payload["what"] == "provider"
-            && payload["base_url"] == "http://127.0.0.1:9/v1"
+            && payload["base_url"] == base
             && !payload.to_string().contains(FAKE_KEY)
     }));
 
@@ -595,12 +752,13 @@ async fn provider_settings() {
 #[tokio::test]
 async fn credential_store_unavailable_writes_nothing() {
     let (_dir, memory) = scratch();
+    let port = fake_embeddings().await;
     // A directory where the file belongs: the write fails on both platforms.
     fs::create_dir_all(memory.roots.runtime().join(CREDENTIALS)).unwrap();
 
     let err = memory
         .put_provider(request(
-            "http://127.0.0.1:9/v1",
+            &format!("http://127.0.0.1:{port}/v1"),
             Some(FAKE_KEY),
             "llm-1",
             "emb-1",
@@ -652,6 +810,13 @@ async fn models_are_live_and_never_cached() {
             }
         }),
     );
+    // Every save measures the dimension first (§2.1), key or no key.
+    let app = app.route(
+        "/v1/embeddings",
+        axum::routing::post(|| async {
+            axum::Json(json!({"data": [{"embedding": [0.1, 0.2, 0.3]}]}))
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
@@ -697,18 +862,20 @@ async fn models_are_live_and_never_cached() {
         ["stand-in-llm", "stand-in-embedding"]
     );
 
-    // A dead port is a transport failure, not a status (§1.1).
+    // A dead port is a transport failure, not a status (§1.1). The row is
+    // written behind the route, which would refuse a base URL serving no
+    // embeddings (§2.1) long before the model list is ever asked for.
     let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let dead_port = dead.local_addr().unwrap().port();
     drop(dead);
     memory
-        .put_provider(request(
-            &format!("http://127.0.0.1:{dead_port}/v1"),
-            None,
-            "llm-1",
-            "emb-1",
-        ))
-        .await
+        .store
+        .unit(move |tx| {
+            tx.execute(
+                "UPDATE memory_provider SET base_url = ?1 WHERE id = 1",
+                params![format!("http://127.0.0.1:{dead_port}/v1")],
+            )
+        })
         .unwrap();
     assert_eq!(
         memory.models().await.unwrap_err().code(),

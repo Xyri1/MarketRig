@@ -124,6 +124,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/005_r4.sql"),
     include_str!("store/006_r5.sql"),
     include_str!("store/007_openviking.sql"),
+    include_str!("store/008_embedding_dimension.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.

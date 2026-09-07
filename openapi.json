@@ -2223,6 +2223,125 @@
         }
       }
     },
+    "/openviking": {
+      "get": {
+        "operationId": "openviking",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenVikingStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openviking/retry": {
+      "post": {
+        "operationId": "openviking_retry",
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenVikingStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openviking/setup": {
+      "put": {
+        "operationId": "openviking_setup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenVikingSetup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/quit": {
       "post": {
         "summary": "Answers, then asks the daemon to shut down (§4.2). A full or closed channel\nmeans a stop is already under way, so a second `/quit` is a no-op.",
@@ -2658,6 +2777,104 @@
           }
         }
       },
+      "OpenVikingChildState": {
+        "type": "string",
+        "description": "The child's liveness (§1.1, §6): memory only, `NOT_STARTED` after every start.",
+        "enum": [
+          "NOT_STARTED",
+          "STARTING",
+          "READY",
+          "LOST"
+        ]
+      },
+      "OpenVikingSetup": {
+        "type": "object",
+        "description": "The `openviking_setup` row, secrets-free by construction. The schema names\nare qualified: `components/schemas` is one namespace for the whole document.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provisioned_at_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "python_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "python_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "venv_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "OpenVikingStatus": {
+        "type": "object",
+        "description": "`GET /openviking` (§1.1).",
+        "required": [
+          "setup",
+          "child",
+          "desks"
+        ],
+        "properties": {
+          "child": {
+            "$ref": "#/components/schemas/OpenVikingChildState"
+          },
+          "desks": {
+            "type": "object",
+            "description": "One entry per `READY` desk: whether its OpenViking user is provisioned.",
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "setup": {
+            "$ref": "#/components/schemas/OpenVikingSetup"
+          }
+        }
+      },
       "Provider": {
         "type": "object",
         "description": "The `memory_provider` row, secrets-free by construction.",
@@ -2673,6 +2890,14 @@
               "string",
               "null"
             ]
+          },
+          "embedding_dimension": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Measured once at save time and written into `ov.conf` (§2.1)."
           },
           "embedding_model": {
             "type": [

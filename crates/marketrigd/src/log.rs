@@ -102,12 +102,19 @@ fn secret_free() {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(memory.put_provider(crate::memory::ProviderRequest {
-            base_url: "http://127.0.0.1:9/v1".to_string(),
-            api_key: Some(PROVIDER_KEY.to_string()),
-            llm_model: "llm-1".to_string(),
-            embedding_model: "emb-1".to_string(),
-        }))
+        .block_on(async {
+            // The save measures the embedding dimension first (feature SPEC
+            // `openviking-continuity` §2.1), so it needs a provider to ask.
+            let port = crate::memory::fake_embeddings().await;
+            memory
+                .put_provider(crate::memory::ProviderRequest {
+                    base_url: format!("http://127.0.0.1:{port}/v1"),
+                    api_key: Some(PROVIDER_KEY.to_string()),
+                    llm_model: "llm-1".to_string(),
+                    embedding_model: "emb-1".to_string(),
+                })
+                .await
+        })
         .unwrap();
     tracing::info!("the provider was configured");
 
