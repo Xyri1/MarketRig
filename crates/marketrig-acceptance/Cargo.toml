@@ -17,6 +17,9 @@ publish = false
 axum.workspace = true
 # G19's own MCP client, spawning the real adapter over stdio (per D4, D75).
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+# `openviking-standin`'s seeded key rule (OpenViking feature SPEC §7.1): one
+# SHA-256, from the crate already in the graph.
+ring.workspace = true
 # `runtime-standin` (R3 feature SPEC §9.1): the Codex halves' WebSocket client
 # and the stream adapters it reads with, on the daemon's own pinned lines.
 futures-util.workspace = true

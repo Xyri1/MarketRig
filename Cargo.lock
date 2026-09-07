@@ -2982,6 +2982,7 @@ dependencies = [
  "axum",
  "futures-util",
  "libc",
+ "ring",
  "rmcp",
  "rusqlite",
  "serde_json",
