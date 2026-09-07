@@ -23,7 +23,6 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -66,14 +65,23 @@ async fn main() {
     // process, and §7.2's O5 and O6 both expect what was written before it to
     // still be there. ponytail: one JSON file rewritten whole under the lock —
     // the gate writes tens of documents, not thousands.
-    let store_path = config
+    let workspace = config
         .as_ref()
         .and_then(|config| config["storage"]["workspace"].as_str())
-        .map(|workspace| {
-            let workspace = PathBuf::from(workspace);
-            let _ = std::fs::create_dir_all(&workspace);
-            workspace.join("standin-store.json")
-        });
+        .map(PathBuf::from);
+    if let Some(workspace) = &workspace {
+        let _ = std::fs::create_dir_all(workspace);
+    }
+    let store_path = workspace
+        .as_ref()
+        .map(|workspace| workspace.join("standin-store.json"));
+    let root_key = root_key(config.as_ref());
+    // The daemon mints the root key per start and keeps it in memory alone
+    // (§3.1), so this file beside the store is the only way an acceptance mode
+    // learns which string §7.2's O1 must find nowhere else.
+    if let Some(workspace) = &workspace {
+        let _ = std::fs::write(workspace.join("standin-root-key"), &root_key);
+    }
     let store = store_path
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
@@ -81,7 +89,7 @@ async fn main() {
         .unwrap_or_else(|| json!({"accounts": {}, "keys": {}, "users": {}, "tasks": {}}));
 
     let state = Arc::new(Ov {
-        root_key: root_key(config.as_ref()),
+        root_key,
         ready_at: Instant::now() + ready_after,
         commit_task_status: script["commit_task_status"]
             .as_str()
@@ -168,10 +176,12 @@ fn root_key(config: Option<&Value>) -> String {
 // Keys (§3.2)
 // ---------------------------------------------------------------------------
 
-/// `sha256(user_id + "\0" + seed)`, hex — OpenViking's documented seeded
-/// secret (`openviking/server/api_keys/legacy.py`). Without a seed the secret
-/// is the same function of the clock, which is unique enough for a gate run.
-fn secret(user: &str, seed: Option<&str>) -> String {
+/// The key for one user: OpenViking's documented seeded rule when a seed is
+/// given (`openviking/server/api_keys/legacy.py`, and the shared harness's
+/// `openviking_key`), and the same rule over the clock when none is — which is
+/// what the real server does at user creation, before the daemon asks for the
+/// seeded one (§3.2's three calls).
+fn user_key(account: &str, user: &str, seed: Option<&str>) -> String {
     let seed = match seed {
         Some(seed) => seed.to_owned(),
         None => format!(
@@ -181,44 +191,7 @@ fn secret(user: &str, seed: Option<&str>) -> String {
                 .unwrap_or_default()
         ),
     };
-    sha256_hex(format!("{user}\0{seed}").as_bytes())
-}
-
-/// `b64url(account).b64url(user).b64url(secret)`, padding stripped.
-fn compose_key(account: &str, user: &str, secret: &str) -> String {
-    format!(
-        "{}.{}.{}",
-        b64url(account.as_bytes()),
-        b64url(user.as_bytes()),
-        b64url(secret.as_bytes())
-    )
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_ref() {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
-}
-
-/// Base64url without padding. ponytail: twelve lines instead of a `base64`
-/// dependency the workspace does not otherwise carry.
-fn b64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for chunk in bytes.chunks(3) {
-        let packed = u32::from(chunk[0]) << 16
-            | u32::from(chunk.get(1).copied().unwrap_or(0)) << 8
-            | u32::from(chunk.get(2).copied().unwrap_or(0));
-        for index in 0..chunk.len() + 1 {
-            out.push(char::from(
-                ALPHABET[(packed >> (18 - 6 * index)) as usize & 0x3f],
-            ));
-        }
-    }
-    out
+    marketrig_acceptance::openviking_key(account, user, &seed)
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +271,7 @@ impl Ov {
 
     /// Records a user under an account, mints its key, and answers it.
     fn provision(&self, account: &str, user: &str, seed: Option<&str>) -> String {
-        let key = compose_key(account, user, &secret(user, seed));
+        let key = user_key(account, user, seed);
         let mut store = self.store();
         store["accounts"][account]["users"][user] = json!(true);
         store["keys"][&key] = json!(user);
@@ -553,7 +526,7 @@ async fn read_skill(
         "skill_md_uri": format!("{uri}/SKILL.md"),
         "description": front(content, "description"),
         "content": content,
-        "content_sha256": sha256_hex(content.as_bytes()),
+        "content_sha256": marketrig_acceptance::sha256_hex(content.as_bytes()),
         "files": files,
     }))
 }

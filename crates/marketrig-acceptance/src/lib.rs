@@ -16,6 +16,7 @@
 
 pub mod standin;
 
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -65,6 +66,48 @@ fn utc_formats_the_schedule_text() {
     assert_eq!(utc(1_709_209_845), "2024-02-29T12:30:45");
     assert_eq!(utc(1_798_761_599), "2026-12-31T23:59:59");
     assert_eq!(utc(1_788_206_401), "2026-08-31T20:00:01");
+}
+
+/// SHA-256 as hex, from the crate already in the graph.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+    digest.as_ref().iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
+}
+
+/// Base64url without padding. ponytail: twelve lines instead of a `base64`
+/// dependency the workspace does not otherwise carry.
+pub fn b64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let packed = u32::from(chunk[0]) << 16
+            | u32::from(chunk.get(1).copied().unwrap_or(0)) << 8
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for index in 0..chunk.len() + 1 {
+            out.push(char::from(
+                ALPHABET[(packed >> (18 - 6 * index)) as usize & 0x3f],
+            ));
+        }
+    }
+    out
+}
+
+/// OpenViking's documented seeded key (`openviking-continuity` §3.2, from
+/// `openviking/server/api_keys/legacy.py`): the secret is
+/// `sha256(user_id + "\0" + seed)` in hex, behind base64url account and user
+/// segments. The stand-in child mints keys with it and the gate derives the one
+/// it expects with it, both from the rule rather than from each other.
+pub fn openviking_key(account: &str, user: &str, seed: &str) -> String {
+    let secret = sha256_hex(format!("{user}\0{seed}").as_bytes());
+    format!(
+        "{}.{}.{}",
+        b64url(account.as_bytes()),
+        b64url(user.as_bytes()),
+        b64url(secret.as_bytes())
+    )
 }
 
 #[track_caller]
@@ -577,11 +620,13 @@ impl Harness {
         let url = format!("http://127.0.0.1:{port}{path}");
         let bearer = format!("Bearer {credential}");
         let sent = match method {
-            "GET" => self
-                .agent
-                .get(url.as_str())
-                .header("Authorization", bearer)
-                .call(),
+            "GET" | "DELETE" => {
+                let request = match method {
+                    "GET" => self.agent.get(url.as_str()),
+                    _ => self.agent.delete(url.as_str()),
+                };
+                request.header("Authorization", bearer).call()
+            }
             _ => {
                 let request = match method {
                     "PUT" => self.agent.put(url.as_str()),

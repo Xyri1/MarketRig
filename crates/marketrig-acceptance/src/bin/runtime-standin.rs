@@ -365,6 +365,7 @@ fn complete(server: &Arc<Server>, thread_id: &str, turn_id: &str) {
 // ---------------------------------------------------------------------------
 
 async fn codex_tui(args: &[String], script: Script) {
+    say_env();
     if script.flag("exit_before_ready") {
         eprintln!("runtime-standin: exiting before readiness");
         std::process::exit(1);
@@ -480,13 +481,28 @@ type Registration = (String, Vec<String>, Vec<(String, String)>);
 
 /// `<workspace>/.codex/config.toml`'s `[mcp_servers.marketrig]` — the three
 /// keys the daemon writes (§4.2), read back without a TOML parser because
-/// nothing else is ever in that file.
+/// only whole `key = value` lines under a `[section]` are ever in that file.
+/// A registering OpenViking launch adds `[mcp_servers.openviking-memory]` to
+/// the same file (`openviking-continuity` §4.3), so the section is tracked and
+/// every other one's keys are ignored.
 fn codex_registration(workspace: &Path) -> Option<Registration> {
     let text = std::fs::read_to_string(workspace.join(".codex").join("config.toml")).ok()?;
     let mut command = None;
     let mut args = Vec::new();
     let mut env = Vec::new();
+    let mut ours = false;
     for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(section) = trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            ours = section == "mcp_servers.marketrig";
+            continue;
+        }
+        if !ours {
+            continue;
+        }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
@@ -514,6 +530,7 @@ fn codex_registration(workspace: &Path) -> Option<Registration> {
 // ---------------------------------------------------------------------------
 
 async fn claude(args: &[String], script: Script) {
+    say_env();
     let hooks = value_of(args, "--settings").filter(|_| script.flag("hooks"));
     let resume = value_of(args, "--resume");
     let mut session_id = match &resume {
@@ -842,6 +859,21 @@ fn mcp_read(command: &str, args: &[String], env: &[(String, String)], uri: &str)
                 .map(|f| f["error"]["message"].to_string())
                 .unwrap_or_default()
         )),
+    }
+}
+
+/// The `OPENVIKING_*` variables this launch put on the runtime process
+/// (`openviking-continuity` §4.3), sorted, one per line. The launch environment
+/// reaches the terminal child and nothing else — no file, no row — so echoing it
+/// is the only way an acceptance mode can read it back.
+fn say_env() {
+    let mut lines: Vec<String> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("OPENVIKING_"))
+        .map(|(key, value)| format!("ENV {key}={value}"))
+        .collect();
+    lines.sort();
+    for line in lines {
+        say(&line);
     }
 }
 

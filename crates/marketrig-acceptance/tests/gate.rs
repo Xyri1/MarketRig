@@ -5,10 +5,12 @@
 //! (the stand-in feed and G12–G20) and `sdd/features/r2-scheduled-triggers/SPEC.md`
 //! §10 (the `trigger-code` binary and G21–G26) and
 //! `sdd/features/r3-runtime-delivery/SPEC.md` §9 (the `runtime-standin` binary
-//! and G27–G32) and `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1
-//! (the approval policies, the events tail, and O7–O10, renumbered from
-//! G33–G37s slot by `openviking-continuity` §7.2), per D75, R0-7, R1-9, R2-8,
-//! R3-8, R5-8. The harness drives
+//! and G27–G32) and `sdd/features/openviking-continuity/SPEC.md` §7 (the
+//! `openviking-standin` binary and O1–O6) and
+//! `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1 (the approval
+//! policies, the events tail, and O7–O10, renumbered from G33–G37's slot by
+//! `openviking-continuity` §7.2), per D75, R0-7, R1-9, R2-8, R3-8, R5-8, OV-7.
+//! The harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
 //! files, and read-only SQLite. It never links `marketrigd` or `marketrig` as
@@ -42,8 +44,11 @@ fn agents_seed(name: &str) -> String {
     SEED_AGENTS.replace("<name>", name)
 }
 
-/// The seeded improvement skill and the canonical tree it lives in (R4 §5.2).
-const SKILL: [&str; 3] = [".agents", "skills", "desk-improvement"];
+/// The seeded improvement skill, which is no longer a file creation writes:
+/// it is uploaded into the desk's OpenViking user and reaches `.agents/skills/`
+/// only through the projection (`openviking-continuity` §5.2, §5.3), which is
+/// what O3 reads back.
+const SEED_SKILL: &str = include_str!("../../marketrigd/seed/desk-improvement.SKILL.md");
 
 /// The MarketRig-owned Claude Code shim (R0 feature SPEC §7.2), exactly.
 const SHIM: &str = "@AGENTS.md\n";
@@ -360,6 +365,233 @@ fn global(g: &Harness, kind: &str) -> Vec<Value> {
         .collect()
 }
 
+/// A secret reaches none of the places `openviking-continuity` §3.2 names — the
+/// database file with its journal, the log root, the launch files, the desk
+/// workspaces, every daemon's stderr, and the events listing — nor the evidence
+/// bundle the gate itself writes.
+///
+/// This is an allowlist rather than a sweep of the root because two files under
+/// it hold keys by design: the credential store the test seam keeps at
+/// `data/runtime/credentials.json`, and the stand-in child's own store, which is
+/// where the gate reads the desk keys from in the first place.
+#[track_caller]
+fn nowhere(g: &Harness, what: &str, secret: &str) {
+    assert!(
+        !secret.is_empty(),
+        "{what} is empty, so this proves nothing"
+    );
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    // The database and its journal, and every daemon's stderr in the bundle.
+    for entry in fs::read_dir(g.out.join("data"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if entry.path().to_string_lossy().contains("marketrig.sqlite3") {
+            paths.push(entry.path());
+        }
+    }
+    for entry in fs::read_dir(&g.out).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("marketrigd-") && name.ends_with(".stderr") {
+            paths.push(entry.path());
+        }
+    }
+    // The log root, the launch files, and the desk workspaces, whole.
+    let mut roots = vec![
+        g.out.join("logs"),
+        g.out.join("data").join("runtime").join("launch"),
+        g.out.join("desks"),
+    ];
+    while let Some(dir) = roots.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                roots.push(path);
+            } else {
+                paths.push(path);
+            }
+        }
+    }
+    paths.push(g.out.join("observations.jsonl"));
+    let mut searched: Vec<(String, Vec<u8>)> = paths
+        .into_iter()
+        .map(|path| {
+            (
+                path.display().to_string(),
+                fs::read(&path).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let events: String = g
+        .events()
+        .iter()
+        .map(|e| format!("{} {:?} {}\n", e.kind, e.desk_id, e.payload))
+        .collect();
+    searched.push(("the events listing".to_string(), events.into_bytes()));
+    for (where_, bytes) in searched {
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{what} reached {where_}"
+        );
+    }
+}
+
+/// The stand-in OpenViking child's own store (§7.1), which outlives one child.
+fn ov_store(g: &Harness) -> std::path::PathBuf {
+    g.out
+        .join("data")
+        .join("openviking")
+        .join("data")
+        .join("standin-store.json")
+}
+
+/// One desk's OpenViking user (§3.1).
+fn desk_user(desk_id: &str) -> String {
+    format!("desk-{}", desk_id.replace('-', "").to_ascii_lowercase())
+}
+
+/// One desk's key by OpenViking's own seeded rule (§3.2), derived here rather
+/// than read out of the stand-in: the daemon holds it in memory alone (§3.1),
+/// and the rule is exactly what makes it survive a restart and a Retry.
+fn desk_key(seed: &str, desk_id: &str) -> String {
+    marketrig_acceptance::openviking_key("marketrig", &desk_user(desk_id), seed)
+}
+
+/// Whether the stand-in's store knows that key — which is what "the daemon
+/// asked with the seed and got this one" looks like from outside (§7.1). The
+/// server also mints a key of its own when a user is first created, exactly as
+/// upstream does, so the store's map is never read the other way round.
+fn key_issued(g: &Harness, key: &str) -> bool {
+    fs::read_to_string(ov_store(g))
+        .ok()
+        .is_some_and(|text| parse(&text)["keys"][key].is_string())
+}
+
+/// The port the newest `OPENVIKING_STARTED` names (§2.2): a restart takes a
+/// fresh one, so every scenario reads it again.
+#[track_caller]
+fn child_port(g: &Harness) -> u16 {
+    let started = global(g, "OPENVIKING_STARTED")
+        .pop()
+        .expect("an OPENVIKING_STARTED");
+    u16::try_from(started["port"].as_u64().expect("the child's port")).expect("a port")
+}
+
+/// One call on the stand-in child's own HTTP surface (§7.1), with a root or a
+/// user key as the bearer.
+#[track_caller]
+fn ov(g: &Harness, method: &str, path: &str, key: &str, body: Option<&str>) -> (u16, Value) {
+    let port = child_port(g);
+    let (status, text) = g
+        .request(method, port, path, key, body)
+        .unwrap_or_else(|| panic!("the stand-in child did not answer {method} {path}"));
+    (status, parse(&text))
+}
+
+/// The skill names one listing carries, sorted.
+fn skill_names(g: &Harness, key: &str) -> Vec<String> {
+    let (status, listing) = ov(g, "GET", "/api/v1/skills", key, None);
+    assert_eq!(status, 200, "{listing}");
+    let mut names: Vec<String> = listing["result"]["skills"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|skill| skill["name"].as_str().map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The skill directories one workspace's projection carries, sorted.
+fn projected_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// One delivered input on a live Claude session, and the turn it ends. The
+/// stand-in's Claude half runs the `Stop` hook after every input, which the
+/// daemon records as `SESSION_TURN_ENDED` — the one turn end it can see, and
+/// what §5.2's refresh waits on. Codex reports none, which is why every
+/// projection scenario drives its turns here.
+fn one_turn(g: &mut Harness, scenario: &str, desk: &str, desk_id: &str, name: &str) {
+    let ended = payloads(g, desk_id, "SESSION_TURN_ENDED").len();
+    let trigger = one_off(g, scenario, desk, name, 2);
+    await_firing(g, &trigger, 0);
+    within(Duration::from_secs(120), "one more turn to end", || {
+        payloads(g, desk_id, "SESSION_TURN_ENDED").len() > ended
+    });
+}
+
+/// Ends a desk's live session and waits for its row to close. The route's own
+/// five-second budget is R3's, not this feature's: a busy machine answers
+/// `RUNTIME_ERROR` while the shutdown it started is still finishing, and what
+/// the next scenario needs is only that the session is gone.
+fn end_session(
+    g: &mut Harness,
+    scenario: &str,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk_id: &str,
+) {
+    // The dispatcher activates any desk with something queued (R3 §6.1), so the
+    // queue drains first: otherwise the row that closes is replaced in the same
+    // instant and no wait for a session-free desk could ever end.
+    within(
+        Duration::from_secs(120),
+        "the desk's prompt queue to drain",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND state = 'QUEUED'",
+                &[&desk_id],
+            ) == 0
+        },
+    );
+    let (_, answered) = g.api(
+        scenario,
+        endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/exit"),
+        None,
+    );
+    assert!(answered.is_object());
+    within(
+        Duration::from_secs(60),
+        "the session's row to close",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM agent_processes WHERE desk_id = ?1 AND ended_at_ns IS NULL",
+                &[&desk_id],
+            ) == 0
+        },
+    );
+}
+
+/// One code-less one-off on a desk with no live session: the firing wakes the
+/// dispatcher, which activates the selected runtime. Answers the firing.
+fn one_activation(
+    g: &mut Harness,
+    scenario: &str,
+    desk: &str,
+    desk_id: &str,
+    name: &str,
+) -> String {
+    let started = payloads(g, desk_id, "SESSION_STARTED").len();
+    let trigger = one_off(g, scenario, desk, name, 2);
+    let firing = await_firing(g, &trigger, 0);
+    within(
+        Duration::from_secs(120),
+        "the firing to activate a session",
+        || payloads(g, desk_id, "SESSION_STARTED").len() > started,
+    );
+    firing
+}
+
 async fn resource_text(service: &RunningService<RoleClient, ()>, uri: &str) -> String {
     let result = service
         .read_resource(ReadResourceRequestParams::new(uri))
@@ -451,31 +683,23 @@ fn gate() {
             fs::read_to_string(workspace.join("CLAUDE.md")).expect("CLAUDE.md"),
             SHIM
         );
-        // The improvement skill and the link to the one canonical tree (R4 §5):
-        // reading the seeded file through `.claude/skills` is what proves the
-        // link resolves, on either platform's kind of link.
-        let seeded = fs::read_to_string(
-            SKILL
-                .iter()
-                .fold(workspace.clone(), |path, part| path.join(part))
-                .join("SKILL.md"),
-        )
-        .expect("the seeded improvement skill");
+        // The canonical tree and the link to it (`openviking-continuity` §5.1,
+        // §5.3): creation leaves the tree empty — every skill arrives through
+        // the projection — so what the link resolves to is what proves it, on
+        // either platform's kind of link.
+        let skills = workspace.join(".agents").join("skills");
         assert!(
-            seeded.starts_with("---\nname: desk-improvement\n"),
-            "{seeded}"
+            fs::read_dir(&skills)
+                .expect("the skills tree")
+                .next()
+                .is_none(),
+            "creation writes no skill file; the seed lives in OpenViking (§5.3)"
         );
         assert_eq!(
-            fs::read_to_string(
-                workspace
-                    .join(".claude")
-                    .join("skills")
-                    .join("desk-improvement")
-                    .join("SKILL.md")
-            )
-            .expect("the same file through .claude/skills"),
-            seeded,
-            "one tree, both paths (R4 §5)"
+            fs::canonicalize(workspace.join(".claude").join("skills"))
+                .expect("the .claude/skills link"),
+            fs::canonicalize(&skills).expect(".agents/skills"),
+            "one tree, both paths (§5.1)"
         );
         ids.push(desk["id"].as_str().expect("id").to_string());
     }
@@ -3532,6 +3756,694 @@ fn gate() {
     );
 
     // ======================================================================
+    // OpenViking (feature SPEC `openviking-continuity` §7.2). The chain
+    // continues on the same root with `openviking-standin` (§7.1) registered
+    // through the setup seam and started by the daemon itself, and with the
+    // gate serving the provider's own `/embeddings` so `PUT /memory/provider`
+    // can measure the dimension it writes into `ov.conf` (§2.1). The child's
+    // knobs ride in the `openviking` object of the same script file the
+    // runtime stand-in reads, so rewriting that file arms the next start of
+    // either.
+    // ======================================================================
+    let openviking_standin = env!("CARGO_BIN_EXE_openviking-standin").to_string();
+    // Stored verbatim and never executed: the seam validates nothing and the
+    // gate runs no Node (§7.1).
+    let node = g.out.join("fake-node").display().to_string();
+    let embeddings = {
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .expect("a loopback listener for the provider stand-in");
+        let port = listener.local_addr().expect("its address").port();
+        let app = axum::Router::new().route(
+            "/v1/embeddings",
+            axum::routing::post(async || {
+                axum::Json(json!({ "data": [{ "embedding": [0.1, 0.2, 0.3] }] }))
+            }),
+        );
+        rt.spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://127.0.0.1:{port}/v1")
+    };
+    // Shaped like a real provider key, so the §3.2 grep looks for something a
+    // leak would actually carry.
+    let provider_key = "sk-gate-openviking-1f4c0b7a9e2d5836";
+
+    // --- O1 — setup and secrets ---------------------------------------------
+    g.script(json!({ "openviking": {} }));
+    let daemon15 = g.spawn("O1");
+    endpoint = daemon15.endpoint.clone();
+    let (status, unconfigured) = g.api("O1", &endpoint, "GET", "/openviking", None);
+    assert_eq!(status, 200, "{unconfigured}");
+    assert_eq!(unconfigured["setup"]["state"], "UNCONFIGURED");
+    assert_eq!(unconfigured["child"], "NOT_STARTED");
+
+    let registration = |node: &str| {
+        json!({ "python": openviking_standin, "node": node, "standin": openviking_standin })
+            .to_string()
+    };
+    let (status, registered) = g.api(
+        "O1",
+        &endpoint,
+        "PUT",
+        "/openviking/setup",
+        Some(&registration(&node)),
+    );
+    assert_eq!(status, 202, "{registered}");
+    assert_eq!(registered["state"], "AVAILABLE");
+    assert_eq!(registered["python_path"], openviking_standin.as_str());
+    assert_eq!(registered["node_path"], node.as_str());
+    assert_eq!(
+        registered["venv_path"], "",
+        "the seam provisions no environment (§7.1)"
+    );
+
+    let (status, saved) = g.api_redacted(
+        "O1",
+        &endpoint,
+        "PUT",
+        "/memory/provider",
+        &json!({
+            "base_url": &embeddings, "api_key": provider_key,
+            "llm_model": "stand-in-llm", "embedding_model": "stand-in-embedding",
+        })
+        .to_string(),
+    );
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["api_key_present"], true);
+    assert!(
+        saved.get("api_key").is_none(),
+        "the key never comes back: {saved}"
+    );
+
+    // R3 left one result queued on zeta; letting the queue settle is what makes
+    // the restart's ordering claim a claim about a daemon with nothing to
+    // deliver rather than a race with a dispatcher.
+    within(
+        Duration::from_secs(180),
+        "the R2–R3 chain's last prompts to settle",
+        || g.scalar::<i64>("SELECT count(*) FROM prompts WHERE state = 'QUEUED'", &[]) == 0,
+    );
+    g.stop("O1", daemon15);
+
+    let before_restart = g.events().len();
+    let daemon16 = g.spawn("O1");
+    endpoint = daemon16.endpoint.clone();
+    within(
+        Duration::from_secs(60),
+        "the child the daemon started to answer /ready",
+        || !global(&g, "OPENVIKING_STARTED").is_empty(),
+    );
+    {
+        let mut kinds = g.event_kinds();
+        let after = kinds.split_off(before_restart);
+        let at = after
+            .iter()
+            .position(|kind| kind == "OPENVIKING_STARTED")
+            .expect("the restart's OPENVIKING_STARTED");
+        assert!(
+            !after[..at].iter().any(|kind| kind == "SESSION_STARTED"),
+            "the child is up before any activation (§2.2): {after:?}"
+        );
+    }
+    // The readiness sweep walks the READY desks one at a time (§3.2), so the
+    // route itself says when the last of them has its user.
+    within(
+        Duration::from_secs(60),
+        "every READY desk to be provisioned an OpenViking user",
+        || {
+            let (_, live) = g.call(&endpoint, "GET", "/openviking", None);
+            live["child"] == json!("READY")
+                && live["desks"].as_object().is_some_and(|desks| {
+                    !desks.is_empty() && desks.values().all(|ready| *ready == json!(true))
+                })
+        },
+    );
+    let (status, live) = g.api("O1", &endpoint, "GET", "/openviking", None);
+    assert_eq!(status, 200, "{live}");
+    assert_eq!(live["setup"]["state"], "AVAILABLE");
+    assert_eq!(
+        live["desks"].as_object().map(serde_json::Map::len),
+        Some(
+            g.desk_rows()
+                .iter()
+                .filter(|row| row["state"] == "READY")
+                .count()
+        ),
+        "one entry per READY desk (§1.1): {live}"
+    );
+
+    // The three secrets, from the two places that legitimately hold them.
+    let root_key = fs::read_to_string(
+        g.out
+            .join("data")
+            .join("openviking")
+            .join("data")
+            .join("standin-root-key"),
+    )
+    .expect("the stand-in's root key");
+    let seed = parse(
+        &fs::read_to_string(g.out.join("data").join("runtime").join("credentials.json"))
+            .expect("credentials.json"),
+    )["openviking-seed"]
+        .as_str()
+        .expect("the installation seed")
+        .to_owned();
+    let alpha_key = desk_key(&seed, &ids[0]);
+    let beta_key = desk_key(&seed, &ids[1]);
+    assert_ne!(alpha_key, beta_key, "one key per desk user (§3.1)");
+    assert!(
+        key_issued(&g, &alpha_key) && key_issued(&g, &beta_key),
+        "the daemon asked for the seeded key of each desk user (§3.2)"
+    );
+    for (what, secret) in [
+        ("the child's root key", root_key.as_str()),
+        ("the installation seed", seed.as_str()),
+        ("alpha's desk key", alpha_key.as_str()),
+        ("beta's desk key", beta_key.as_str()),
+        ("the provider key", provider_key),
+    ] {
+        nowhere(&g, what, secret);
+    }
+    g.note(
+        "O1",
+        "the stand-in was registered through the seam, the provider was stored with its key held back, the restart brought the child up before any activation with every desk provisioned, and neither the root key, the seed, a desk key, nor the provider key reached the database, the log root, the launch files, a workspace, a daemon's stderr, an event, or the bundle",
+        json!({ "setup": live["setup"], "desks": live["desks"], "provider": saved }),
+    );
+
+    // --- O2 — two desks and the seed ----------------------------------------
+    assert_eq!(skill_names(&g, &alpha_key), ["desk-improvement"]);
+    assert_eq!(skill_names(&g, &beta_key), ["desk-improvement"]);
+    let (status, seeded) = ov(
+        &g,
+        "GET",
+        "/api/v1/skills/desk-improvement",
+        &alpha_key,
+        None,
+    );
+    assert_eq!(status, 200, "{seeded}");
+    assert_eq!(
+        seeded["result"]["content"],
+        SEED_SKILL.replace("<name>", &alpha).as_str(),
+        "the seed reached OpenViking byte for byte with the desk name substituted (§5.3)"
+    );
+
+    // One skill only beta's key can see, and only beta's key can find.
+    let beta_only =
+        "---\nname: beta-only\ndescription: Beta's own skill\n---\n\nManifestly beta's.\n";
+    let (status, made) = ov(
+        &g,
+        "POST",
+        "/api/v1/skills",
+        &beta_key,
+        Some(&json!({ "data": beta_only }).to_string()),
+    );
+    assert_eq!(status, 200, "{made}");
+    assert_eq!(
+        skill_names(&g, &beta_key),
+        ["beta-only", "desk-improvement"]
+    );
+    assert_eq!(
+        skill_names(&g, &alpha_key),
+        ["desk-improvement"],
+        "A's key lists nothing of B's (§3.2)"
+    );
+    let find = json!({ "query": "Manifestly beta" }).to_string();
+    let (status, blind) = ov(&g, "POST", "/api/v1/search/find", &alpha_key, Some(&find));
+    assert_eq!(status, 200, "{blind}");
+    assert_eq!(blind["result"]["results"], json!([]));
+    let (status, seeing) = ov(&g, "POST", "/api/v1/search/find", &beta_key, Some(&find));
+    assert_eq!(status, 200, "{seeing}");
+    assert_eq!(
+        seeing["result"]["results"].as_array().map(Vec::len),
+        Some(1)
+    );
+    g.note(
+        "O2",
+        "both desks were provisioned under distinct users each listing exactly desk-improvement, and a skill written under B's key was neither listed nor findable under A's",
+        json!({ "alpha_user": desk_user(&ids[0]), "beta_user": desk_user(&ids[1]) }),
+    );
+
+    // --- O3 — projection ----------------------------------------------------
+    // A desk created while the child is READY is provisioned at the end of its
+    // creation (§3.2), which is the other half of the readiness sweep O1 read.
+    let kappa = format!("kappa-{stamp}");
+    g.script(json!({ "openviking": {}, "active_after_input_ms": 200 }));
+    let (exit, created) = g.cli_json("O3", &["--json", "desk", "create", &kappa]);
+    assert_eq!(exit, 0, "{created}");
+    let kappa_id = created["id"].as_str().expect("id").to_owned();
+    let kappa_key = desk_key(&seed, &kappa_id);
+    within(
+        Duration::from_secs(30),
+        "the new desk's OpenViking user, its key, and its seeded skill",
+        || key_issued(&g, &kappa_key) && skill_names(&g, &kappa_key) == ["desk-improvement"],
+    );
+    let skills_dir = g.workspace(&kappa).join(".agents").join("skills");
+    assert!(
+        projected_names(&skills_dir).is_empty(),
+        "creation writes no skill file (§5.3)"
+    );
+
+    // Activation on Codex projects before the runtime starts (§5.2).
+    let (status, activated) = g.api(
+        "O3",
+        &endpoint,
+        "POST",
+        &session_route(&kappa_id, "activate"),
+        Some(r#"{"mode":"NEW"}"#),
+    );
+    assert_eq!(status, 202, "{activated}");
+    within(
+        Duration::from_secs(60),
+        "the activation's projection",
+        || !payloads(&g, &kappa_id, "SKILLS_PROJECTED").is_empty(),
+    );
+    let started = one_event(&g, &kappa_id, "SESSION_STARTED");
+    assert_eq!(started["runtime"], "codex");
+    let seed_file = skills_dir.join("desk-improvement").join("SKILL.md");
+    assert_eq!(
+        fs::read_to_string(&seed_file).expect("the projected seed"),
+        SEED_SKILL.replace("<name>", &kappa),
+        "the seed reaches the workspace byte for byte through the projection (§5.3)"
+    );
+    assert!(
+        fs::OpenOptions::new().write(true).open(&seed_file).is_err(),
+        "the projection is read-only (§5.2)"
+    );
+
+    // The turns run on Claude: `SESSION_TURN_ENDED` reaches the daemon only
+    // through Claude's Stop hook, which is what §5.2's refresh waits on.
+    g.script(json!({ "openviking": {}, "hooks": true, "active_after_input_ms": 200 }));
+    let (status, switched) = g.api(
+        "O3",
+        &endpoint,
+        "POST",
+        &session_route(&kappa_id, "switch"),
+        Some(r#"{"runtime":"claude"}"#),
+    );
+    assert_eq!(status, 200, "{switched}");
+    assert_eq!(switched["selected_runtime"], "claude");
+    one_turn(&mut g, "O3", &kappa, &kappa_id, "o3-claude");
+    assert_eq!(
+        payloads(&g, &kappa_id, "SESSION_STARTED")
+            .pop()
+            .expect("the Claude session")["runtime"],
+        "claude"
+    );
+    assert_eq!(projected_names(&skills_dir), ["desk-improvement"]);
+
+    let second = "---\nname: gate-second\ndescription: The second skill\n---\n\nWritten in O3.\n";
+    let (status, wrote) = ov(
+        &g,
+        "POST",
+        "/api/v1/skills",
+        &kappa_key,
+        Some(&json!({ "data": second }).to_string()),
+    );
+    assert_eq!(status, 200, "{wrote}");
+    one_turn(&mut g, "O3", &kappa, &kappa_id, "o3-appear");
+    within(
+        Duration::from_secs(60),
+        "the second skill to reach the workspace",
+        || projected_names(&skills_dir) == ["desk-improvement", "gate-second"],
+    );
+    assert_eq!(
+        fs::read_to_string(skills_dir.join("gate-second").join("SKILL.md"))
+            .expect("the second skill"),
+        second
+    );
+
+    let (status, removed) = ov(&g, "DELETE", "/api/v1/skills/gate-second", &kappa_key, None);
+    assert_eq!(status, 200, "{removed}");
+    one_turn(&mut g, "O3", &kappa, &kappa_id, "o3-vanish");
+    within(
+        Duration::from_secs(60),
+        "the second skill to leave the workspace",
+        || projected_names(&skills_dir) == ["desk-improvement"],
+    );
+    assert!(
+        fs::OpenOptions::new().write(true).open(&seed_file).is_err(),
+        "and the tree is read-only again after the swap (§5.2)"
+    );
+    g.note(
+        "O3",
+        "a desk created while the child was ready carried the seed, the Codex activation projected it read-only byte for byte, and a skill written and deleted through the stand-in's own route appeared and disappeared on the next turn end",
+        json!({ "desk": kappa_id, "projected": payloads(&g, &kappa_id, "SKILLS_PROJECTED").len() }),
+    );
+
+    // --- O4 — registration and capture path ---------------------------------
+    // The launch files live only as long as the process row (R3 §5.1), so they
+    // are read while the Claude session O3 left running is still up.
+    let launch = g
+        .out
+        .join("data")
+        .join("runtime")
+        .join("launch")
+        .join(&kappa_id);
+    let plugins = g.workspace(&kappa).join(".marketrig").join("plugins");
+    let claude_plugin = plugins.join("openviking-claude");
+    let codex_plugin = plugins.join("openviking-codex");
+    let mcp = parse(&fs::read_to_string(launch.join("mcp.json")).expect("the live mcp.json"));
+    assert_eq!(mcp["mcpServers"]["openviking"]["command"], node.as_str());
+    assert_eq!(
+        mcp["mcpServers"]["openviking"]["args"],
+        json!([claude_plugin
+            .join("servers")
+            .join("mcp-proxy.mjs")
+            .display()
+            .to_string()]),
+        "the proxy is registered by absolute path (§4.3)"
+    );
+    let settings = parse(&fs::read_to_string(launch.join("settings.json")).expect("settings.json"));
+    let hooks = settings["hooks"].as_object().expect("the hook events");
+    // The plugin's own events stand beside MarketRig's rather than instead of
+    // them, and every plugin command is the absolute Node with an absolute
+    // script (§4.3).
+    assert!(
+        hooks.contains_key("PreCompact") && hooks.contains_key("SubagentStop"),
+        "the plugin's own events reached the settings file: {settings}"
+    );
+    let mine = hooks["Stop"][0]["hooks"][0].clone();
+    assert!(
+        mine["command"]
+            .as_str()
+            .is_some_and(|command| command.contains("marketrig")),
+        "MarketRig's own Stop hook is still first: {settings}"
+    );
+    let theirs = hooks["Stop"][1]["hooks"][0].clone();
+    assert_eq!(theirs["command"], node.as_str());
+    assert_eq!(
+        theirs["args"],
+        json!([claude_plugin
+            .join("scripts")
+            .join("auto-capture.mjs")
+            .display()
+            .to_string()])
+    );
+    assert_eq!(theirs["timeout"], 45, "the plugin's own timeout (§4.1)");
+
+    // The launch environment reaches the runtime process and nothing else
+    // (§4.3), so the stand-in's echo is the only place it can be read. It is
+    // never noted: the transcript carries the desk key verbatim.
+    let plugin_home = g
+        .out
+        .join("data")
+        .join("openviking")
+        .join("plugin")
+        .join(&kappa_id);
+    let echoed = transcript(&rt, &endpoint, &kappa_id, Duration::from_secs(30), |text| {
+        text.contains("ENV OPENVIKING_URL=")
+    });
+    for expected in [
+        "ENV OPENVIKING_ACCOUNT=marketrig".to_string(),
+        format!("ENV OPENVIKING_API_KEY={kappa_key}"),
+        format!("ENV OPENVIKING_USER={}", desk_user(&kappa_id)),
+        format!("ENV OPENVIKING_HOME={}", plugin_home.display()),
+        format!(
+            "ENV OPENVIKING_CONFIG_FILE={}",
+            plugin_home.join("absent-ov.conf").display()
+        ),
+        format!(
+            "ENV OPENVIKING_CLI_CONFIG_FILE={}",
+            plugin_home.join("absent-ovcli.conf").display()
+        ),
+        "ENV OPENVIKING_MEMORY_ENABLED=1".to_string(),
+        format!("ENV OPENVIKING_URL=http://127.0.0.1:{}", child_port(&g)),
+    ] {
+        assert!(
+            echoed.contains(&expected),
+            "the runtime process carries §4.3's set: {expected} is missing"
+        );
+    }
+
+    // Back on Codex: the config entry and the hooks file, which R3's launches
+    // never wrote (§4.3).
+    g.script(json!({ "openviking": {}, "active_after_input_ms": 200 }));
+    let (status, back) = g.api(
+        "O4",
+        &endpoint,
+        "POST",
+        &session_route(&kappa_id, "switch"),
+        Some(r#"{"runtime":"codex"}"#),
+    );
+    assert_eq!(status, 200, "{back}");
+    one_activation(&mut g, "O4", &kappa, &kappa_id, "o4-codex");
+    let codex_dir = g.workspace(&kappa).join(".codex");
+    let config = fs::read_to_string(codex_dir.join("config.toml")).expect("kappa's config.toml");
+    assert!(
+        config.contains("[mcp_servers.marketrig]")
+            && config.contains("[mcp_servers.openviking-memory]"),
+        "{config}"
+    );
+    assert!(config.contains("startup_timeout_sec = 30"), "{config}");
+    let codex_hooks = parse(&fs::read_to_string(codex_dir.join("hooks.json")).expect("hooks.json"));
+    let field = if cfg!(windows) {
+        "commandWindows"
+    } else {
+        "command"
+    };
+    let capture = codex_hooks["hooks"]["Stop"][0]["hooks"][0].clone();
+    assert_eq!(
+        capture[field],
+        format!(
+            "\"{node}\" \"{}\"",
+            codex_plugin
+                .join("scripts")
+                .join("auto-capture.mjs")
+                .display()
+        ),
+        "one quoted string under the per-platform field (§4.3): {codex_hooks}"
+    );
+    assert_eq!(capture["timeout"], 30);
+
+    // The `UNCONFIGURED` form is durable evidence: delta's Codex registration
+    // comes from G28–G32, every one of them launched before any setup row.
+    let delta_codex = g.workspace(&delta).join(".codex");
+    let unregistered =
+        fs::read_to_string(delta_codex.join("config.toml")).expect("delta's config.toml");
+    assert!(
+        !unregistered.contains("openviking"),
+        "an unconfigured launch registers nothing: {unregistered}"
+    );
+    assert!(
+        !delta_codex.join("hooks.json").exists(),
+        "and writes no hooks file (§4.3)"
+    );
+    g.note(
+        "O4",
+        "the live Claude launch registered the proxy and merged the plugin's hooks beside MarketRig's with the plugin's own timeouts, the runtime process carried §4.3's environment, the switch back to Codex wrote the config entry and the hooks file, and the R3 desk's unconfigured registration carries neither",
+        json!({ "mcp": mcp["mcpServers"]["openviking"], "hook_events": hooks.keys().collect::<Vec<_>>() }),
+    );
+
+    // --- O5 — lost, retry, hard kill ----------------------------------------
+    let losses = global(&g, "OPENVIKING_LOST").len();
+    let starts = global(&g, "OPENVIKING_STARTED").len();
+    g.script(json!({
+        "openviking": { "exit_after_ready_ms": 3_000 },
+        "active_after_input_ms": 200,
+    }));
+    let (status, retried) = g.api("O5", &endpoint, "POST", "/openviking/retry", None);
+    assert_eq!(status, 202, "{retried}");
+    within(
+        Duration::from_secs(120),
+        "the scripted exit to be reported as a loss",
+        || global(&g, "OPENVIKING_LOST").len() > losses,
+    );
+    let lost = global(&g, "OPENVIKING_LOST")
+        .pop()
+        .expect("OPENVIKING_LOST");
+    assert!(
+        lost["output_tail_last_line"]
+            .as_str()
+            .is_some_and(|line| line.contains("openviking-standin")),
+        "the child's own last line reaches the event (§2.3): {lost}"
+    );
+    let (status, unavailable) = g.api("O5", &endpoint, "GET", "/openviking", None);
+    assert_eq!(status, 200, "{unavailable}");
+    assert_eq!(unavailable["setup"]["state"], "UNAVAILABLE");
+    assert_eq!(unavailable["setup"]["failure_code"], "CHILD_FAILED");
+    assert_eq!(unavailable["child"], "LOST");
+    assert_eq!(
+        global(&g, "OPENVIKING_UNAVAILABLE").len(),
+        losses + 1,
+        "one refusal event per loss (§2.3)"
+    );
+
+    // Trading, triggers, and activation are untouched by the loss (§2.3). The
+    // live session goes first, so the next firing is a fresh activation whose
+    // projection is the one that fails.
+    end_session(&mut g, "O5", &endpoint, &kappa_id);
+    let tree = projected_names(&skills_dir);
+    let failures = payloads(&g, &kappa_id, "SKILLS_PROJECTION_FAILED").len();
+    let (status, sold) = g.api(
+        "O5",
+        &endpoint,
+        "POST",
+        &orders_path,
+        Some(&order("o5-buy-aapl", "AAPL.XNAS", "BUY", "MARKET", "1")),
+    );
+    assert_eq!(
+        status, 201,
+        "an order is accepted with the child gone: {sold}"
+    );
+    assert_eq!(sold["outcome"]["status"], "FILLED");
+    let stranded_firing = one_activation(&mut g, "O5", &kappa, &kappa_id, "o5-lost");
+    within(
+        Duration::from_secs(60),
+        "the activation's projection to be reported failed",
+        || payloads(&g, &kappa_id, "SKILLS_PROJECTION_FAILED").len() > failures,
+    );
+    assert_eq!(
+        projected_names(&skills_dir),
+        tree,
+        "a failed projection leaves the previous tree (§5.2)"
+    );
+
+    // Retry: `READY` again, and the desk keys are the seeded ones, so every
+    // session that had one still has it (§3.2).
+    g.script(json!({ "openviking": {}, "active_after_input_ms": 200 }));
+    let (status, retried) = g.api("O5", &endpoint, "POST", "/openviking/retry", None);
+    assert_eq!(status, 202, "{retried}");
+    within(
+        Duration::from_secs(120),
+        "the retried child to answer /ready",
+        || global(&g, "OPENVIKING_STARTED").len() > starts + 1,
+    );
+    let (status, recovered) = g.api("O5", &endpoint, "GET", "/openviking", None);
+    assert_eq!(status, 200, "{recovered}");
+    assert_eq!(recovered["child"], "READY");
+    assert_eq!(
+        recovered["setup"]["state"], "AVAILABLE",
+        "readiness clears the failure (§2.3)"
+    );
+    assert!(recovered["setup"].get("failure_code").is_none());
+    within(
+        Duration::from_secs(60),
+        "the desks to be provisioned again",
+        || g.call(&endpoint, "GET", "/openviking", None).1["desks"][&kappa_id] == json!(true),
+    );
+    // "The key handed to a session started before a loss equals the one obtained
+    // after Retry" (§3.2). The key lives in the launch environment and nowhere
+    // else, so the next session's echo is where it is read; it is the seeded one,
+    // derived here from OpenViking's own rule.
+    end_session(&mut g, "O5", &endpoint, &kappa_id);
+    one_activation(&mut g, "O5", &kappa, &kappa_id, "o5-again");
+    let same_key = format!("ENV OPENVIKING_API_KEY={kappa_key}");
+    let after_retry = transcript(&rt, &endpoint, &kappa_id, Duration::from_secs(30), |text| {
+        text.contains(&same_key)
+    });
+    assert!(
+        after_retry.contains(&same_key),
+        "the session started after the Retry carries the same seeded key (§3.2)"
+    );
+
+    // The hard kill: the record outlives the daemon, and only the successor's
+    // recovery clears it (§2.2, R0 §4.4).
+    let child_pid =
+        parse(&fs::read_to_string(g.children_path()).expect("children.json"))["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|child| child["kind"] == "openviking")
+            .and_then(|child| child["pid"].as_i64())
+            .expect("the child's record");
+    let dead = daemon16.endpoint.daemon_uuid.clone();
+    let stale = daemon16.endpoint.clone();
+    g.kill("O5", daemon16);
+    g.await_unverifiable(&stale);
+    assert!(
+        parse(&fs::read_to_string(g.children_path()).expect("children.json"))["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| child["kind"] == "openviking"),
+        "a killed daemon leaves its record behind"
+    );
+    let daemon17 = g.spawn("O5");
+    endpoint = daemon17.endpoint.clone();
+    // The file is not gone: the successor starts its own child before the
+    // listener accepts (§2.2) and records it. What is gone is the record it
+    // inherited.
+    assert!(
+        !parse(&fs::read_to_string(g.children_path()).unwrap_or_else(|_| "{}".to_string()))
+            ["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| child["pid"] == json!(child_pid)),
+        "the successor consumed the record it inherited"
+    );
+    let recovery = g.recoveries().pop().expect("a RECOVERY");
+    assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
+    assert!(
+        recovery["children"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|child| child["kind"] == "openviking"),
+        "the successor reaped the child it inherited: {recovery}"
+    );
+    within(
+        Duration::from_secs(60),
+        "the inherited child to be gone",
+        || !alive(child_pid),
+    );
+    g.note(
+        "O5",
+        "a scripted exit after readiness became OPENVIKING_LOST and UNAVAILABLE with the child's own last line, a firing, an order, and an activation all succeeded with SKILLS_PROJECTION_FAILED and the previous tree intact, Retry reached READY with the same seeded desk key, and a hard kill with a live child left one record the successor's recovery reaped",
+        json!({ "lost": lost, "firing": stranded_firing, "recovery": recovery }),
+    );
+
+    // --- O6 — reprovision ---------------------------------------------------
+    within(
+        Duration::from_secs(60),
+        "the successor's own child to answer /ready",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+    let listed = skill_names(&g, &kappa_key);
+    let starts = global(&g, "OPENVIKING_STARTED").len();
+    let renode = g.out.join("fake-node-again").display().to_string();
+    let (status, again) = g.api(
+        "O6",
+        &endpoint,
+        "PUT",
+        "/openviking/setup",
+        Some(&registration(&renode)),
+    );
+    assert_eq!(status, 202, "{again}");
+    assert_eq!(again["state"], "AVAILABLE");
+    assert_eq!(
+        again["node_path"],
+        renode.as_str(),
+        "a second setup replaces the row's paths (§1.3)"
+    );
+    within(
+        Duration::from_secs(120),
+        "the reprovisioned child to answer /ready",
+        || global(&g, "OPENVIKING_STARTED").len() > starts,
+    );
+    within(
+        Duration::from_secs(60),
+        "its desks to be provisioned again",
+        || g.call(&endpoint, "GET", "/openviking", None).1["desks"][&kappa_id] == json!(true),
+    );
+    assert_eq!(
+        skill_names(&g, &kappa_key),
+        listed,
+        "reprovisioning leaves <data root>/openviking/data/ untouched (§1.3)"
+    );
+    assert_eq!(
+        skill_names(&g, &beta_key),
+        ["beta-only", "desk-improvement"]
+    );
+    g.stop("O6", daemon17);
+    g.note(
+        "O6",
+        "a second setup request under the seam replaced the row's paths, restarted the child, provisioned the desks again from the same seed, and left every skill the store already held",
+        json!({ "setup": again, "skills": listed }),
+    );
+
+    // ======================================================================
     // R5 (feature SPEC `r5-desktop-approval-controls` §7.1). The chain
     // continues on the same root, the same stand-in feed, and the same
     // stand-in runtime, with a fresh daemon: the two approval policies, the
@@ -3542,8 +4454,24 @@ fn gate() {
     let eta = format!("eta-{stamp}");
     let theta = format!("theta-{stamp}");
     let iota = format!("iota-{stamp}");
-    let daemon17 = g.spawn("O7");
-    endpoint = daemon17.endpoint.clone();
+    let daemon18 = g.spawn("O7");
+    endpoint = daemon18.endpoint.clone();
+    // This root now carries a configured OpenViking, whose readiness sweep
+    // appends one `DESK_MEMORY_PROVISIONED` per desk and whose live child makes
+    // every later creation carry its own (`openviking-continuity` §3.2). Both
+    // land before this scenario's first tail client, so the rows it asserts on
+    // are exactly the ones it produced.
+    within(
+        Duration::from_secs(60),
+        "the successor's OpenViking child and its desk users",
+        || {
+            let (_, live) = g.call(&endpoint, "GET", "/openviking", None);
+            live["child"] == json!("READY")
+                && live["desks"].as_object().is_some_and(|desks| {
+                    !desks.is_empty() && desks.values().all(|ready| *ready == json!(true))
+                })
+        },
+    );
     let bearer = format!("Bearer {}", endpoint.credential);
     let policies = "/settings/policies";
     let approve = r#"{"decision":"APPROVE"}"#;
@@ -3651,8 +4579,13 @@ fn gate() {
         [
             ("DESK_CREATED", fresh[0].as_str()),
             ("DESK_READY", fresh[0].as_str()),
+            // A desk created while the OpenViking child is READY is provisioned
+            // an OpenViking user before creation answers
+            // (`openviking-continuity` §3.2), so its creation is three rows.
+            ("DESK_MEMORY_PROVISIONED", fresh[0].as_str()),
             ("DESK_CREATED", fresh[1].as_str()),
             ("DESK_READY", fresh[1].as_str()),
+            ("DESK_MEMORY_PROVISIONED", fresh[1].as_str()),
         ],
         "exactly the two desk creations, in commit order (§4.2)"
     );
@@ -3712,7 +4645,7 @@ fn gate() {
             .iter()
             .map(|row| row["kind"].as_str().unwrap_or_default())
             .collect::<Vec<_>>(),
-        ["DESK_READY", "DESK_CREATED"],
+        ["DESK_MEMORY_PROVISIONED", "DESK_READY", "DESK_CREATED"],
         "newest first, and only this desk's (§4.3)"
     );
     let (exit, one) = g.cli_json("O7", &["--json", "desk", "events", &eta, "--limit", "1"]);
@@ -3731,7 +4664,7 @@ fn gate() {
         3,
         "occurred_at_ns, kind, payload as one line (§4.3): {printed:?}"
     );
-    assert_eq!(cells[1], "DESK_READY");
+    assert_eq!(cells[1], "DESK_MEMORY_PROVISIONED");
 
     let mut query = "?limit=3".to_string();
     let mut walked: Vec<(i64, String)> = Vec::new();
@@ -4563,13 +5496,13 @@ fn gate() {
         .as_str()
         .expect("the tail cursor")
         .to_owned();
-    let dead = daemon17.endpoint.daemon_uuid.clone();
-    let stale = daemon17.endpoint.clone();
-    g.kill("O10", daemon17);
+    let dead = daemon18.endpoint.daemon_uuid.clone();
+    let stale = daemon18.endpoint.clone();
+    g.kill("O10", daemon18);
     g.await_unverifiable(&stale);
     drop(before_kill);
-    let daemon18 = g.spawn("O10");
-    endpoint = daemon18.endpoint.clone();
+    let daemon19 = g.spawn("O10");
+    endpoint = daemon19.endpoint.clone();
     let recovery = g.recoveries().pop().expect("a RECOVERY");
     assert_eq!(recovery["previous_daemon_uuid"], dead.as_str());
     let names = recovery.to_string();
@@ -4629,7 +5562,7 @@ fn gate() {
         "only the kill's lost sessions precede the RECOVERY in that unit: {after_kill:?}"
     );
     drop(resumed);
-    g.stop("O10", daemon18);
+    g.stop("O10", daemon19);
     g.note(
         "O10",
         "a foreign origin was refused before any upgrade on all three sockets, an allowed origin with a wrong first frame closed 4401, a header-free terminal on a desk with no session closed 4409 while the live viewer of another desk stayed attached, and a hard kill left one undecided record of each kind untouched, unnamed by recovery and decidable on the successor, whose recovery unit — the lost sessions, then the RECOVERY that names them — was the first thing the reconnecting client received",
