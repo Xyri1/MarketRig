@@ -103,6 +103,15 @@ export type Envelope = {
 };
 
 /**
+ * `GET /openviking/candidates` (§1.1): what the fixed-list search found, or
+ * `null` where nothing on the list validated. Nothing is stored.
+ */
+export type OpenVikingCandidates = {
+    node?: string | null;
+    python?: string | null;
+};
+
+/**
  * The child's liveness (§1.1, §6): memory only, `NOT_STARTED` after every start.
  */
 export type OpenVikingChildState = 'NOT_STARTED' | 'STARTING' | 'READY' | 'LOST';
@@ -1072,6 +1081,25 @@ export type OpenvikingResponses = {
 };
 
 export type OpenvikingResponse = OpenvikingResponses[keyof OpenvikingResponses];
+
+export type OpenvikingCandidatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/openviking/candidates';
+};
+
+export type OpenvikingCandidatesErrors = {
+    401: Envelope;
+};
+
+export type OpenvikingCandidatesError = OpenvikingCandidatesErrors[keyof OpenvikingCandidatesErrors];
+
+export type OpenvikingCandidatesResponses = {
+    200: OpenVikingCandidates;
+};
+
+export type OpenvikingCandidatesResponse = OpenvikingCandidatesResponses[keyof OpenvikingCandidatesResponses];
 
 export type OpenvikingRetryData = {
     body?: never;

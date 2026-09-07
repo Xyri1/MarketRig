@@ -8,7 +8,7 @@ Local decisions for [slice 011](../../slices/011-openviking-migration.md), prefi
 
 **Rationale:** The project has no released users, so a compatibility path buys nothing and costs a second memory system in every scenario. The user chose a user-installed Python and Node over bundled runtimes; validating by running the named executable is the shape R3 uses for the runtimes and R4 used for the launcher. One validated minor is the only claim the wheel validation actually supports. `--no-index` is what turns "bundled wheels" into a property the checks can assert. OpenViking is AGPL-3.0 and so is MarketRig (root §4.1), so bundling raises no licensing question; the bundle carries the wheels unmodified with their license texts.
 
-`ponytail:` one minor, one venv location, and pip over the bundled directory; a range of minors, a uv-driven install, or an interpreter search each arrive as a wider validation matrix behind the same setup route.
+`ponytail:` one minor, one venv location, and pip over the bundled directory. The interpreter search exists as `GET /openviking/candidates` ([SPEC](SPEC.md) §1.1): a fixed per-platform list of places 3.12 and Node install, each candidate accepted or refused by §1.2's own validators, which is why it adds no second notion of "supported". A range of minors or a uv-driven install still arrives as a wider validation matrix behind the same setup route.
 
 **Contract:** root [SPEC §4.1](../../SPEC.md#41-installation), [§4.4](../../SPEC.md#44-configuration-scopes); this feature's [SPEC](SPEC.md) §1.
 

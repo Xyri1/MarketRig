@@ -443,6 +443,155 @@ fn probe_node(node: &Path) -> Result<String, SetupError> {
     Ok(found.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Candidate discovery (§1.1)
+// ---------------------------------------------------------------------------
+
+/// `GET /openviking/candidates` (§1.1): what the fixed-list search found, or
+/// `null` where nothing on the list validated. Nothing is stored.
+#[derive(Debug, Default, Serialize, utoipa::ToSchema)]
+#[schema(as = OpenVikingCandidates)]
+pub struct Candidates {
+    pub python: Option<String>,
+    pub node: Option<String>,
+}
+
+/// The user's home; nothing when the platform's variable is unset, which drops
+/// every candidate under it rather than making it relative.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// The absolute path with symlinks resolved. Windows' verbatim prefix is
+/// stripped: the answer is prefilled into a field the operator reads and sends
+/// straight back to `PUT /openviking/setup`.
+fn canonical(path: &Path) -> String {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = resolved.to_string_lossy().into_owned();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+}
+
+/// The greatest entry of `dir` whose name starts with `prefix`, plus `tail`:
+/// the version-per-directory layouts of uv, fnm, and nvm, newest name last.
+fn newest(dir: PathBuf, prefix: &str, tail: &str) -> Option<PathBuf> {
+    let mut names: Vec<_> = fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| name.to_string_lossy().starts_with(prefix))
+        .collect();
+    names.sort();
+    Some(dir.join(names.pop()?).join(tail))
+}
+
+/// The `PATH` names a 3.12 interpreter answers to (§1.1).
+#[cfg(windows)]
+const PYTHON_ON_PATH: &[&str] = &["python"];
+#[cfg(not(windows))]
+const PYTHON_ON_PATH: &[&str] = &["python3.12", "python3"];
+
+/// Windows' `py` launcher prints the interpreter it would run for 3.12, which
+/// is the one place a version is asked for rather than guessed. Nothing on
+/// macOS, where there is no launcher.
+fn py_launcher() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let py = crate::runtime::resolve("py", &crate::runtime::search_path())?;
+    let script = "import sys;print(sys.executable)";
+    let (ok, out, _) = crate::runtime::run(crate::runtime::probe(&py, &["-3.12", "-c", script]))?;
+    let printed = out.trim().lines().next_back()?.trim().to_string();
+    (ok && !printed.is_empty()).then(|| PathBuf::from(printed))
+}
+
+/// §1.1's fixed Python list, in order. Both platforms' places are on it: a
+/// path that cannot exist here is skipped as a missing file, not as a `cfg`.
+fn python_candidates() -> Vec<PathBuf> {
+    let mut list: Vec<PathBuf> = py_launcher().into_iter().collect();
+    let search = crate::runtime::search_path();
+    list.extend(
+        PYTHON_ON_PATH
+            .iter()
+            .filter_map(|name| crate::runtime::resolve(name, &search)),
+    );
+    if let Some(home) = home_dir() {
+        list.extend(newest(
+            home.join(".local/share/uv/python"),
+            "cpython-3.12",
+            "bin/python3.12",
+        ));
+    }
+    list.push(PathBuf::from("/opt/homebrew/bin/python3.12"));
+    list.push(PathBuf::from("/usr/local/bin/python3.12"));
+    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        list.push(local.join(r"Programs\Python\Python312\python.exe"));
+        list.extend(newest(
+            local.join("uv/python"),
+            "cpython-3.12",
+            "python.exe",
+        ));
+    }
+    list
+}
+
+/// §1.1's fixed Node list, in order.
+fn node_candidates() -> Vec<PathBuf> {
+    let mut list: Vec<PathBuf> = crate::runtime::resolve("node", &crate::runtime::search_path())
+        .into_iter()
+        .collect();
+    if let Some(home) = home_dir() {
+        list.extend(newest(
+            home.join(".local/state/fnm_multishells"),
+            "",
+            "bin/node",
+        ));
+        list.extend(newest(
+            home.join(".fnm/node-versions"),
+            "",
+            "installation/bin/node",
+        ));
+        list.extend(newest(home.join(".nvm/versions/node"), "", "bin/node"));
+        list.push(home.join(".volta/bin/node"));
+    }
+    list.push(PathBuf::from("/opt/homebrew/bin/node"));
+    list.push(PathBuf::from("/usr/local/bin/node"));
+    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+        list.extend(newest(
+            appdata.join("fnm/node-versions"),
+            "",
+            "installation/node.exe",
+        ));
+    }
+    if let Some(files) = std::env::var_os("ProgramFiles").map(PathBuf::from) {
+        list.push(files.join("nodejs/node.exe"));
+    }
+    list
+}
+
+/// The first candidate §1.2's own validation accepts, canonicalized; a missing
+/// file is skipped before it costs a probe. The list is a parameter so a check
+/// can inject one.
+fn first_valid(
+    candidates: &[PathBuf],
+    validate: fn(&Path) -> Result<String, SetupError>,
+) -> Option<String> {
+    candidates
+        .iter()
+        .find(|path| path.is_file() && validate(path).is_ok())
+        .map(|path| canonical(path))
+}
+
+/// `GET /openviking/candidates` (§1.1). Blocking: every probe is a process
+/// under §1.2's own 10 s bound.
+pub async fn candidates() -> Candidates {
+    tokio::task::spawn_blocking(|| Candidates {
+        python: first_valid(&python_candidates(), probe_python),
+        node: first_valid(&node_candidates(), probe_node),
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// The locked wheel set the release unit carries beside the daemon (§1.3), with
 /// the macOS bundle's `Contents/Resources/` as the second place to look.
 fn default_wheels() -> PathBuf {
@@ -2137,6 +2286,31 @@ mod tests {
         // …and a second one while it runs is SETUP_BUSY (§1.3).
         let err = ov.setup(request(&py312, &node22)).await.unwrap_err();
         assert_eq!(err.code(), "SETUP_BUSY");
+    }
+
+    // -- check 12: candidate discovery (§1.1) -------------------------------
+
+    /// The search is the §1.2 validators over a list: a missing path costs no
+    /// probe, a wrong minor is skipped, and the first survivor is absolute.
+    #[test]
+    fn candidate_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-there");
+        let py311 = echoing(dir.path(), "py311", "3.11");
+        let py312 = echoing(dir.path(), "py312", "3.12");
+
+        let list = [missing.clone(), py311, py312.clone()];
+        let answer = first_valid(&list, probe_python).expect("the 3.12 candidate");
+        assert!(Path::new(&answer).is_absolute(), "{answer}");
+        assert_eq!(Path::new(&answer).file_name(), py312.file_name());
+
+        // Nothing on the list validating is nothing answered, never an error.
+        assert_eq!(first_valid(&[missing], probe_python), None);
+
+        // The default lists the route uses are absolute and ordered (§1.1).
+        for list in [python_candidates(), node_candidates()] {
+            assert!(list.iter().all(|path| path.is_absolute()), "{list:?}");
+        }
     }
 
     // -- check 2: provisioning (§1.3) ---------------------------------------

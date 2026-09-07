@@ -98,6 +98,7 @@ const HTTP_PATHS: &[&str] = &[
     "/memory/provider",
     "/memory/provider/models",
     "/openviking",
+    "/openviking/candidates",
     "/openviking/setup",
     "/openviking/retry",
     "/desks/{desk_id}/skills/{name}",
@@ -155,6 +156,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(memory_provider_row, memory_provider))
     .routes(routes!(memory_models))
     .routes(routes!(openviking))
+    .routes(routes!(openviking_candidates))
     .routes(routes!(openviking_setup))
     .routes(routes!(openviking_retry))
     .routes(routes!(put_skill, delete_skill))
@@ -1383,6 +1385,18 @@ async fn openviking(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<openviking::Status>, SetupError> {
     Ok(Json(state.openviking.status()?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/openviking/candidates",
+    responses(
+        (status = 200, body = openviking::Candidates),
+        (status = 401, body = Envelope),
+    )
+)]
+async fn openviking_candidates() -> Json<openviking::Candidates> {
+    Json(openviking::candidates().await)
 }
 
 #[utoipa::path(

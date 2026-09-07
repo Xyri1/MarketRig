@@ -40,6 +40,7 @@ function status(
 let put: string | null = null;
 let runtimes: unknown[] = [];
 let ov: Record<string, unknown>;
+let candidates: Record<string, unknown>;
 let setupAnswer: () => { status: number; body?: unknown };
 
 beforeEach(() => {
@@ -51,6 +52,7 @@ beforeEach(() => {
     { runtime: "claude", state: "UNAVAILABLE" },
   ];
   ov = status({ state: "UNCONFIGURED" });
+  candidates = { python: null, node: null };
   setupAnswer = () => ({ status: 202, body: { state: "PROVISIONING" } });
   client.setConfig({ baseUrl: "http://127.0.0.1:7100" });
   installFakeDaemon({
@@ -64,6 +66,7 @@ beforeEach(() => {
       },
     }),
     "GET /openviking": () => ({ status: 200, body: ov }),
+    "GET /openviking/candidates": () => ({ status: 200, body: candidates }),
     "PUT /openviking/setup": () => setupAnswer(),
     "POST /openviking/retry": () => ({ status: 202, body: ov }),
     "GET /settings/policies": () => ({ status: 200, body: policy }),
@@ -175,6 +178,18 @@ it("provisions from Settings and follows the row out of PROVISIONING", async () 
     wrapper.get('[data-testid="openviking-setup"]').attributes("disabled"),
   ).toBeUndefined();
   vi.useRealTimers();
+});
+
+it("prefills both fields from the candidate search on an UNCONFIGURED row", async () => {
+  candidates = { python: "/x/python3.12", node: "/y/node" };
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  const value = (testid: string) =>
+    (wrapper.get(`[data-testid="${testid}"]`).element as HTMLInputElement)
+      .value;
+  expect(value("openviking-python")).toBe("/x/python3.12");
+  expect(value("openviking-node")).toBe("/y/node");
 });
 
 it("shows a PYTHON_UNSUPPORTED refusal beside the fields", async () => {

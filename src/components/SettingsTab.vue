@@ -23,6 +23,7 @@ import {
   memoryProvider,
   memoryProviderRow,
   openviking,
+  openvikingCandidates,
   openvikingRetry,
   openvikingSetup,
   policies,
@@ -51,6 +52,10 @@ const explicit = reactive(new Map<string, string>());
 const memory = ref<Provider | null>(null);
 const ov = ref<OpenVikingStatus | null>(null);
 const paths = reactive({ python: "", node: "" });
+// What the daemon's fixed-list search found, kept so a refetch of an
+// unconfigured row keeps showing it (§8). Searched at most once per mount.
+const found = reactive({ python: "", node: "" });
+let searched = false;
 const setupFailure = ref("");
 let provisioning: ReturnType<typeof setInterval> | null = null;
 const policy = ref<Resource | null>(null);
@@ -86,8 +91,17 @@ async function loadOpenViking(): Promise<void> {
   const answer = await openviking();
   if (refused(answer.error)) return;
   ov.value = answer.data ?? null;
-  paths.python = answer.data?.setup.python_path ?? "";
-  paths.node = answer.data?.setup.node_path ?? "";
+  const setup = answer.data?.setup;
+  // A row naming neither path is prefilled from discovery, so the operator
+  // confirms two paths instead of typing them (§8).
+  if (!searched && !setup?.python_path && !setup?.node_path) {
+    searched = true;
+    const candidates = await openvikingCandidates();
+    found.python = candidates.data?.python ?? "";
+    found.node = candidates.data?.node ?? "";
+  }
+  paths.python = setup?.python_path || found.python;
+  paths.node = setup?.node_path || found.node;
   if (ov.value?.setup.state === "PROVISIONING") {
     provisioning ??= setInterval(() => void loadOpenViking(), 2_000);
   } else if (provisioning) {

@@ -349,7 +349,8 @@ fn validate(runtime: &str, explicit: Option<&Path>, search_path: &str) -> Outcom
 
 /// The first entry of `search_path` carrying the bare name (§2). Windows accepts
 /// `.exe`, `.cmd`, and `.bat`; the latter two are launched through `%ComSpec%`.
-fn resolve(runtime: &str, search_path: &str) -> Option<PathBuf> {
+/// Shared with OpenViking's candidate search (`openviking-continuity` §1.1).
+pub(crate) fn resolve(runtime: &str, search_path: &str) -> Option<PathBuf> {
     let separator = if cfg!(windows) { ';' } else { ':' };
     let suffixes: &[&str] = if cfg!(windows) {
         &[".exe", ".cmd", ".bat"]

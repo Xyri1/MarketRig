@@ -2402,6 +2402,33 @@
         }
       }
     },
+    "/openviking/candidates": {
+      "get": {
+        "operationId": "openviking_candidates",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenVikingCandidates"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/openviking/retry": {
       "post": {
         "operationId": "openviking_retry",
@@ -2926,6 +2953,24 @@
           "message": {
             "type": "string",
             "description": "One English sentence."
+          }
+        }
+      },
+      "OpenVikingCandidates": {
+        "type": "object",
+        "description": "`GET /openviking/candidates` (§1.1): what the fixed-list search found, or\n`null` where nothing on the list validated. Nothing is stored.",
+        "properties": {
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "python": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
