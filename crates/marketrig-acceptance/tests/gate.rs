@@ -4576,6 +4576,10 @@ fn gate() {
                 })
         },
     );
+    // The successor re-activates any desk the restart left something queued for,
+    // whose session lifecycle would otherwise commit rows across this scenario's
+    // tail window; quiesced here so the window is as quiet as it can be made.
+    end_session(&mut g, "O7", &endpoint, &kappa_id);
     let bearer = format!("Bearer {}", endpoint.credential);
     let policies = "/settings/policies";
     let approve = r#"{"decision":"APPROVE"}"#;
@@ -4666,33 +4670,51 @@ fn gate() {
     // away, then the position its live frames continue from (§4.2).
     let mut again = Socket::events(&rt, &endpoint, Some(&after), &[]);
     let replayed = again.read(Duration::from_secs(20), |frame| frame.get("tail").is_some());
+    let (tail, rows) = replayed.split_last().expect("the replay answered");
     assert!(
-        replayed
-            .last()
-            .is_some_and(|last| last.get("tail").is_some()),
+        tail.get("tail").is_some(),
         "the replay ends at the tail: {replayed:?}"
     );
-    assert_eq!(
-        replayed[..replayed.len() - 1]
-            .iter()
-            .map(|row| (
-                row["kind"].as_str().unwrap_or_default(),
-                row["desk_id"].as_str().unwrap_or_default()
-            ))
-            .collect::<Vec<_>>(),
-        [
-            ("DESK_CREATED", fresh[0].as_str()),
-            ("DESK_READY", fresh[0].as_str()),
-            // A desk created while the OpenViking child is READY is provisioned
-            // an OpenViking user before creation answers
-            // (`openviking-continuity` §3.2), so its creation is three rows.
-            ("DESK_MEMORY_PROVISIONED", fresh[0].as_str()),
-            ("DESK_CREATED", fresh[1].as_str()),
-            ("DESK_READY", fresh[1].as_str()),
-            ("DESK_MEMORY_PROVISIONED", fresh[1].as_str()),
-        ],
-        "exactly the two desk creations, in commit order (§4.2)"
+    // Gapless: every replayed row is past the cursor, in commit order, and the
+    // position the live frames continue from is exactly where the replay ended
+    // — no row falls between the two (§4.2).
+    let key = |frame: &Value| {
+        (
+            frame["occurred_at_ns"].as_i64().unwrap_or_default(),
+            frame["id"].as_str().unwrap_or_default().to_owned(),
+        )
+    };
+    let keys = rows.iter().map(key).collect::<Vec<_>>();
+    assert!(
+        keys.first().is_some_and(|first| *first > key(&row))
+            && keys.windows(2).all(|pair| pair[0] < pair[1]),
+        "the replay is strictly past the cursor, in commit order (§4.2): {keys:?}"
     );
+    assert_eq!(
+        rows.last().map(cursor).as_deref(),
+        tail["tail"].as_str(),
+        "the tail names where the replay ended (§4.2)"
+    );
+    // Anything else this root commits in the window — a dispatcher-driven
+    // session on an older desk — is replayed too, so the two fresh desks are
+    // asserted by filter, and per desk: their async provisioning interleaves.
+    for id in &fresh {
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["desk_id"].as_str() == Some(id.as_str()))
+                .map(|row| row["kind"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            [
+                "DESK_CREATED",
+                "DESK_READY",
+                // A desk created while the OpenViking child is READY is
+                // provisioned an OpenViking user before creation answers
+                // (`openviking-continuity` §3.2), so its creation is three rows.
+                "DESK_MEMORY_PROVISIONED",
+            ],
+            "the desk's creation replayed whole, in order (§4.2)"
+        );
+    }
     drop(again);
 
     // A subscriber that never reads is dropped once its queue fills, while one
