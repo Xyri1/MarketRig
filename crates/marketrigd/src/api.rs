@@ -100,6 +100,7 @@ const HTTP_PATHS: &[&str] = &[
     "/openviking",
     "/openviking/setup",
     "/openviking/retry",
+    "/desks/{desk_id}/skills/{name}",
     "/desks/{desk_id}/prompts",
     "/desks/{desk_id}/prompts/{prompt_id}",
     "/settings/policies",
@@ -156,6 +157,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(openviking))
     .routes(routes!(openviking_setup))
     .routes(routes!(openviking_retry))
+    .routes(routes!(put_skill, delete_skill))
     .routes(routes!(list_prompts))
     .routes(routes!(show_prompt))
     .routes(routes!(policies, put_policies))
@@ -418,8 +420,11 @@ impl IntoResponse for SetupError {
             | SetupError::PythonUnsupported(_)
             | SetupError::PythonProbeFailed(_)
             | SetupError::NodeUnsupported(_)
-            | SetupError::NodeProbeFailed(_) => StatusCode::BAD_REQUEST,
+            | SetupError::NodeProbeFailed(_)
+            | SetupError::SkillInvalid(_) => StatusCode::BAD_REQUEST,
             SetupError::Busy | SetupError::Unconfigured => StatusCode::CONFLICT,
+            SetupError::Rejected(_) => StatusCode::BAD_GATEWAY,
+            SetupError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             SetupError::Error(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         envelope(status, self.code(), self.to_string())
@@ -1422,6 +1427,66 @@ async fn openviking_setup(
 async fn openviking_retry(State(state): State<Arc<ApiState>>) -> Result<Response, SetupError> {
     let status = state.openviking.retry().await?;
     Ok((StatusCode::ACCEPTED, Json(status)).into_response())
+}
+
+// The one skill write path (feature SPEC §5.5). OpenViking's own MCP tools
+// refuse the managed `skills/` subtree, so a skill is written here, under the
+// desk's key, and §5.2's projection runs before the answer — the file is on
+// disk when the command returns.
+
+#[utoipa::path(
+    put,
+    path = "/desks/{desk_id}/skills/{name}",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
+async fn put_skill(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<serde_json::Value>, SetupError> {
+    let content = is_json(&headers)
+        .then(|| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .flatten()
+        .and_then(|body| body["content"].as_str().map(str::to_owned))
+        .ok_or_else(|| {
+            SetupError::SkillInvalid(
+                "The request body must be a JSON object carrying the skill's content.".to_string(),
+            )
+        })?;
+    let path = state
+        .openviking
+        .put_skill(&desk_id, &name, &content)
+        .await?;
+    Ok(Json(
+        serde_json::json!({ "name": name, "path": path.display().to_string() }),
+    ))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/desks/{desk_id}/skills/{name}",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
+async fn delete_skill(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, name)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, SetupError> {
+    state.openviking.delete_skill(&desk_id, &name).await?;
+    Ok(Json(serde_json::json!({ "name": name })))
 }
 
 fn unknown_runtime(name: &str) -> Response {

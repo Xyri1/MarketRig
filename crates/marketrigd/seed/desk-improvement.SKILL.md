@@ -5,8 +5,8 @@ description: Evaluate a closed position cycle from its MarketRig EVALUATION prom
 
 # Desk improvement
 
-MarketRig seeded this skill once into desk `<name>`'s memory. It is yours: rewrite it with the
-`openviking` `edit` tool as your own practice improves.
+MarketRig seeded this skill once into desk `<name>`'s memory. It is yours: rewrite it with
+`marketrig skill put` as your own practice improves.
 
 1. Read the prompt: cycle id, instrument, net realized P&L with its currency, the client order ids
    and fill ids. Then fetch what you need — `marketrig --json history cycles <desk>`,
@@ -17,7 +17,8 @@ MarketRig seeded this skill once into desk `<name>`'s memory. It is yours: rewri
 3. Decide whether anything was learned. Most cycles teach nothing new; say so and stop.
 4. If a lesson exists, state it once, plainly, in one or two sentences a future session can act on,
    naming the instrument; the session is captured into memory, and `remember` keeps it explicitly.
-5. If the lesson changes how you would act next time, improve the procedure: `edit` an existing
-   skill at `viking://~/skills/<skill>/SKILL.md` or `write` a new one, keeping the frontmatter
-   `name` and `description`. The copy under `.agents/skills/` is read-only; MarketRig refreshes it.
+5. If the lesson changes how you would act next time, improve the procedure: write the skill —
+   a new one or the whole text of an existing one — to a file, keeping the frontmatter `name` and
+   `description`, and run `marketrig skill put <desk> --file <path>`. The copy under
+   `.agents/skills/` is read-only; MarketRig refreshes it.
 6. Tell the user what you concluded in one paragraph, naming the cycle id.

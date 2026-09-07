@@ -50,10 +50,12 @@ is kept. When a lesson changes how you would act next time, write it into a skil
 - The `openviking` MCP tools (`find`, `search`, `read`, `remember`, `write`, `edit`, `forget`) are this
   desk's memory and skills. They are private to this desk, they persist across sessions and runtimes,
   and only you write to them. Search before deciding when the past may matter.
-- Your skills are `viking://~/skills/<skill>/SKILL.md`, written with `write` and `edit`. MarketRig
-  copies them into `.agents/skills/` (and `.claude/skills`) before every session and after every
-  turn so both runtimes load them; that copy is read-only, and an edit there is refused — change the
-  skill through the tools instead. Keep the frontmatter `name` and `description`.
+- Your skills are `viking://~/skills/<skill>/SKILL.md`. Write or replace one with
+  `marketrig skill put <name> --file <SKILL.md>` and remove one with `marketrig skill delete <name>
+  <skill>`; the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
+  `.claude/skills`) before every session and after every turn so both runtimes load them; that copy
+  is read-only, and an edit there is refused — write the skill through `marketrig skill` instead.
+  Keep the frontmatter `name` and `description`.
 - `.marketrig/` is MarketRig's; do not edit it. Memory can be unavailable; trading and triggers do
   not depend on it, and captures wait until it returns.
 

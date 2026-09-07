@@ -4085,9 +4085,42 @@ fn gate() {
         fs::OpenOptions::new().write(true).open(&seed_file).is_err(),
         "and the tree is read-only again after the swap (§5.2)"
     );
+
+    // §5.5's own write path — the one way the agent writes a skill. The answer
+    // waits on the projection, so no turn stands between the two assertions.
+    let source = "---\nname: gate-cli\ndescription: Written through the CLI\n---\n\nO3.\n";
+    let file = g.out.join("gate-cli.SKILL.md");
+    fs::write(&file, source).expect("the skill file");
+    let (exit, put) = g.cli_json(
+        "O3",
+        &[
+            "--json",
+            "skill",
+            "put",
+            &kappa,
+            "--file",
+            file.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_eq!(exit, 0, "{put}");
+    let cli_skill = skills_dir.join("gate-cli").join("SKILL.md");
+    assert_eq!(put["path"], json!(cli_skill.display().to_string()));
+    assert_eq!(
+        fs::read_to_string(&cli_skill).expect("the CLI's skill"),
+        source,
+        "the file is on disk when the command returns (§5.5)"
+    );
+    assert!(
+        fs::OpenOptions::new().write(true).open(&cli_skill).is_err(),
+        "and read-only like the rest of the projection"
+    );
+    let (exit, removed) = g.cli_json("O3", &["--json", "skill", "delete", &kappa, "gate-cli"]);
+    assert_eq!(exit, 0, "{removed}");
+    assert_eq!(projected_names(&skills_dir), ["desk-improvement"]);
+
     g.note(
         "O3",
-        "a desk created while the child was ready carried the seed, the Codex activation projected it read-only byte for byte, and a skill written and deleted through the stand-in's own route appeared and disappeared on the next turn end",
+        "a desk created while the child was ready carried the seed, the Codex activation projected it read-only byte for byte, a skill written and deleted through the stand-in's own route appeared and disappeared on the next turn end, and marketrig skill put and delete wrote and removed one with the projected file already on disk when each command returned",
         json!({ "desk": kappa_id, "projected": payloads(&g, &kappa_id, "SKILLS_PROJECTED").len() }),
     );
 

@@ -84,7 +84,7 @@ Both output streams go to one 4 KiB in-memory tail, never parsed, never logged. 
 
 ### 2.3 Loss, retry, stop
 
-The child exiting, or the deadline passing, appends `OPENVIKING_LOST {pid, exit_code, output_tail_last_line}`, sets the row `UNAVAILABLE CHILD_FAILED <last line>`, appends `OPENVIKING_UNAVAILABLE`, and drops the desk keys from memory. There is no automatic restart. `POST /openviking/retry` runs §2.2 again and clears the failure on readiness. A `READY` desk activated while `UNAVAILABLE` launches with the plugin registered and the last known desk key when one exists, else with `OPENVIKING_MEMORY_ENABLED=0` (§4.3).
+The child exiting, or the deadline passing, appends `OPENVIKING_LOST {pid, exit_code, output_tail_last_line}`, sets the row `UNAVAILABLE CHILD_FAILED <last line>`, appends `OPENVIKING_UNAVAILABLE`, and drops the desk keys from memory. There is no automatic restart. `POST /openviking/retry` runs §2.2 again and clears the failure on readiness. A `READY` desk activated while `UNAVAILABLE` launches with `OPENVIKING_MEMORY_ENABLED=0` and no registration entries (§4.3): the desk keys went with the loss, and a desk key is the launch's single predicate.
 
 Stop — daemon shutdown, reprovisioning, or a Retry finding a live process — is `SIGTERM`, up to 3 s, then the group kill; on Windows the plain kill. Uvicorn ends on `SIGTERM`; OpenViking documents no shutdown endpoint and persists task records, so an extraction in flight is a `failed` task afterwards, which is the documented outcome and not a MarketRig retry.
 
@@ -162,7 +162,7 @@ Scenarios:
 
 ### 5.1 Ownership
 
-Skills live at `viking://~/skills/<name>/` under the desk user. `.agents/skills/` is MarketRig-owned, read-only, and a projection. `.claude/skills` stays the link root §5.1 describes. Root §2's *Skill* becomes "durable procedural guidance owned by the desk's OpenViking user and projected read-only into the workspace for both runtimes".
+Skills live at `viking://~/skills/<name>/` under the desk user. `.agents/skills/` is MarketRig-owned, read-only, and a projection. The agent writes and deletes skills only through §5.5. `.claude/skills` stays the link root §5.1 describes. Root §2's *Skill* becomes "durable procedural guidance owned by the desk's OpenViking user and projected read-only into the workspace for both runtimes".
 
 ### 5.2 Projection
 
@@ -213,10 +213,12 @@ is kept. When a lesson changes how you would act next time, write it into a skil
 - The `openviking` MCP tools (`find`, `search`, `read`, `remember`, `write`, `edit`, `forget`) are this
   desk's memory and skills. They are private to this desk, they persist across sessions and runtimes,
   and only you write to them. Search before deciding when the past may matter.
-- Your skills are `viking://~/skills/<skill>/SKILL.md`, written with `write` and `edit`. MarketRig
-  copies them into `.agents/skills/` (and `.claude/skills`) before every session and after every
-  turn so both runtimes load them; that copy is read-only, and an edit there is refused — change the
-  skill through the tools instead. Keep the frontmatter `name` and `description`.
+- Your skills are `viking://~/skills/<skill>/SKILL.md`. Write or replace one with
+  `marketrig skill put <name> --file <SKILL.md>` and remove one with `marketrig skill delete <name>
+  <skill>`; the memory tools cannot write there. MarketRig copies them into `.agents/skills/` (and
+  `.claude/skills`) before every session and after every turn so both runtimes load them; that copy
+  is read-only, and an edit there is refused — write the skill through `marketrig skill` instead.
+  Keep the frontmatter `name` and `description`.
 - `.marketrig/` is MarketRig's; do not edit it. Memory can be unavailable; trading and triggers do
   not depend on it, and captures wait until it returns.
 ```
@@ -227,6 +229,12 @@ Scenarios:
 - **Delete.** A skill removed with `forget` disappears from `.agents/skills/` at the next refresh.
 - **Refused edit.** A session's attempt to write `.agents/skills/desk-improvement/SKILL.md` fails with a permission error; the next projection is unchanged.
 - **Seeded.** A new desk lists exactly `desk-improvement` under its user after provisioning and shows it under `.agents/skills/` after its first activation.
+
+### 5.5 Writing a skill
+
+OpenViking exposes skill creation on REST alone: its MCP `write` and `edit` refuse the managed `skills/` subtree (`openviking/storage/content_write.py`, `_USER_MANAGED_SUBTREES`, verified 2026-09-07) and no MCP tool adds a skill. The write path is therefore the continuity CLI. `marketrig [--json] skill put <desk-name-or-id> --file <SKILL.md>` reads the file before the daemon is contacted (refused over 64 KiB as a usage error), takes the name from the frontmatter `name:` line (validated as §5.2 validates names, else `SKILL_INVALID`), and calls `PUT /desks/{desk_id}/skills/{name} {content}`; `marketrig [--json] skill delete <desk-name-or-id> <name>` calls `DELETE /desks/{desk_id}/skills/{name}`. The daemon, under the desk key, does `GET /api/v1/skills/{name}` → `POST /api/v1/skills {data}` when absent or `PUT /api/v1/skills/{name} {data}` when present (`DELETE /api/v1/skills/{name}` for delete), then runs §5.2 once before answering, so the file is on disk when the command returns. No key, or the child not `READY`: `503 OPENVIKING_UNAVAILABLE`; an OpenViking refusal is `502 OPENVIKING_REJECTED` with its message. The route answers the projected path. Mutating requests carry the trigger attribution headers like every other command, so trigger code may write a skill. These two requests are the CLI's only ones that raise R0 §8's shared 10 s ceiling — to 60 s, because the daemon's own two OpenViking calls are bounded at 15 s each and the projection follows them. `ponytail:` `SKILL.md` only; auxiliary files arrive with the dict form of `data` once a desk needs one, and are projected already.
+
+Scenario: **Put, then see.** `marketrig skill put` returns after `.agents/skills/<name>/SKILL.md` exists read-only; a second `put` with changed content replaces it; `delete` removes the directory.
 
 ## 6. Durable schema (migration 7, OV-6)
 
@@ -242,7 +250,7 @@ Registered through `PUT /openviking/setup` under the test seam: with `MARKETRIG_
 
 - **O1 — setup and secrets.** Standin registration; `PUT /memory/provider`; daemon restart shows `OPENVIKING_STARTED` before any activation; the root key, seed, and desk key appear in no SQLite row, log line, event, or launch file; `GET /openviking` reports `READY` and every desk provisioned.
 - **O2 — two desks and the seed.** Two desks provisioned under distinct users; each lists exactly `desk-improvement`; A's key cannot list B's skills.
-- **O3 — projection.** Activation on `runtime-standin` as Codex: `.agents/skills/desk-improvement/SKILL.md` matches the seed byte for byte and is read-only; the harness `PUT`s a second skill under A's key through the stand-in's own route, scripts one turn, and after `SESSION_TURN_ENDED` the second skill is on disk; a `DELETE` and another turn removes it; a chmod-protected write attempt by the harness fails.
+- **O3 — projection.** Activation on `runtime-standin` as Codex: `.agents/skills/desk-improvement/SKILL.md` matches the seed byte for byte and is read-only; the harness `PUT`s a second skill under A's key through the stand-in's own route, scripts one turn, and after `SESSION_TURN_ENDED` the second skill is on disk; a `DELETE` and another turn removes it; a chmod-protected write attempt by the harness fails; and `marketrig skill put` then `skill delete` write and remove one through §5.5, with the projected file read-only on disk when the `put` returns and gone when the `delete` does. The turns run on Claude Code after a `session/switch`, because Codex has no daemon-visible turn end: `SESSION_TURN_ENDED` reaches the daemon only through Claude's `Stop` hook, which is what §5.2's refresh waits on. `ponytail:` the vendored Codex plugin's own `Stop` hook could report one later, at which point the same turns run on either runtime.
 - **O4 — registration and capture path.** The Claude launch files carry the plugin hooks and the `openviking` server with absolute paths and the runtime process environment carries §4.3's set (read through the stand-in's echo); switching to Codex writes `.codex/hooks.json` and the config entry; `UNCONFIGURED` launches carry neither.
 - **O5 — lost, retry, hard kill.** Scripted exit: `OPENVIKING_LOST`, `UNAVAILABLE`, a trigger firing, an order, and an activation succeed with `SKILLS_PROJECTION_FAILED` and the previous tree intact; `POST /openviking/retry` reaches `READY` with the same desk key as before; a hard kill of the daemon with a live child is reaped on the next start.
 - **O6 — reprovision.** Under the seam a second setup request with the standin replaces the row's paths, restarts the child, and keeps the store.
@@ -277,6 +285,7 @@ Module checks (`cargo test -p marketrigd`):
 8. Seeds: constitution, improvement skill, and vendored plugin trees compared byte for byte; reconcile rewrites a changed plugin file and removes an extra one; `AGENTS.md` never rewritten.
 9. Migration 7 on a database carrying `MEMORY_*` events and a `memory_child` row.
 10. Redaction: the provider key, root key, seed, and a desk key never appear in any message the daemon lifts from the child or the plugins.
+11. Skill write: `PUT`/`DELETE /desks/{id}/skills/{name}` against a fake server does the `GET` then `POST` or `PUT` (or `DELETE`) under the desk key and projects before answering; `SKILL_INVALID`, `OPENVIKING_UNAVAILABLE`, and `OPENVIKING_REJECTED`; the CLI reads the file first and refuses over 64 KiB.
 
 Frontend (`pnpm check`): Vitest on the Settings section for the three scenarios of §8 against a mocked client, and the regenerated client with no diff.
 

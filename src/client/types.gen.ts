@@ -766,6 +766,52 @@ export type SessionSwitchResponses = {
     200: unknown;
 };
 
+export type DeleteSkillData = {
+    body?: never;
+    path: {
+        desk_id: string;
+        name: string;
+    };
+    query?: never;
+    url: '/desks/{desk_id}/skills/{name}';
+};
+
+export type DeleteSkillErrors = {
+    400: Envelope;
+    401: Envelope;
+    502: Envelope;
+    503: Envelope;
+};
+
+export type DeleteSkillError = DeleteSkillErrors[keyof DeleteSkillErrors];
+
+export type DeleteSkillResponses = {
+    200: unknown;
+};
+
+export type PutSkillData = {
+    body: unknown;
+    path: {
+        desk_id: string;
+        name: string;
+    };
+    query?: never;
+    url: '/desks/{desk_id}/skills/{name}';
+};
+
+export type PutSkillErrors = {
+    400: Envelope;
+    401: Envelope;
+    502: Envelope;
+    503: Envelope;
+};
+
+export type PutSkillError = PutSkillErrors[keyof PutSkillErrors];
+
+export type PutSkillResponses = {
+    200: unknown;
+};
+
 export type ListTriggersData = {
     body?: never;
     path: {

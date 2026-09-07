@@ -6,6 +6,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// What a skill write may wait for, in place of §8's shared 10 s: the daemon
+/// makes two OpenViking calls of up to 15 s each and then projects
+/// (`openviking-continuity` §5.5).
+const SKILL_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// A failure with the exit code it maps to (feature SPEC §8).
 pub struct Fault {
     pub code: String,
@@ -129,6 +134,25 @@ impl Endpoint {
     /// Soft delete (R2 feature SPEC §8); no request body either way.
     pub fn delete(&self, path: &str) -> Result<String, Fault> {
         finish(self.authorize(self.agent.delete(self.uri(path))).call())
+    }
+
+    /// The two skill routes (`openviking-continuity` §5.5). Each waits on
+    /// OpenViking — a `GET`, a write, and the projection, every one of them
+    /// bounded by the daemon's own 15 s — so this one request raises the
+    /// shared 10 s ceiling rather than timing out ahead of the answer.
+    pub fn put_skill(&self, path: &str, body: serde_json::Value) -> Result<String, Fault> {
+        self.send(self.patient(self.agent.put(self.uri(path))), Some(body))
+    }
+
+    pub fn delete_skill(&self, path: &str) -> Result<String, Fault> {
+        finish(
+            self.authorize(self.patient(self.agent.delete(self.uri(path))))
+                .call(),
+        )
+    }
+
+    fn patient<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        request.config().timeout_global(Some(SKILL_TIMEOUT)).build()
     }
 
     /// Posts an already-serialized JSON body unchanged — the hook ingress

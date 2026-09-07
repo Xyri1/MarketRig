@@ -90,6 +90,12 @@ pub enum SetupError {
     Busy,
     /// A retry with no environment to start (§2.3).
     Unconfigured,
+    /// A skill name, or a frontmatter that disagrees with it (§5.5).
+    SkillInvalid(String),
+    /// No desk key to speak with, because the child is not `READY` (§5.5).
+    Unavailable,
+    /// OpenViking itself refused the write, with its own message (§5.5).
+    Rejected(String),
     Error(String),
 }
 
@@ -103,6 +109,9 @@ impl SetupError {
             SetupError::NodeProbeFailed(_) => "NODE_PROBE_FAILED",
             SetupError::Busy => "SETUP_BUSY",
             SetupError::Unconfigured => "OPENVIKING_UNCONFIGURED",
+            SetupError::SkillInvalid(_) => "SKILL_INVALID",
+            SetupError::Unavailable => "OPENVIKING_UNAVAILABLE",
+            SetupError::Rejected(_) => "OPENVIKING_REJECTED",
             SetupError::Error(_) => "OPENVIKING_ERROR",
         }
     }
@@ -116,11 +125,14 @@ impl fmt::Display for SetupError {
             | SetupError::PythonProbeFailed(m)
             | SetupError::NodeUnsupported(m)
             | SetupError::NodeProbeFailed(m)
+            | SetupError::SkillInvalid(m)
+            | SetupError::Rejected(m)
             | SetupError::Error(m) => write!(f, "{m}"),
             SetupError::Busy => write!(f, "OpenViking is already being set up."),
             SetupError::Unconfigured => {
                 write!(f, "OpenViking has no environment: set it up first.")
             }
+            SetupError::Unavailable => write!(f, "OpenViking is not available for this desk."),
         }
     }
 }
@@ -1440,6 +1452,19 @@ fn valid_skill_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The frontmatter `name:` a `SKILL.md` carries, which is the name OpenViking's
+/// own `POST /api/v1/skills` derives (§5.5). Empty when there is none.
+fn frontmatter_name(content: &str) -> &str {
+    content
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .into_iter()
+        .flat_map(|(front, _)| front.lines())
+        .find_map(|line| line.strip_prefix("name:"))
+        .unwrap_or_default()
+        .trim()
+}
+
 /// The same rule for an auxiliary file's relative path: `/`-separated segments
 /// under the skill's own directory and nothing that could climb out of it.
 fn valid_skill_path(path: &str) -> bool {
@@ -1579,12 +1604,29 @@ impl OpenViking {
         path: &str,
         body: Value,
     ) -> Result<Value, String> {
-        let response = self
+        self.user_write(reqwest::Method::POST, port, key, path, Some(body))
+            .await
+    }
+
+    /// The same call with any method: §5.5's `PUT` carries a body and its
+    /// `DELETE` carries none.
+    async fn user_write(
+        &self,
+        method: reqwest::Method,
+        port: u16,
+        key: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Value, String> {
+        let mut request = self
             .http
-            .post(format!("http://127.0.0.1:{port}/api/v1/{path}"))
+            .request(method, format!("http://127.0.0.1:{port}/api/v1/{path}"))
             .bearer_auth(key)
-            .timeout(ADMIN_TIMEOUT)
-            .json(&body)
+            .timeout(ADMIN_TIMEOUT);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
             .send()
             .await
             .map_err(|e| self.memory.redact(&e.to_string()))?;
@@ -1764,6 +1806,98 @@ impl OpenViking {
                 }
             }
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The skill write path (§5.5)
+// ---------------------------------------------------------------------------
+
+impl OpenViking {
+    /// The child's port and this desk's key, or the one refusal §5.5 names for
+    /// having nothing to speak with.
+    fn desk_call(&self, desk_id: &str) -> Result<(u16, String), SetupError> {
+        let live = self.live();
+        match (live.state, live.port, live.keys.get(desk_id).cloned()) {
+            (LiveState::Ready, Some(port), Some(key)) => Ok((port, key)),
+            _ => Err(SetupError::Unavailable),
+        }
+    }
+
+    /// §5.5: OpenViking creates a skill on REST alone — its MCP `write` and
+    /// `edit` refuse the managed `skills/` subtree — so this is the one write
+    /// path. The `GET` decides between the create and the replace, and §5.2
+    /// runs once before the caller is answered, so the projected file is on
+    /// disk when the command returns. Answers that file's path.
+    pub async fn put_skill(
+        self: &Arc<Self>,
+        desk_id: &str,
+        name: &str,
+        content: &str,
+    ) -> Result<PathBuf, SetupError> {
+        if !valid_skill_name(name) {
+            return Err(SetupError::SkillInvalid(format!(
+                "{name:?} is not a skill name: letters, digits, - and _, starting with a letter \
+                 or a digit."
+            )));
+        }
+        // OpenViking derives the name from the frontmatter, so a disagreement
+        // would write one skill and answer about another.
+        let declared = frontmatter_name(content);
+        if declared != name {
+            return Err(SetupError::SkillInvalid(format!(
+                "the frontmatter names {declared:?}, and the skill is {name:?}."
+            )));
+        }
+        let (port, key) = self.desk_call(desk_id)?;
+        let route = format!("skills/{name}");
+        let body = json!({ "data": content });
+        let written = match self
+            .user_get(port, &key, &route, &[])
+            .await
+            .map_err(SetupError::Rejected)?
+        {
+            None => self.user_post(port, &key, "skills", body).await,
+            Some(_) => {
+                self.user_write(reqwest::Method::PUT, port, &key, &route, Some(body))
+                    .await
+            }
+        };
+        written.map_err(SetupError::Rejected)?;
+        self.project_skills(desk_id).await;
+        let desk =
+            crate::desk::get(&self.store, desk_id).map_err(|e| SetupError::Error(e.to_string()))?;
+        Ok(PathBuf::from(desk.workspace_path)
+            .join(".agents")
+            .join("skills")
+            .join(name)
+            .join("SKILL.md"))
+    }
+
+    /// §5.5's other half: the skill leaves OpenViking and the projection loses
+    /// its directory before the caller is answered.
+    pub async fn delete_skill(
+        self: &Arc<Self>,
+        desk_id: &str,
+        name: &str,
+    ) -> Result<(), SetupError> {
+        if !valid_skill_name(name) {
+            return Err(SetupError::SkillInvalid(format!(
+                "{name:?} is not a skill name."
+            )));
+        }
+        let (port, key) = self.desk_call(desk_id)?;
+        self.user_write(
+            reqwest::Method::DELETE,
+            port,
+            &key,
+            &format!("skills/{name}"),
+            None,
+        )
+        .await
+        .map_err(SetupError::Rejected)?;
+        self.project_skills(desk_id).await;
+        Ok(())
     }
 }
 
@@ -2624,17 +2758,40 @@ mod tests {
                 .post(
                     async |State(state): State<Fake>, axum::Json(body): axum::Json<Value>| {
                         let data = body["data"].as_str().unwrap_or_default().to_string();
+                        // Upstream derives the name from the frontmatter (§5.5).
+                        let name = frontmatter_name(&data).to_string();
                         let mut fake = lock(&state);
                         fake.uploaded.push(data.clone());
-                        fake.items
-                            .insert("desk-improvement".to_string(), (data, Vec::new()));
+                        fake.items.insert(name, (data, Vec::new()));
                         axum::Json(json!({"status": "ok", "result": {}}))
                     },
                 ),
             )
             .route(
                 "/api/v1/skills/{name}",
-                axum::routing::get(
+                axum::routing::put(
+                    async |State(state): State<Fake>,
+                           AxumPath(name): AxumPath<String>,
+                           axum::Json(body): axum::Json<Value>| {
+                        let data = body["data"].as_str().unwrap_or_default().to_string();
+                        lock(&state).items.insert(name, (data, Vec::new()));
+                        axum::Json(json!({"status": "ok", "result": {}}))
+                    },
+                )
+                .delete(
+                    async |State(state): State<Fake>, AxumPath(name): AxumPath<String>| match lock(
+                        &state,
+                    )
+                    .items
+                    .remove(&name)
+                    {
+                        Some(_) => {
+                            axum::Json(json!({"status": "ok", "result": {}})).into_response()
+                        }
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    },
+                )
+                .get(
                     async |State(state): State<Fake>, AxumPath(name): AxumPath<String>| {
                         let fake = lock(&state);
                         let Some((content, files)) = fake.items.get(&name) else {
@@ -2936,5 +3093,86 @@ mod tests {
         // Present now, so a second provisioning uploads nothing.
         ov.upload_seed_skill(DESK_A, "desk-key").await;
         assert_eq!(fake.lock().unwrap().uploaded.len(), 1);
+    }
+
+    /// Check 11: §5.5's write path — the `GET` decides between the create and
+    /// the replace, the projection runs before the answer, and each refusal
+    /// carries its own code.
+    #[tokio::test]
+    async fn a_skill_write_creates_replaces_deletes_and_projects() {
+        let (_dir, ov) = scratch();
+        let fake: Fake = Arc::new(Mutex::new(FakeSkills::default()));
+        let port = fake_skills(fake.clone()).await;
+        let workspace = plant_ready(&ov, DESK_A, "alpha", port);
+        let file = workspace
+            .join(".agents")
+            .join("skills")
+            .join("spread-watch")
+            .join("SKILL.md");
+        let skill =
+            |body: &str| format!("---\nname: spread-watch\ndescription: d\n---\n\n{body}\n");
+
+        // Absent: the `GET` 404s, so the create is the `POST`, and the answer
+        // comes after the projection has written the file read-only.
+        let written = ov
+            .put_skill(DESK_A, "spread-watch", &skill("first"))
+            .await
+            .expect("the create");
+        assert_eq!(written, file);
+        assert_eq!(fs::read_to_string(&file).unwrap(), skill("first"));
+        assert!(fs::metadata(&file).unwrap().permissions().readonly());
+        assert_eq!(fake.lock().unwrap().uploaded.len(), 1, "one POST");
+
+        // Present: the replace is the `PUT`, and the projection is fresh again.
+        ov.put_skill(DESK_A, "spread-watch", &skill("second"))
+            .await
+            .expect("the replace");
+        assert_eq!(fs::read_to_string(&file).unwrap(), skill("second"));
+        assert_eq!(fake.lock().unwrap().uploaded.len(), 1, "and no second POST");
+
+        ov.delete_skill(DESK_A, "spread-watch")
+            .await
+            .expect("the delete");
+        assert!(!file.exists(), "the projection lost the directory");
+
+        // The frontmatter names the skill and the path must agree; a name that
+        // is not a name never reaches OpenViking at all.
+        let refused = |e: SetupError| e.code();
+        assert_eq!(
+            refused(
+                ov.put_skill(DESK_A, "other", &skill("x"))
+                    .await
+                    .unwrap_err()
+            ),
+            "SKILL_INVALID"
+        );
+        assert_eq!(
+            refused(
+                ov.put_skill(DESK_A, "../escape", &skill("x"))
+                    .await
+                    .unwrap_err()
+            ),
+            "SKILL_INVALID"
+        );
+        // OpenViking's own refusal — here a delete of what is no longer there.
+        assert_eq!(
+            refused(ov.delete_skill(DESK_A, "spread-watch").await.unwrap_err()),
+            "OPENVIKING_REJECTED"
+        );
+
+        // Without a ready child there is no key to speak with.
+        ov.live().state = LiveState::Lost;
+        assert_eq!(
+            refused(
+                ov.put_skill(DESK_A, "spread-watch", &skill("x"))
+                    .await
+                    .unwrap_err()
+            ),
+            "OPENVIKING_UNAVAILABLE"
+        );
+        assert_eq!(
+            refused(ov.delete_skill(DESK_A, "spread-watch").await.unwrap_err()),
+            "OPENVIKING_UNAVAILABLE"
+        );
     }
 }

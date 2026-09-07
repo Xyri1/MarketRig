@@ -9,7 +9,7 @@
 
 pub mod client;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use client::{Endpoint, Fault};
@@ -55,6 +55,12 @@ enum Group {
         #[command(subcommand)]
         command: PromptCommand,
     },
+    /// The desk's skills, which live in OpenViking and are projected read-only
+    /// into the workspace (`openviking-continuity` §5.5).
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
     /// Session ingress the runtime itself invokes (R3 feature SPEC §5.2).
     // Never a session lifecycle control: those are REST and desktop actions
     // (root §13.2, per D69).
@@ -73,6 +79,10 @@ enum SessionCommand {
 
 /// The hook body cap (R3 feature SPEC §5.2); anything larger is dropped.
 const HOOK_LIMIT: usize = 64 * 1024;
+
+/// The `SKILL.md` cap (`openviking-continuity` §5.5); a larger file is a usage
+/// error, refused before the daemon is contacted.
+const SKILL_LIMIT: usize = 64 * 1024;
 
 /// `marketrig --desk <id> session hook`: read standard input to EOF, post it
 /// unchanged, and exit 0 whatever happens — a hook must never fail the turn
@@ -238,6 +248,25 @@ enum PromptCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Write or replace a skill from a `SKILL.md` file.
+    Put {
+        /// Desk name or UUID.
+        desk: String,
+        /// The `SKILL.md`; its frontmatter `name` names the skill.
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Remove a skill.
+    Delete {
+        /// Desk name or UUID.
+        desk: String,
+        /// Skill name.
+        name: String,
+    },
+}
+
 /// One schedule shape or the other, never both and never half of the recurring
 /// trio (R2 feature SPEC §2). Values pass through untouched; the daemon
 /// validates them.
@@ -306,9 +335,16 @@ pub fn run() -> i32 {
 
 fn dispatch(group: &Group) -> Result<String, Fault> {
     // Built before discovery: an unreadable or non-UTF-8 `--code` file and an
-    // empty `update` are usage errors whether or not a daemon is up (§9).
+    // empty `update` are usage errors whether or not a daemon is up (§9), and
+    // so is an unusable `skill put --file` (`openviking-continuity` §5.5).
     let body = match group {
         Group::Trigger { command } => trigger_body(command),
+        _ => None,
+    };
+    let skill = match group {
+        Group::Skill {
+            command: SkillCommand::Put { file, .. },
+        } => Some(skill_file(file)),
         _ => None,
     };
     let endpoint = Endpoint::discover()?;
@@ -396,7 +432,59 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 }
             }
         }
+        Group::Skill { command } => {
+            let (SkillCommand::Put { desk, .. } | SkillCommand::Delete { desk, .. }) = command;
+            let desk = resolve(&endpoint, "/desks", "desk", desk)?;
+            match command {
+                SkillCommand::Put { .. } => {
+                    let (name, content) = skill.expect("read before discovery");
+                    endpoint.put_skill(
+                        &format!("/desks/{desk}/skills/{name}"),
+                        json!({ "content": content }),
+                    )
+                }
+                SkillCommand::Delete { name, .. } => {
+                    endpoint.delete_skill(&format!("/desks/{desk}/skills/{name}"))
+                }
+            }
+        }
     }
+}
+
+/// The skill body `skill put` reads before the daemon is contacted (§5.5): at
+/// most 64 KiB of UTF-8, and the frontmatter `name` that names it — the name
+/// OpenViking itself derives, so the CLI sends the same one in the path.
+fn skill_file(path: &Path) -> (String, String) {
+    let source = std::fs::read(path).unwrap_or_else(|e| {
+        usage(format!(
+            "cannot read the skill file {}: {e}",
+            path.display()
+        ))
+    });
+    if source.len() > SKILL_LIMIT {
+        usage(format!(
+            "the skill file {} is {} bytes, over the {SKILL_LIMIT}-byte limit",
+            path.display(),
+            source.len()
+        ));
+    }
+    let source = String::from_utf8(source)
+        .unwrap_or_else(|_| usage(format!("the skill file {} is not UTF-8", path.display())));
+    let name = source
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---"))
+        .into_iter()
+        .flat_map(|(front, _)| front.lines())
+        .find_map(|line| line.strip_prefix("name:"))
+        .unwrap_or_default()
+        .trim();
+    if name.is_empty() {
+        usage(format!(
+            "the skill file {} carries no frontmatter name:",
+            path.display()
+        ));
+    }
+    (name.to_string(), source)
 }
 
 /// The request body of the mutating `trigger` commands (R2 feature SPEC §8).
