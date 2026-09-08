@@ -216,7 +216,12 @@ impl Ov {
 
     fn persist(&self, store: &Value) {
         if let Some(path) = &self.store_path {
-            let _ = std::fs::write(path, store.to_string());
+            // Replaced whole, never truncated in place: the gate reads this file
+            // while the child is writing it, and a torn read is not a store.
+            let scratch = path.with_extension("writing");
+            if std::fs::write(&scratch, store.to_string()).is_ok() {
+                let _ = std::fs::rename(&scratch, path);
+            }
         }
     }
 

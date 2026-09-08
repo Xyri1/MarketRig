@@ -4511,6 +4511,21 @@ fn gate() {
     // live session goes first, so the next firing is a fresh activation whose
     // projection is the one that fails.
     end_session(&mut g, "O5", &endpoint, &kappa_id);
+    // The trading desk's node has been cold since G20's daemon, so this read
+    // starts it (§4.3) and the wait is for its own first poll: until one lands,
+    // the sandbox refuses a `MARKET` order `MARKET_PRICE_UNAVAILABLE`, which is
+    // an authoritative answer about the feed and not the loss O5 measures (r1
+    // feature SPEC §2.1) — the same warm-up O9 does before delta's first order.
+    let (status, cold) = g.api("O5", &endpoint, "GET", &quotes_path, None);
+    assert_eq!(status, 200, "{cold}");
+    within(
+        Duration::from_secs(60),
+        "the trading desk's AAPL observation",
+        || {
+            quote_of(&g.call(&endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["health"]
+                == "LIVE"
+        },
+    );
     let tree = projected_names(&skills_dir);
     let failures = payloads(&g, &kappa_id, "SKILLS_PROJECTION_FAILED").len();
     let (status, sold) = g.api(
