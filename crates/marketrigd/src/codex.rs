@@ -1047,27 +1047,28 @@ mod tests {
             &std::fs::read_to_string(workspace.join(".codex/hooks.json")).unwrap(),
         )
         .unwrap();
-        let field = if cfg!(windows) {
-            "commandWindows"
-        } else {
-            "command"
-        };
         let stop = &hooks["hooks"]["Stop"][0];
         assert_eq!(stop["matcher"], json!("*"));
         assert_eq!(stop["hooks"][0]["timeout"], json!(30));
         // Hooks run inside the shared app-server, so the same environment is
-        // prefixed onto the command itself.
-        let prefix = if cfg!(windows) {
-            "set \"OPENVIKING_HOME=/tmp/ov home\" && "
-        } else {
-            "OPENVIKING_HOME=\"/tmp/ov home\" "
-        };
+        // prefixed onto the command itself — in both forms, since Codex
+        // requires `command` and overrides it with `commandWindows`, which
+        // PowerShell runs.
+        let script = plugin.join("scripts").join("auto-capture.mjs");
         assert_eq!(
-            stop["hooks"][0][field],
+            stop["hooks"][0]["command"],
             json!(format!(
-                "{prefix}\"{}\" \"{}\"",
+                "OPENVIKING_HOME=\"/tmp/ov home\" \"{}\" \"{}\"",
                 node.display(),
-                plugin.join("scripts").join("auto-capture.mjs").display()
+                script.display()
+            ))
+        );
+        assert_eq!(
+            stop["hooks"][0]["commandWindows"],
+            json!(format!(
+                "$env:OPENVIKING_HOME='/tmp/ov home'; & '{}' '{}'",
+                node.display(),
+                script.display()
             ))
         );
 

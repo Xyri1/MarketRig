@@ -257,7 +257,7 @@ a short position and a futures position each close through one realized-P&L fact
 
 **Why here:** each item widens a mechanism the earlier milestones already proved — a second venue on the same trading topology, a second ingress on the same firing pipeline, a second locale over the same strings — so none of it buys new loop evidence and all of it can wait until the loop is closed.
 
-**Entry checks:** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — runs before anything else in this milestone, because it is R4's one outstanding cell (per D83) and it also settles whether `set "NAME=value" && …` holds as the `commandWindows` form of the Codex hook commands.
+**Entry checks:** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — runs before anything else in this milestone, because it is R4's one outstanding cell (per D83) and it also settled the `commandWindows` form of the Codex hook commands: the first Windows Codex cell (`experiment-e6-codex-1788856799`, 2026-09-08) ran no plugin hook because Codex requires `command` beside the override and runs the override in PowerShell, so `set "NAME=value" && …` never held; the daemon now writes both keys with a PowerShell Windows form (feature SPEC §4.3), verified by probe, and the pair reruns on it.
 
 Dependencies: Milestone R5.
 

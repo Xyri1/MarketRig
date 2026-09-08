@@ -31,7 +31,7 @@ One invocation per cell runs **four** scenarios back to back — E1 or E2, E3, E
   | HK | Asia/Hong_Kong | 09:30–12:00, 13:00–16:00 |
   | CN | Asia/Shanghai | 09:30–11:30, 13:00–15:00 |
 
-  On an exchange holiday the phase still reads `OPEN` but the feed never goes `LIVE`; the cell then fails mechanically at the precheck. Choose another window and rerun.
+  On an exchange holiday the phase still reads `OPEN` but the feed never goes `LIVE`; the cell then fails mechanically at the precheck. Choose another window and rerun. The converse is not checked: `LIVE` means the last poll succeeded (R1 feature SPEC §2), so outside a session the precheck still passes on a `CLOSED` synthesized quote and the agent rightly refuses to trade — the Windows Codex E6 of 2026-09-08 timed out at the cycle step that way. Start inside a session.
 
 ## 2. Start the cell
 

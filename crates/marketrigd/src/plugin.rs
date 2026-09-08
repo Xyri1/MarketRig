@@ -171,39 +171,41 @@ pub fn claude_hooks(node: &Path, plugin: &Path) -> Map<String, Value> {
 }
 
 /// `<workspace>/.codex/hooks.json` (§4.3). Codex hooks have no exec form, so
-/// the command is one quoted string — under `commandWindows` on Windows, the
-/// documented per-platform field, so a backslashed path never meets a POSIX
-/// shell.
-///
-/// ponytail: the per-platform field is chosen at compile time, which is what
-/// the daemon writing its own launch files allows; a cross-rendered file would
-/// need both keys and a Codex that accepts them.
+/// the command is one quoted string. `command` is required by Codex's
+/// hook schema and `commandWindows` is its optional Windows override
+/// (Codex hooks documentation, checked 2026-09-08 against 0.153.4; a file whose
+/// hook lacks `command` is rejected whole, found by the Windows E6 on
+/// 2026-09-08), so both are always written: the POSIX form under `command`,
+/// the PowerShell form under `commandWindows`, and a backslashed path never
+/// meets a POSIX shell.
 ///
 /// `env` is the launch's path-only environment (`openviking-continuity`
 /// §4.3), prefixed onto every command: Codex runs hooks inside the shared
 /// app-server, which inherits nothing per desk, so the command line is the one
-/// channel to the hook. POSIX is `NAME="value" …`; Windows is
-/// `set "NAME=value" && …` under `cmd`.
+/// channel to the hook. POSIX is `NAME="value" …` under `sh`. Windows is
+/// `$env:NAME='value'; … & '<node>' '<script>'`, because Codex on Windows
+/// runs natively in PowerShell and hands hooks to that same session shell —
+/// under it `set "NAME=value" && "<node>" …` is a Set-Variable alias followed
+/// by a parse error, so nothing runs (the Windows E6 probe, 2026-09-08). The
+/// form is valid on Windows PowerShell 5.1 and pwsh 7 alike; a single quote
+/// inside a value is doubled, PowerShell's own escape.
 pub fn codex_hooks(node: &Path, plugin: &Path, env: &[(String, String)]) -> String {
     let node = node.to_string_lossy().to_string();
-    let field = if cfg!(windows) {
-        "commandWindows"
-    } else {
-        "command"
-    };
-    let prefix: String = env
+    let posix: String = env
         .iter()
-        .map(|(name, value)| {
-            if cfg!(windows) {
-                format!("set \"{name}={value}\" && ")
-            } else {
-                format!("{name}=\"{value}\" ")
-            }
-        })
+        .map(|(name, value)| format!("{name}=\"{value}\" "))
+        .collect();
+    let ps = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let windows: String = env
+        .iter()
+        .map(|(name, value)| format!("$env:{name}={}; ", ps(value)))
         .collect();
     let hooks = rewrite("codex", plugin, |script, timeout| {
-        let mut hook = json!({ "type": "command" });
-        hook[field] = json!(format!("{prefix}\"{node}\" \"{script}\""));
+        let mut hook = json!({
+            "type": "command",
+            "command": format!("{posix}\"{node}\" \"{script}\""),
+            "commandWindows": format!("{windows}& {} {}", ps(&node), ps(script)),
+        });
         if let Some(timeout) = timeout {
             hook["timeout"] = timeout.clone();
         }
@@ -294,23 +296,23 @@ mod tests {
 
         let codex_plugin = Path::new("/desks/alpha/.marketrig/plugins/openviking-codex");
         let codex: Value = serde_json::from_str(&codex_hooks(node, codex_plugin, &[])).unwrap();
-        let field = if cfg!(windows) {
-            "commandWindows"
-        } else {
-            "command"
-        };
         assert_eq!(codex["hooks"].as_object().unwrap().len(), 5);
         let hook = &codex["hooks"]["SessionStart"][0];
         assert_eq!(hook["matcher"], json!("clear|startup|resume"));
+        // Both forms are always present: Codex requires `command` and takes
+        // `commandWindows` as the Windows override, run by PowerShell.
+        let script = codex_plugin
+            .join("scripts")
+            .join("session-start-commit.mjs")
+            .to_string_lossy()
+            .to_string();
         assert_eq!(
-            hook["hooks"][0][field],
-            json!(format!(
-                "\"/opt/node/bin/node\" \"{}\"",
-                codex_plugin
-                    .join("scripts")
-                    .join("session-start-commit.mjs")
-                    .to_string_lossy()
-            ))
+            hook["hooks"][0]["command"],
+            json!(format!("\"/opt/node/bin/node\" \"{script}\""))
+        );
+        assert_eq!(
+            hook["hooks"][0]["commandWindows"],
+            json!(format!("& '/opt/node/bin/node' '{script}'"))
         );
         assert_eq!(hook["hooks"][0]["timeout"], json!(70));
         assert_eq!(codex["hooks"]["SessionEnd"][0]["hooks"][0]["timeout"], 3);
