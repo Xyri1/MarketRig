@@ -507,6 +507,11 @@ async fn serve(rig: Rig) -> Served {
         channels: Arc::new(crate::claude::Channels::default()),
         dispatch: rig.dispatcher.clone(),
         openviking: crate::openviking::OpenViking::new(memory.clone(), DAEMON.to_string()),
+        hithink: crate::hithink::Hithink::standin(
+            rig.store.clone(),
+            memory.clone(),
+            "http://127.0.0.1:1".to_string(),
+        ),
         memory,
         events: crate::events::Publisher::new(rig.store.clone()).unwrap(),
     };

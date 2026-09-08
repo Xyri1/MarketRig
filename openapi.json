@@ -2547,6 +2547,194 @@
         }
       }
     },
+    "/research/hithink": {
+      "get": {
+        "operationId": "hithink_provider",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HithinkProvider"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "hithink_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HithinkProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "hithink_delete",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HithinkProvider"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "hithink_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HithinkProvider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/runtimes": {
       "get": {
         "operationId": "runtimes",
@@ -2767,6 +2955,14 @@
   },
   "components": {
     "schemas": {
+      "AShareFeed": {
+        "type": "string",
+        "description": "Which client serves the `CN` catalog entries (§1.1). The operator's choice,\nnever the daemon's: a rejected key degrades the leg, it never substitutes\nYahoo (root §12.2).",
+        "enum": [
+          "YAHOO",
+          "HITHINK"
+        ]
+      },
       "ActionRecord": {
         "type": "object",
         "description": "The `trading_actions` row as the routes return it (§7).",
@@ -2953,6 +3149,50 @@
           "message": {
             "type": "string",
             "description": "One English sentence."
+          }
+        }
+      },
+      "HithinkProvider": {
+        "type": "object",
+        "description": "The `hithink_provider` row as the routes answer it — never a key (§1.2).\nNamed `HithinkProvider` in the OpenAPI document, because the memory\nprovider's own resource already holds `Provider` there (R5 §6.1).",
+        "required": [
+          "state",
+          "a_share_feed",
+          "api_key_present",
+          "base_url"
+        ],
+        "properties": {
+          "a_share_feed": {
+            "$ref": "#/components/schemas/AShareFeed"
+          },
+          "api_key_present": {
+            "type": "boolean"
+          },
+          "base_url": {
+            "type": "string",
+            "description": "The compiled-in or seam value, never operator-set (§1.2)."
+          },
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "validated_at_ns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

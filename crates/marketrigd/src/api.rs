@@ -19,6 +19,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::desk::{self, Desk, DeskError};
+use crate::hithink::{self, HithinkError};
 use crate::memory::{self, MemoryError};
 use crate::openviking::{self, SetupError};
 use crate::policy::{self, DecideError, PolicyError};
@@ -57,6 +58,9 @@ pub struct ApiState {
     /// The OpenViking installation, its child, and the desk keys (feature SPEC
     /// `openviking-continuity` §1, §2, §3).
     pub openviking: Arc<crate::openviking::OpenViking>,
+    /// The HiThink provider, its key, and the A-share calendar (feature SPEC
+    /// `hithink-a-share` §1, §3).
+    pub hithink: Arc<crate::hithink::Hithink>,
     /// The events tail's one publisher (R5 feature SPEC §4.1).
     pub events: Arc<crate::events::Publisher>,
 }
@@ -97,6 +101,7 @@ const HTTP_PATHS: &[&str] = &[
     "/runtimes/{runtime}/retry",
     "/memory/provider",
     "/memory/provider/models",
+    "/research/hithink",
     "/openviking",
     "/openviking/candidates",
     "/openviking/setup",
@@ -155,6 +160,12 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(runtime_retry))
     .routes(routes!(memory_provider_row, memory_provider))
     .routes(routes!(memory_models))
+    .routes(routes!(
+        hithink_provider,
+        hithink_put,
+        hithink_patch,
+        hithink_delete
+    ))
     .routes(routes!(openviking))
     .routes(routes!(openviking_candidates))
     .routes(routes!(openviking_setup))
@@ -408,6 +419,26 @@ impl IntoResponse for MemoryError {
             MemoryError::Error(_)
             | MemoryError::ProviderUnreachable(_)
             | MemoryError::ProviderRejected(_) => StatusCode::BAD_GATEWAY,
+        };
+        envelope(status, self.code(), self.to_string())
+    }
+}
+
+/// The feature SPEC `hithink-a-share` §1.2 and §4.1 code-to-status map, appended
+/// the same way. `HithinkError::code()` owns the code; this owns the status.
+impl IntoResponse for HithinkError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            HithinkError::Validation(_) | HithinkError::ProviderRejected { .. } => {
+                StatusCode::BAD_REQUEST
+            }
+            HithinkError::ResearchPathUnknown(_) => StatusCode::NOT_FOUND,
+            HithinkError::ResearchUnconfigured => StatusCode::CONFLICT,
+            HithinkError::ProviderUnreachable(_)
+            | HithinkError::ResearchUnreachable { .. }
+            | HithinkError::ResearchTooLarge(_) => StatusCode::BAD_GATEWAY,
+            HithinkError::CredentialStoreUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            HithinkError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         envelope(status, self.code(), self.to_string())
     }
@@ -1368,6 +1399,105 @@ async fn memory_models(
     ))
 }
 
+// The HiThink provider routes (feature SPEC `hithink-a-share` §1.2). One row,
+// one key, and the operator's A-share feed choice; no answer ever carries a key.
+
+#[utoipa::path(
+    get,
+    path = "/research/hithink",
+    responses(
+        (status = 200, body = hithink::Provider),
+        (status = 401, body = Envelope),
+        (status = 500, body = Envelope),
+    )
+)]
+async fn hithink_provider(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<hithink::Provider>, HithinkError> {
+    Ok(Json(state.hithink.provider()?))
+}
+
+#[derive(Deserialize)]
+struct HithinkKey {
+    api_key: String,
+}
+
+#[utoipa::path(
+    put,
+    path = "/research/hithink",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = hithink::Provider),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 502, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
+async fn hithink_put(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<hithink::Provider>, HithinkError> {
+    let request: HithinkKey = is_json(&headers)
+        .then(|| serde_json::from_str::<HithinkKey>(&body).ok())
+        .flatten()
+        .ok_or_else(|| {
+            HithinkError::Validation(
+                "The request body must be a JSON object with an api_key.".to_string(),
+            )
+        })?;
+    Ok(Json(state.hithink.put(&request.api_key).await?))
+}
+
+#[derive(Deserialize)]
+struct HithinkFeed {
+    a_share_feed: hithink::AShareFeed,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/research/hithink",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, body = hithink::Provider),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+        (status = 409, body = Envelope),
+    )
+)]
+async fn hithink_patch(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<hithink::Provider>, HithinkError> {
+    let request: HithinkFeed = is_json(&headers)
+        .then(|| serde_json::from_str::<HithinkFeed>(&body).ok())
+        .flatten()
+        .ok_or_else(|| {
+            HithinkError::Validation(
+                "The request body must be a JSON object with a_share_feed of YAHOO or HITHINK."
+                    .to_string(),
+            )
+        })?;
+    Ok(Json(state.hithink.patch(request.a_share_feed)?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/research/hithink",
+    responses(
+        (status = 200, body = hithink::Provider),
+        (status = 401, body = Envelope),
+        (status = 503, body = Envelope),
+    )
+)]
+async fn hithink_delete(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<hithink::Provider>, HithinkError> {
+    Ok(Json(state.hithink.delete()?))
+}
+
 // The OpenViking installation routes (feature SPEC `openviking-continuity`
 // §1.1). The body is taken as a `String` and the content type checked after it
 // is read, like every other R4/R5 route: answering with bytes still unread
@@ -2189,6 +2319,13 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
     let channels = Arc::new(crate::claude::Channels::default());
     let memory = Arc::new(crate::memory::seam_memory(store.clone(), roots));
     let openviking = crate::openviking::OpenViking::new(memory.clone(), DAEMON_UUID.to_string());
+    // A stand-in base URL on a port nothing listens on: the routes answer from
+    // the row, and nothing here can reach the public HiThink service.
+    let hithink = crate::hithink::Hithink::standin(
+        store.clone(),
+        memory.clone(),
+        "http://127.0.0.1:1".to_string(),
+    );
     // The events publisher the daemon spawns in `lib.rs::serve`, so `/events`
     // is live here too (R5 feature SPEC §4.1).
     let events = crate::events::Publisher::new(store.clone()).unwrap();
@@ -2212,6 +2349,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
         memory: memory.clone(),
         openviking,
+        hithink,
         events,
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2459,7 +2597,7 @@ async fn envelope_stability() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn action_replay() {
     let aapl = crate::catalog::find("AAPL.XNAS").unwrap();
-    let (feed, _hits) = crate::feed::scripted_server(vec![(
+    let (feed, _hits, _) = crate::feed::scripted_server(vec![(
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -2638,7 +2776,7 @@ async fn action_replay() {
 #[cfg(test)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn market_codes() {
-    let (feed, _hits) = crate::feed::scripted_server(vec![(
+    let (feed, _hits, _) = crate::feed::scripted_server(vec![(
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -2997,7 +3135,7 @@ fn call_post_attributed(url: String, headers: &[(&str, &str)], body: &str) -> (u
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn action_attribution() {
     let aapl = crate::catalog::find("AAPL.XNAS").unwrap();
-    let (feed, _hits) = crate::feed::scripted_server(vec![(
+    let (feed, _hits, _) = crate::feed::scripted_server(vec![(
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -4444,4 +4582,67 @@ fn openapi_describes_every_http_route() {
             ["schema"]["$ref"],
         "#/components/schemas/Envelope"
     );
+}
+
+// ---------------------------------------------------------------------------
+// api::hithink_routes (feature SPEC `hithink-a-share` §1.2, the route half)
+// ---------------------------------------------------------------------------
+
+/// The four `/research/hithink` verbs behind the bearer, each answering either
+/// the key-free resource or the one envelope with its own status. The stand-in
+/// base URL names a port nothing listens on, so `PUT` exercises the unreachable
+/// path rather than a service.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hithink_routes() {
+    let served = serve().await;
+    let url = format!("{}/research/hithink", served.base);
+    let ok = Some(CREDENTIAL);
+
+    // Unconfigured, and never a key field at all.
+    let (status, body) = call_get(url.clone(), ok);
+    assert_eq!(status, 200);
+    assert_eq!(
+        json(&body),
+        serde_json::json!({
+            "state": "UNCONFIGURED",
+            "a_share_feed": "YAHOO",
+            "api_key_present": false,
+            "base_url": "http://127.0.0.1:1",
+        })
+    );
+
+    // The bearer guards all four verbs.
+    expect_envelope(call_get(url.clone(), None), 401, "UNAUTHORIZED");
+    expect_envelope(call_put(url.clone(), None, "{}"), 401, "UNAUTHORIZED");
+    expect_envelope(call_patch(url.clone(), None, "{}"), 401, "UNAUTHORIZED");
+    expect_envelope(call_delete(url.clone(), None), 401, "UNAUTHORIZED");
+
+    // Body validation, then the two refusals a keyless installation can reach.
+    expect_envelope(call_put(url.clone(), ok, "{}"), 400, "VALIDATION");
+    expect_envelope(
+        call_put(url.clone(), ok, r#"{"api_key":""}"#),
+        400,
+        "VALIDATION",
+    );
+    expect_envelope(
+        call_patch(url.clone(), ok, r#"{"a_share_feed":"BLOOMBERG"}"#),
+        400,
+        "VALIDATION",
+    );
+    expect_envelope(
+        call_patch(url.clone(), ok, r#"{"a_share_feed":"HITHINK"}"#),
+        409,
+        "RESEARCH_UNCONFIGURED",
+    );
+    expect_envelope(
+        call_put(url.clone(), ok, r#"{"api_key":"whatever"}"#),
+        502,
+        "PROVIDER_UNREACHABLE",
+    );
+
+    // `DELETE` is idempotent and answers the resource.
+    let (status, body) = call_delete(url, ok);
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["state"], "UNCONFIGURED");
 }

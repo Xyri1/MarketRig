@@ -125,6 +125,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/006_r5.sql"),
     include_str!("store/007_openviking.sql"),
     include_str!("store/008_embedding_dimension.sql"),
+    include_str!("store/009_hithink.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -361,6 +362,7 @@ fn migrations_apply_and_stamp() {
             "executions",
             "fills",
             "firings",
+            "hithink_provider",
             "installation_settings",
             "memory_provider",
             "native_sessions",
@@ -1132,6 +1134,138 @@ fn openviking_migration_applies() {
         })
         .unwrap();
     assert_eq!(index, "operational_events_tail");
+}
+
+// ---------------------------------------------------------------------------
+// store::migration_9_applies (feature SPEC `hithink-a-share` §7)
+// ---------------------------------------------------------------------------
+
+/// Migration 9 (feature SPEC `hithink-a-share` §1.1, per HT-1): a fresh
+/// database carries the seeded `hithink_provider` row with its two CHECKs, the
+/// widened event vocabulary takes `HITHINK_PROVIDER_CHANGED`, and a schema-8
+/// database upgrades in place with every event row intact.
+#[cfg(test)]
+#[test]
+fn migration_9_applies() {
+    let (_dir, store) = open_temp();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        MIGRATIONS.len() as i64
+    );
+    let seeded: (i64, String, String, i64, Option<String>) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT strict FROM pragma_table_list WHERE schema = 'main' \
+                    AND name = 'hithink_provider'), \
+                 state, a_share_feed, updated_at_ns, failure_code FROM hithink_provider",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+        })
+        .expect("hithink_provider must exist");
+    assert_eq!(
+        seeded,
+        (1, "UNCONFIGURED".to_string(), "YAHOO".to_string(), 0, None)
+    );
+
+    // One row, a closed vocabulary, and no HiThink feed without a key (§1.1).
+    for sql in [
+        "INSERT INTO hithink_provider (id, state, a_share_feed, updated_at_ns) \
+         VALUES (2,'UNCONFIGURED','YAHOO',1)",
+        "UPDATE hithink_provider SET state = 'WOBBLED' WHERE id = 1",
+        "UPDATE hithink_provider SET a_share_feed = 'BLOOMBERG' WHERE id = 1",
+        "UPDATE hithink_provider SET a_share_feed = 'HITHINK' WHERE id = 1",
+        "UPDATE hithink_provider SET updated_at_ns = NULL WHERE id = 1",
+    ] {
+        assert!(
+            store.unit(move |tx| tx.execute(sql, [])).is_err(),
+            "{sql} must be rejected"
+        );
+    }
+    // A key present is what unlocks the toggle.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "UPDATE hithink_provider SET state = 'AVAILABLE', a_share_feed = 'HITHINK', \
+                 validated_at_ns = 5, updated_at_ns = 5 WHERE id = 1",
+                [],
+            )
+        })
+        .expect("AVAILABLE with HITHINK is the configured shape");
+    drop(store);
+
+    // A migration-8 database upgrades in place: the event row survives and the
+    // rebuilt vocabulary takes the new kind and still refuses an unknown one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..8] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             INSERT INTO operational_events VALUES ('e0','SESSION_STARTED','0199',1300,'{}');",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8i64).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let carried: (String, i64, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT kind FROM operational_events), \
+                 (SELECT count(*) FROM operational_events), \
+                 (SELECT state FROM hithink_provider)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        ("SESSION_STARTED".to_string(), 1, "UNCONFIGURED".to_string())
+    );
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO operational_events \
+                 VALUES ('h0','HITHINK_PROVIDER_CHANGED',NULL,2000,'{}')",
+                [],
+            )
+        })
+        .expect("HITHINK_PROVIDER_CHANGED must be accepted");
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO operational_events VALUES ('h1','HITHINK_WOBBLED',NULL,2100,'{}')",
+                [],
+            ))
+            .is_err(),
+        "an unknown kind must still be rejected"
+    );
+    let index: String = store
+        .call(|c| {
+            c.query_row(
+                "SELECT name FROM sqlite_master \
+                 WHERE type = 'index' AND tbl_name = 'operational_events' AND sql IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(index, "operational_events_tail");
+    let violations: i64 = store
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(violations, 0, "no dangling reference after the rebuild");
 }
 
 // ---------------------------------------------------------------------------

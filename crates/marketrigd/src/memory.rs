@@ -243,6 +243,24 @@ impl Memory {
         }
     }
 
+    /// Removes one secret; a secret that was never stored is already removed.
+    pub fn delete_secret(&self, account: &str) -> Result<(), MemoryError> {
+        if self.seam {
+            let path = self.credentials_path();
+            let mut map = seam_map(&path)?;
+            if map.remove(account).is_none() {
+                return Ok(());
+            }
+            return seam_write(&path, &map)
+                .map_err(|e| MemoryError::CredentialStoreUnavailable(e.to_string()));
+        }
+        match keyring_core::Entry::new(SERVICE, account).and_then(|entry| entry.delete_credential())
+        {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(e) => Err(MemoryError::CredentialStoreUnavailable(e.to_string())),
+        }
+    }
+
     /// Writes the provider key.
     pub fn store_key(&self, key: &str) -> Result<(), MemoryError> {
         self.store_secret(ACCOUNT, key)

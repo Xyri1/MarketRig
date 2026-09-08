@@ -45,6 +45,7 @@ use crate::catalog::{self, Entry, Market};
 use crate::feed::{
     self, ChartClient, FeedBase, IDLE_INTERVAL, MarketState, Phase, next_delay, phase,
 };
+use crate::hithink::AShareFeed;
 use crate::store::{Store, now_ns};
 use crate::trade;
 
@@ -647,6 +648,12 @@ impl DataClient for ChartDataClient {
         };
         let sender = get_data_event_sender();
         for entry in catalog::ENTRIES {
+            // The CN leg is one task for the whole market (feature SPEC
+            // `hithink-a-share` §2.2), because a HiThink cycle is one batched
+            // request; US and HK keep R1's task per instrument.
+            if entry.market == Market::Cn {
+                continue;
+            }
             tokio::task::spawn_local(poll(
                 entry,
                 chart.clone(),
@@ -656,6 +663,13 @@ impl DataClient for ChartDataClient {
                 self.assume_open,
             ));
         }
+        tokio::task::spawn_local(poll_cn(
+            chart,
+            Arc::clone(&self.market),
+            self.cache.clone(),
+            sender,
+            self.assume_open,
+        ));
         Ok(())
     }
 
@@ -740,6 +754,92 @@ async fn poll(
     }
 }
 
+/// The whole `CN` leg's polling loop (feature SPEC `hithink-a-share` §2.2, per
+/// HT-2): once at subscription whatever the phase, then on R1's cadence, reading
+/// the operator's `a_share_feed` at the top of every cycle so a switch takes
+/// effect on the next one with no node restart.
+///
+/// ponytail: one task and one exposure flag for the whole leg, where R1 gave
+/// each instrument its own — the tier collapses to "exposed if any `CN`
+/// instrument is exposed", because one HiThink cycle is one request for all of
+/// them. The upgrade path is a per-instrument tier map narrowing the batch.
+async fn poll_cn(
+    chart: ChartClient,
+    market: Arc<MarketState>,
+    cache: CacheView,
+    sender: UnboundedSender<DataEvent>,
+    assume_open: bool,
+) {
+    let entries: Vec<(&'static Entry, InstrumentId)> = feed::cn_entries()
+        .map(|entry| (entry, InstrumentId::from(entry.instrument_id)))
+        .collect();
+    if cn_cycle(&entries, &chart, &market, &sender).await.is_err() {
+        return;
+    }
+    loop {
+        // A HiThink stand-in lifts the calendar gate on cadence exactly as the
+        // quote stand-in does (§10.1, feature SPEC `hithink-a-share` §3).
+        let standin = assume_open || market.hithink().is_some_and(|h| h.standin);
+        let cadence_phase = match (standin, market.hithink()) {
+            (true, _) => Phase::Open,
+            (false, Some(hithink)) => hithink.cn_phase(now_ns()).0,
+            (false, None) => phase(Market::Cn, now_ns()),
+        };
+        let any_exposed = entries.iter().any(|(_, id)| exposed(&cache, id));
+        match next_delay(cadence_phase, any_exposed) {
+            Some(delay) => {
+                tokio::time::sleep(delay).await;
+                if cn_cycle(&entries, &chart, &market, &sender).await.is_err() {
+                    return;
+                }
+            }
+            None => tokio::time::sleep(IDLE_INTERVAL).await,
+        }
+    }
+}
+
+/// One `CN` cycle: HiThink's one batched request when the operator chose it and
+/// the key still holds, R1's per-instrument Yahoo poll otherwise (§2.2).
+async fn cn_cycle(
+    entries: &[(&'static Entry, InstrumentId)],
+    chart: &ChartClient,
+    market: &MarketState,
+    sender: &UnboundedSender<DataEvent>,
+) -> Result<(), ()> {
+    if let Some(hithink) = market.hithink().cloned()
+        && hithink.a_share_feed() == AShareFeed::Hithink
+    {
+        hithink.refresh_calendar_if_due(now_ns()).await;
+        // A key rejected mid-run leaves the leg degraded with its last HiThink
+        // observation standing; the daemon never switches to Yahoo on its own.
+        if !hithink.feed_ready() {
+            for (entry, _) in entries {
+                market.mark_degraded(entry.instrument_id);
+            }
+            return Ok(());
+        }
+        for (entry, last, received_at_ns) in feed::poll_hithink(&hithink, market).await {
+            let tick = synthesized(
+                entry,
+                InstrumentId::from(entry.instrument_id),
+                &last,
+                // The batched reply carries no source time, so the event stamp
+                // is receipt (feature SPEC `hithink-a-share` §2.3).
+                received_at_ns,
+                received_at_ns,
+            );
+            sender
+                .send(DataEvent::Data(Data::Quote(tick)))
+                .map_err(|_| ())?;
+        }
+        return Ok(());
+    }
+    for (entry, instrument_id) in entries {
+        poll_once(entry, *instrument_id, chart, market, sender).await?;
+    }
+    Ok(())
+}
+
 /// One poll. `Err` means the node is gone and the task should end; a feed failure
 /// is not an error here, it is degraded health (§2.1).
 async fn poll_once(
@@ -753,7 +853,14 @@ async fn poll_once(
         Ok(quote) => {
             let received_at_ns = now_ns();
             market.accept(entry, &quote, received_at_ns);
-            let tick = synthesized(entry, instrument_id, &quote, received_at_ns);
+            let last = feed::at_precision(quote.price, entry.price_increment);
+            let tick = synthesized(
+                entry,
+                instrument_id,
+                &last,
+                quote.source_time_ns,
+                received_at_ns,
+            );
             sender
                 .send(DataEvent::Data(Data::Quote(tick)))
                 .map_err(|_| ())
@@ -773,10 +880,11 @@ async fn poll_once(
 fn synthesized(
     entry: &Entry,
     instrument_id: InstrumentId,
-    quote: &feed::ChartQuote,
+    last: &str,
+    ts_event_ns: i64,
     received_at_ns: i64,
 ) -> QuoteTick {
-    let last = Price::from(feed::at_precision(quote.price, entry.price_increment));
+    let last = Price::from(last);
     let lot = Quantity::from(entry.lot_size);
     QuoteTick::new(
         instrument_id,
@@ -784,7 +892,7 @@ fn synthesized(
         last,
         lot,
         lot,
-        UnixNanos::from(quote.source_time_ns.max(0) as u64),
+        UnixNanos::from(ts_event_ns.max(0) as u64),
         UnixNanos::from(received_at_ns.max(0) as u64),
     )
 }
@@ -873,7 +981,7 @@ fn sender_on_node_thread() {
 
     // A local server speaking the chart shape; every instrument's first poll is
     // answered from it, so nothing ever reaches the public endpoint.
-    let (base, hits) = feed::scripted_server(vec![(
+    let (base, hits, _) = feed::scripted_server(vec![(
         200,
         feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);

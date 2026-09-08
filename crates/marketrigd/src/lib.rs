@@ -8,6 +8,7 @@ pub mod dispatch;
 pub mod events;
 pub mod exec;
 pub mod feed;
+pub mod hithink;
 pub mod log;
 pub mod memory;
 pub mod node;
@@ -96,9 +97,15 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
         .take()
         .ok_or_else(|| std::io::Error::other("the listener was already taken"))?;
     std_listener.set_nonblocking(true)?;
+    // The installation's HiThink provider (feature SPEC `hithink-a-share` §1.1):
+    // the row and the key are read once here, and the market state carries it so
+    // every desk's CN poller and every read see the same one.
+    let hithink = hithink::Hithink::new(startup.store.clone(), memory.clone());
+    let market = Arc::new(feed::MarketState::new());
+    market.attach(hithink.clone());
     let registry = Arc::new(node::Registry::new(
         startup.store.clone(),
-        Arc::new(feed::MarketState::new()),
+        market,
         feed_base,
     ));
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -185,6 +192,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             dispatch: dispatcher.clone(),
             memory: memory.clone(),
             openviking: openviking.clone(),
+            hithink,
             events,
         });
         // The OpenViking child starts here — after recovery, before the listener

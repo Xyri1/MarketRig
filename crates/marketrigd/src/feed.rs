@@ -297,9 +297,11 @@ pub enum Health {
     Unavailable,
 }
 
-/// The one provider behind every observation (§2.3); no read ever substitutes
-/// another (root §12.2).
+/// The two providers an observation can name (§2.3, feature SPEC
+/// `hithink-a-share` §2.3): the one that produced it, never a substitute
+/// (root §12.2).
 const PROVIDER: &str = "yahoo";
+pub const PROVIDER_HITHINK: &str = "hithink";
 
 /// What a read yields, per instrument (§2.3). Serialized field-for-field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -311,8 +313,11 @@ pub struct Observation {
     pub last: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
+    /// Omitted while nothing was ever observed, and serialized `null` on a
+    /// HiThink observation, whose batched reply documents no source time
+    /// (feature SPEC `hithink-a-share` §2.3).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_time_ns: Option<i64>,
+    pub source_time_ns: Option<Option<i64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_at_ns: Option<i64>,
     pub read_at_ns: i64,
@@ -320,6 +325,10 @@ pub struct Observation {
     pub age_ms: Option<i64>,
     pub sequence: u64,
     pub market_phase: Phase,
+    /// Which calendar rule labeled `market_phase` (feature SPEC
+    /// `hithink-a-share` §3): `WEEKDAY` everywhere but a `CN` instrument on a
+    /// fetched HiThink trading-day list.
+    pub calendar: crate::hithink::Calendar,
     pub health: Health,
     pub book_synthesized: bool,
 }
@@ -363,7 +372,15 @@ impl BookTop {
 struct Accepted {
     last: String,
     currency: String,
-    source_time_ns: i64,
+    /// The provider that produced it (§2.3, feature SPEC `hithink-a-share` §2.3).
+    provider: &'static str,
+    /// `None` on a HiThink observation: the batched snapshot carries no
+    /// timestamp, so age counts from receipt.
+    source_time_ns: Option<i64>,
+    /// HiThink's change-detection triple, beside `last`: the raw JSON number
+    /// text of `volume` and `turnover`, empty on a Yahoo observation.
+    volume: String,
+    turnover: String,
     received_at_ns: i64,
     sequence: u64,
 }
@@ -386,6 +403,14 @@ struct Slot {
 #[derive(Debug, Default)]
 pub struct MarketState {
     slots: Mutex<HashMap<&'static str, Slot>>,
+    /// The installation's HiThink provider, attached by the daemon at startup —
+    /// it is what labels a `CN` read's phase and calendar, and what the `CN`
+    /// poller reads each cycle (feature SPEC `hithink-a-share` §2.2, §3).
+    ///
+    /// ponytail: a `OnceLock` rather than a constructor argument, so the dozen
+    /// module checks that build a bare `MarketState` keep building one; a
+    /// daemon attaches exactly once, before any node starts.
+    hithink: std::sync::OnceLock<std::sync::Arc<crate::hithink::Hithink>>,
 }
 
 impl MarketState {
@@ -393,9 +418,20 @@ impl MarketState {
         MarketState::default()
     }
 
+    /// Attaches the installation's HiThink provider. Called once, at startup.
+    pub fn attach(&self, hithink: std::sync::Arc<crate::hithink::Hithink>) {
+        let _ = self.hithink.set(hithink);
+    }
+
+    pub fn hithink(&self) -> Option<&std::sync::Arc<crate::hithink::Hithink>> {
+        self.hithink.get()
+    }
+
     /// Records a successful poll (§2.1). A source timestamp that advances
     /// replaces the observation and bumps the sequence; one that does not
-    /// replaces nothing but still refreshes health to `LIVE`.
+    /// replaces nothing but still refreshes health to `LIVE`. An observation
+    /// with no source time at all — HiThink's — always advances, which is what
+    /// makes a provider switch visible on the next read.
     pub fn accept(&self, entry: &Entry, quote: &ChartQuote, received_at_ns: i64) {
         let mut slots = self.lock();
         let slot = slots.entry(entry.instrument_id).or_default();
@@ -403,17 +439,60 @@ impl MarketState {
         let advances = slot
             .observed
             .as_ref()
-            .is_none_or(|o| quote.source_time_ns > o.source_time_ns);
+            .is_none_or(|o| o.source_time_ns.is_none_or(|at| quote.source_time_ns > at));
         if advances {
             let sequence = slot.observed.as_ref().map_or(0, |o| o.sequence) + 1;
             slot.observed = Some(Accepted {
                 last: at_precision(quote.price, entry.price_increment),
                 currency: quote.currency.clone(),
-                source_time_ns: quote.source_time_ns,
+                provider: PROVIDER,
+                source_time_ns: Some(quote.source_time_ns),
+                volume: String::new(),
+                turnover: String::new(),
                 received_at_ns,
                 sequence,
             });
         }
+    }
+
+    /// Records one item of a HiThink snapshot (feature SPEC `hithink-a-share`
+    /// §2.2). The batched reply carries no timestamp, so "did the market move"
+    /// is the `(last_price, volume, turnover)` triple: an unchanged triple
+    /// refreshes health alone, a changed one replaces the observation and
+    /// advances the sequence. Returns the accepted price text, so the caller
+    /// can publish its tick.
+    pub fn accept_hithink(
+        &self,
+        entry: &Entry,
+        price: Decimal,
+        volume: &str,
+        turnover: &str,
+        received_at_ns: i64,
+    ) -> Option<String> {
+        let last = at_precision(price, entry.price_increment);
+        let mut slots = self.lock();
+        let slot = slots.entry(entry.instrument_id).or_default();
+        slot.degraded = false;
+        if slot.observed.as_ref().is_some_and(|o| {
+            o.provider == PROVIDER_HITHINK
+                && o.last == last
+                && o.volume == volume
+                && o.turnover == turnover
+        }) {
+            return None;
+        }
+        let sequence = slot.observed.as_ref().map_or(0, |o| o.sequence) + 1;
+        slot.observed = Some(Accepted {
+            last: last.clone(),
+            currency: entry.currency.to_owned(),
+            provider: PROVIDER_HITHINK,
+            source_time_ns: None,
+            volume: volume.to_owned(),
+            turnover: turnover.to_owned(),
+            received_at_ns,
+            sequence,
+        });
+        Some(last)
     }
 
     /// Records a failed poll (§2.1): the last accepted observation stands and
@@ -425,12 +504,14 @@ impl MarketState {
     /// The §2.3 read for one instrument. Reads never mutate — the sequence
     /// advances on accepted updates alone (root §12.2).
     pub fn read(&self, entry: &Entry, read_at_ns: i64) -> Observation {
+        // Outside the slot lock: the HiThink provider takes its own.
+        let (market_phase, calendar) = self.phase_of(entry, read_at_ns);
         let slots = self.lock();
         let slot = slots.get(entry.instrument_id);
         let observed = slot.and_then(|s| s.observed.as_ref());
         Observation {
             instrument_id: entry.instrument_id,
-            provider: PROVIDER,
+            provider: observed.map_or(PROVIDER, |o| o.provider),
             venue: venue_of(entry.instrument_id),
             last: observed.map(|o| o.last.clone()),
             currency: observed.map(|o| o.currency.clone()),
@@ -439,13 +520,27 @@ impl MarketState {
             read_at_ns,
             age_ms: observed.map(|o| (read_at_ns - o.received_at_ns).max(0) / 1_000_000),
             sequence: observed.map_or(0, |o| o.sequence),
-            market_phase: phase(entry.market, read_at_ns),
+            market_phase,
+            calendar,
             health: match (observed, slot.is_some_and(|s| s.degraded)) {
                 (None, _) => Health::Unavailable,
                 (Some(_), true) => Health::Degraded,
                 (Some(_), false) => Health::Live,
             },
             book_synthesized: true,
+        }
+    }
+
+    /// The phase and the rule that labeled it (feature SPEC `hithink-a-share`
+    /// §3): a `CN` instrument asks the HiThink provider, everything else is
+    /// R1's weekday rule.
+    fn phase_of(&self, entry: &Entry, at_ns: i64) -> (Phase, crate::hithink::Calendar) {
+        match (entry.market, self.hithink()) {
+            (Market::Cn, Some(hithink)) => hithink.cn_phase(at_ns),
+            _ => (
+                phase(entry.market, at_ns),
+                crate::hithink::Calendar::Weekday,
+            ),
         }
     }
 
@@ -488,6 +583,91 @@ pub(crate) fn at_precision(price: Decimal, price_increment: &str) -> String {
     let mut price = price;
     price.rescale(tick.scale());
     price.to_string()
+}
+
+/// The `CN` catalog entries, which are exactly the ones HiThink serves
+/// (feature SPEC `hithink-a-share` §2.1).
+pub fn cn_entries() -> impl Iterator<Item = &'static Entry> {
+    crate::catalog::ENTRIES
+        .iter()
+        .filter(|e| e.market == Market::Cn)
+}
+
+/// One HiThink poll cycle for the whole `CN` leg (feature SPEC
+/// `hithink-a-share` §2.2, per HT-2): one batched snapshot naming every `CN`
+/// thscode, then one accept per item. Returns the instruments whose observation
+/// advanced, with their accepted price text and receipt instant, so the caller
+/// can publish their ticks; an instrument missing from the reply, and every
+/// instrument on a failure, is `DEGRADED` with its last observation standing.
+pub async fn poll_hithink(
+    hithink: &crate::hithink::Hithink,
+    market: &MarketState,
+) -> Vec<(&'static Entry, String, i64)> {
+    let entries: Vec<&'static Entry> = cn_entries().collect();
+    let codes = entries
+        .iter()
+        .filter_map(|e| e.hithink_symbol)
+        .collect::<Vec<_>>()
+        .join(",");
+    let degrade_all = || {
+        for entry in &entries {
+            market.mark_degraded(entry.instrument_id);
+        }
+    };
+    let answer = match hithink
+        .request(crate::hithink::SNAPSHOT_PATH, &format!("thscodes={codes}"))
+        .await
+    {
+        Ok(answer) if answer.code == 0 => answer,
+        Ok(answer) => {
+            tracing::warn!(code = answer.code, "the HiThink snapshot was refused");
+            degrade_all();
+            return Vec::new();
+        }
+        Err(e) => {
+            tracing::warn!("the HiThink snapshot did not arrive: {e}");
+            degrade_all();
+            return Vec::new();
+        }
+    };
+    let Ok(body) = serde_json::from_slice::<serde_json::Value>(&answer.bytes) else {
+        degrade_all();
+        return Vec::new();
+    };
+    let items = body["data"]["item"].as_array().cloned().unwrap_or_default();
+    let received_at_ns = crate::store::now_ns();
+    let mut accepted = Vec::new();
+    for entry in entries {
+        let item = items
+            .iter()
+            .find(|item| item.get("thscode").and_then(|c| c.as_str()) == entry.hithink_symbol);
+        // A JSON number's own text is what becomes the decimal, never an `f64`.
+        let text = |item: &serde_json::Value, field: &str| {
+            item.get(field)
+                .and_then(|v| v.as_number().map(|n| n.to_string()))
+        };
+        let parsed = item.and_then(|item| {
+            let price: Decimal = text(item, "last_price")?.parse().ok()?;
+            Some((price, text(item, "volume")?, text(item, "turnover")?))
+        });
+        match parsed {
+            Some((price, volume, turnover)) => {
+                if let Some(last) =
+                    market.accept_hithink(entry, price, &volume, &turnover, received_at_ns)
+                {
+                    accepted.push((entry, last, received_at_ns));
+                }
+            }
+            None => {
+                tracing::warn!(
+                    instrument_id = entry.instrument_id,
+                    "the HiThink snapshot carried no usable item"
+                );
+                market.mark_degraded(entry.instrument_id);
+            }
+        }
+    }
+    accepted
 }
 
 /// The instant of a wall-clock time in one of the calendar zones.
@@ -550,18 +730,26 @@ fn phase_from_calendar() {
 }
 
 /// A local HTTP server answering a scripted list of `(status, body)` replies in
-/// order (the last one repeating), counting what it served. Small enough to keep
-/// the retry check honest about the wire without an HTTP framework in the test.
+/// order (the last one repeating), counting what it served and recording each
+/// request line (`GET /path?query`). Small enough to keep the retry and batching
+/// checks honest about the wire without an HTTP framework in the test.
 #[cfg(test)]
+#[allow(clippy::type_complexity)]
 pub(crate) fn scripted_server(
     replies: Vec<(u16, String)>,
-) -> (String, std::sync::Arc<AtomicUsize>) {
+) -> (
+    String,
+    std::sync::Arc<AtomicUsize>,
+    std::sync::Arc<Mutex<Vec<String>>>,
+) {
     use std::io::{BufRead, BufReader, Write};
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let hits = std::sync::Arc::new(AtomicUsize::new(0));
     let served = std::sync::Arc::clone(&hits);
+    let requests = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&requests);
     // Detached: a script the client abandons early leaves this thread parked in
     // accept() until the test binary exits, which is what we want.
     std::thread::spawn(move || {
@@ -569,12 +757,24 @@ pub(crate) fn scripted_server(
             let Ok(mut stream) = stream else { return };
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut line = String::new();
+            let mut first = String::new();
             loop {
                 line.clear();
                 match reader.read_line(&mut line) {
                     Ok(0) | Err(_) => break,
                     Ok(_) if line == "\r\n" => break,
-                    Ok(_) => {}
+                    Ok(_) => {
+                        if first.is_empty() {
+                            // `GET /path?query HTTP/1.1` without the version.
+                            first = line
+                                .trim_end()
+                                .rsplit_once(' ')
+                                .map_or(line.trim_end().to_owned(), |(head, _)| head.to_owned());
+                            seen.lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(first.clone());
+                        }
+                    }
                 }
             }
             let (status, body) = replies
@@ -598,7 +798,7 @@ pub(crate) fn scripted_server(
             );
         }
     });
-    (base, hits)
+    (base, hits, requests)
 }
 
 /// The chart-endpoint body shape, trimmed to what [`ChartEnvelope`] reads.
@@ -623,7 +823,7 @@ async fn retry_on_429_bounded() {
     // Seven 429s then a 200: accepted on the eighth — the bound's last attempt.
     let mut script = vec![(429, String::new()); 7];
     script.push((200, chart_body("AAPL", "USD", "316.85", 1_788_206_401)));
-    let (base, hits) = scripted_server(script);
+    let (base, hits, _) = scripted_server(script);
     let quote = ChartClient::new(base)
         .unwrap()
         .fetch(entry.yahoo_symbol)
@@ -638,7 +838,7 @@ async fn retry_on_429_bounded() {
     assert_eq!(read.last.as_deref(), Some("316.85"));
 
     // Nine straight 429s: the client stops at eight, the observation stands.
-    let (base, hits) = scripted_server(vec![(429, String::new()); 9]);
+    let (base, hits, _) = scripted_server(vec![(429, String::new()); 9]);
     let started = std::time::Instant::now();
     let error = ChartClient::new(base)
         .unwrap()
@@ -754,8 +954,8 @@ fn observation_provenance() {
             "last": "441.40", "currency": "HKD",
             "source_time_ns": source_s * 1_000_000_000,
             "received_at_ns": received, "read_at_ns": read_at, "age_ms": 1_500,
-            "sequence": 1, "market_phase": "OPEN", "health": "LIVE",
-            "book_synthesized": true,
+            "sequence": 1, "market_phase": "OPEN", "calendar": "WEEKDAY",
+            "health": "LIVE", "book_synthesized": true,
         })
     );
 
@@ -798,6 +998,350 @@ fn observation_provenance() {
     );
     assert_eq!(state.read(aapl, 2).last.as_deref(), Some("321.24"));
     assert_eq!(state.read_all(2).len(), crate::catalog::ENTRIES.len());
+
+    // A HiThink observation names its own provider and carries `source_time_ns`
+    // as an explicit `null`, because the batched snapshot has none — age counts
+    // from receipt (feature SPEC `hithink-a-share` §2.3). With no provider
+    // attached the calendar is still R1's weekday rule.
+    let cn = crate::catalog::find("600519.XSHG").unwrap();
+    let received = at(Tz::Asia__Shanghai, 2026, 3, 4, 10, 0, 0);
+    state.accept_hithink(cn, "1688.5".parse().unwrap(), "12", "34", received);
+    let value = serde_json::to_value(state.read(cn, received + 2_000_000_000)).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "instrument_id": "600519.XSHG", "provider": "hithink", "venue": "XSHG",
+            "last": "1688.50", "currency": "CNY",
+            "source_time_ns": serde_json::Value::Null,
+            "received_at_ns": received, "read_at_ns": received + 2_000_000_000,
+            "age_ms": 2_000, "sequence": 1, "market_phase": "OPEN",
+            "calendar": "WEEKDAY", "health": "LIVE", "book_synthesized": true,
+        })
+    );
+}
+
+// ---------------------------------------------------------------------------
+// feed::hithink_* and feed::cn_phase_from_trading_days
+// (feature SPEC `hithink-a-share` §7)
+// ---------------------------------------------------------------------------
+
+/// The snapshot body shape, trimmed to what [`poll_hithink`] reads: `timestamp`
+/// is documented `null` in thscodes mode (feature SPEC `hithink-a-share` §2.2).
+#[cfg(test)]
+fn snapshot_body(items: &[(&str, &str, &str, &str)]) -> String {
+    let item = items
+        .iter()
+        .map(|(thscode, last, volume, turnover)| {
+            format!(
+                r#"{{"thscode":"{thscode}","ticker":"{thscode}","last_price":{last},
+                 "volume":{volume},"turnover":{turnover}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::hithink::provider::envelope(
+        0,
+        &format!(
+            r#"{{"timestamp":null,"total":{},"item":[{item}]}}"#,
+            items.len()
+        ),
+    )
+}
+
+/// The whole `CN` leg's snapshot, at one price each.
+#[cfg(test)]
+fn every_cn(last: &str) -> String {
+    let items: Vec<(&str, &str, &str, &str)> = cn_entries()
+        .map(|e| (e.hithink_symbol.unwrap(), last, "1200", "3400"))
+        .collect();
+    snapshot_body(&items)
+}
+
+/// A stand-in HiThink whose key is already validated and stored, so the leg is
+/// `AVAILABLE` with `a_share_feed: HITHINK`. Consumes the script's first reply.
+#[cfg(test)]
+async fn configured(base: &str) -> (tempfile::TempDir, std::sync::Arc<crate::hithink::Hithink>) {
+    let (dir, hithink) = crate::hithink::provider::scratch(base);
+    hithink.put("hithink-fake-key-0123456789").await.unwrap();
+    (dir, hithink)
+}
+
+/// A `MarketState` with that provider attached, as the daemon wires it.
+#[cfg(test)]
+fn attached(hithink: &std::sync::Arc<crate::hithink::Hithink>) -> MarketState {
+    let state = MarketState::new();
+    state.attach(std::sync::Arc::clone(hithink));
+    state
+}
+
+#[cfg(test)]
+#[test]
+fn hithink_change_detection() {
+    let entry = crate::catalog::find("600519.XSHG").unwrap();
+    let state = MarketState::new();
+    let price: Decimal = "1688.5".parse().unwrap();
+
+    // The first item is an observation; the same triple again is health alone.
+    assert_eq!(
+        state.accept_hithink(entry, price, "1200", "3400", 1_000),
+        Some("1688.50".to_string())
+    );
+    assert_eq!(state.read(entry, 1_000).sequence, 1);
+    state.mark_degraded(entry.instrument_id);
+    assert_eq!(state.read(entry, 1_000).health, Health::Degraded);
+    assert_eq!(
+        state.accept_hithink(entry, price, "1200", "3400", 2_000),
+        None,
+        "an unchanged triple replaces nothing"
+    );
+    let read = state.read(entry, 2_000);
+    assert_eq!(read.health, Health::Live, "but it does refresh health");
+    assert_eq!(read.sequence, 1, "and never advances the sequence");
+    assert_eq!(read.received_at_ns, Some(1_000), "nor the receipt");
+
+    // Any leg of the triple moving is a new observation.
+    assert!(
+        state
+            .accept_hithink(entry, price, "1300", "3400", 3_000)
+            .is_some(),
+        "volume moved"
+    );
+    assert_eq!(state.read(entry, 3_000).sequence, 2);
+    assert!(
+        state
+            .accept_hithink(entry, price, "1300", "3500", 4_000)
+            .is_some(),
+        "turnover moved"
+    );
+    assert!(
+        state
+            .accept_hithink(entry, "1689.0".parse().unwrap(), "1300", "3500", 5_000)
+            .is_some(),
+        "the price moved"
+    );
+    let read = state.read(entry, 5_000);
+    assert_eq!(read.sequence, 4);
+    assert_eq!(read.last.as_deref(), Some("1689.00"));
+    assert_eq!(
+        read.source_time_ns,
+        Some(None),
+        "and still carries no source time"
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn hithink_batches_one_request() {
+    let (base, _hits, seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, every_cn("1688.5")),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+
+    let accepted = poll_hithink(&hithink, &market).await;
+    assert_eq!(accepted.len(), 5, "every CN instrument advanced");
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "validation, then one snapshot for the whole leg: {requests:?}"
+    );
+    let codes: Vec<&'static str> = cn_entries().map(|e| e.hithink_symbol.unwrap()).collect();
+    assert_eq!(
+        requests[1],
+        format!(
+            "GET /api/a-share/prices/snapshot?thscodes={}",
+            codes.join(",")
+        ),
+        "one request naming every CN thscode"
+    );
+    for entry in cn_entries() {
+        let read = market.read(entry, 1);
+        assert_eq!(read.health, Health::Live, "{}", entry.instrument_id);
+        assert_eq!(read.provider, "hithink");
+        assert_eq!(read.last.as_deref(), Some("1688.50"));
+    }
+    // US and HK are untouched by the CN leg.
+    let aapl = crate::catalog::find("AAPL.XNAS").unwrap();
+    assert_eq!(market.read(aapl, 1).health, Health::Unavailable);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn a_share_feed_switch() {
+    let (base, _hits, _seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, every_cn("1688.5")),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+    let entry = crate::catalog::find("600519.XSHG").unwrap();
+
+    // One Yahoo observation, as R1 ships it.
+    let yahoo = |price: &str, at_s: i64| ChartQuote {
+        price: price.parse().unwrap(),
+        currency: "CNY".to_owned(),
+        source_time_ns: at_s * 1_000_000_000,
+    };
+    market.accept(entry, &yahoo("1680.0", 1_000), 1_000_000_000);
+    let read = market.read(entry, 1_000_000_000);
+    assert_eq!((read.provider, read.sequence), ("yahoo", 1));
+
+    // The operator flips the toggle: the very next cycle names the other
+    // provider, on the same node, with the sequence continuing (§2.2).
+    assert_eq!(hithink.a_share_feed(), crate::hithink::AShareFeed::Hithink);
+    poll_hithink(&hithink, &market).await;
+    let read = market.read(entry, 2_000_000_000);
+    assert_eq!((read.provider, read.sequence), ("hithink", 2));
+    assert_eq!(read.source_time_ns, Some(None));
+
+    // And back: a Yahoo poll after a HiThink one advances again, because a
+    // HiThink observation carries no source time to compare against.
+    hithink.patch(crate::hithink::AShareFeed::Yahoo).unwrap();
+    market.accept(entry, &yahoo("1681.0", 1_001), 3_000_000_000);
+    let read = market.read(entry, 3_000_000_000);
+    assert_eq!((read.provider, read.sequence), ("yahoo", 3));
+    assert_eq!(read.last.as_deref(), Some("1681.00"));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn hithink_retry_bound() {
+    let rate_limited = crate::hithink::provider::envelope(4001, "null");
+    let (base, _hits, seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, rate_limited.clone()),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+
+    // `4001`: three attempts, and then the leg is degraded rather than fed a
+    // substituted price (§2.2).
+    let started = std::time::Instant::now();
+    assert!(poll_hithink(&hithink, &market).await.is_empty());
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1 + crate::hithink::ATTEMPTS as usize,
+        "validation plus the bounded retry"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_500),
+        "three attempts are 500 ms then 1 s apart"
+    );
+    for entry in cn_entries() {
+        assert_eq!(market.read(entry, 1).health, Health::Unavailable);
+    }
+
+    // `1001` is a HiThink `1xxx`: answered once, never retried.
+    let (base, _hits, seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, crate::hithink::provider::envelope(1001, "null")),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+    assert!(poll_hithink(&hithink, &market).await.is_empty());
+    assert_eq!(seen.lock().unwrap().len(), 2, "one attempt on a 1xxx");
+
+    // `2003` is answered once too, and it flips the row with exactly one event.
+    let (base, _hits, seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, crate::hithink::provider::envelope(2003, "null")),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+    assert!(poll_hithink(&hithink, &market).await.is_empty());
+    assert_eq!(seen.lock().unwrap().len(), 2, "one attempt on a 2xxx");
+    let row = hithink.provider().unwrap();
+    assert_eq!(row.state, "UNAVAILABLE");
+    assert_eq!(row.failure_code.as_deref(), Some("KEY_REJECTED"));
+    assert_eq!(
+        row.a_share_feed,
+        crate::hithink::AShareFeed::Hithink,
+        "the daemon never switches the feed on its own"
+    );
+    assert!(!hithink.feed_ready(), "and no further request is issued");
+    assert_eq!(
+        crate::hithink::provider::events(hithink.store()).len(),
+        2,
+        "the PUT and the rejection"
+    );
+    // A second rejection while already unavailable writes nothing.
+    poll_hithink(&hithink, &market).await;
+    assert_eq!(crate::hithink::provider::events(hithink.store()).len(), 2);
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn cn_phase_from_trading_days() {
+    let sh = Tz::Asia__Shanghai;
+    let wednesday = at(sh, 2026, 3, 4, 10, 0, 0);
+    let thursday = at(sh, 2026, 3, 5, 10, 0, 0);
+    let days = |dates: &[&str]| {
+        let item = dates
+            .iter()
+            .map(|d| format!(r#"{{"date_ms":0,"date":"{d}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        crate::hithink::provider::envelope(0, &format!(r#"{{"timestamp":0,"item":[{item}]}}"#))
+    };
+    let (base, _hits, seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, days(&["20260304", "20260305"])),
+        (200, days(&["20260306"])),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+
+    // Before any list: R1's weekday rule, named as such (§3).
+    assert_eq!(
+        hithink.cn_phase(wednesday),
+        (Phase::Open, crate::hithink::Calendar::Weekday)
+    );
+
+    // The first CN cycle fetches it; a date on the list is OPEN under HITHINK.
+    hithink.refresh_calendar_if_due(wednesday).await;
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    assert_eq!(
+        seen.lock().unwrap()[1],
+        "GET /api/a-share/calendar/trading-days"
+    );
+    assert_eq!(
+        hithink.cn_phase(wednesday),
+        (Phase::Open, crate::hithink::Calendar::Hithink)
+    );
+    // Same Shanghai day: nothing is fetched again.
+    hithink
+        .refresh_calendar_if_due(wednesday + 3_600_000_000_000)
+        .await;
+    assert_eq!(seen.lock().unwrap().len(), 2, "one fetch per Shanghai day");
+
+    // Past Shanghai midnight it refreshes, and a session hour on a date the new
+    // list does not carry is CLOSED — still named HITHINK.
+    hithink.refresh_calendar_if_due(thursday).await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "the next Shanghai day refetches"
+    );
+    assert_eq!(
+        hithink.cn_phase(thursday),
+        (Phase::Closed, crate::hithink::Calendar::Hithink)
+    );
+
+    // Under Yahoo no list applies at all, whatever was fetched (§3).
+    hithink.patch(crate::hithink::AShareFeed::Yahoo).unwrap();
+    assert_eq!(
+        hithink.cn_phase(thursday),
+        (Phase::Open, crate::hithink::Calendar::Weekday)
+    );
+    hithink
+        .refresh_calendar_if_due(at(sh, 2026, 3, 6, 10, 0, 0))
+        .await;
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        3,
+        "and nothing is fetched under it"
+    );
 }
 
 #[cfg(test)]

@@ -43,11 +43,11 @@ market, currency, price_increment, lot_size   unchanged
 
 ### 2.2 Client behavior
 
-One `hithink` `DataClient` per node beside the Yahoo client; both are always registered. Each cycle the `CN` poller reads `a_share_feed` and hands the due `CN` instruments to the Yahoo client (R1 SPEC §2.1, unchanged) when `YAHOO`, or to the `hithink` client when `HITHINK`; a switch is visible on the next observation's `provider` and never resets the sequence. Under `HITHINK`, per cycle:
+One `DataClient` per node, as R1 ships it. Its `CN` poll task is one task for the whole `CN` leg and reads `a_share_feed` at the top of every cycle: the due instruments go through the Yahoo chart client (R1 SPEC §2.1, unchanged) when `YAHOO` and through HiThink's batched snapshot when `HITHINK`; a switch is visible on the next observation's `provider` and never resets the sequence. Because one HiThink cycle is one request for the whole leg, R1's two tiers apply to the leg rather than to each instrument: the leg is exposed when any `CN` instrument is (per HT-2's second `ponytail`). Under `HITHINK`, per cycle:
 
-1. collect every `CN` instrument whose tier is due (R1's 30 s / 10 s tiers; once at subscription whatever the phase);
+1. take the whole `CN` leg (R1's 30 s / 10 s tiers; once at subscription whatever the phase);
 2. issue one `GET {base}/api/a-share/prices/snapshot?thscodes=<comma list>` with `X-api-key`;
-3. retry on `4001`, `5001`–`5003`, HTTP 429 or 5xx, and transport errors: 3 attempts, backoff 500 ms, 1 s, 2 s; never on `1xxx`/`2xxx`; `2003` also sets §1.2's `UNAVAILABLE`;
+3. retry on `4001`, `5001`–`5003`, HTTP 429 or 5xx, and transport errors: 3 attempts, backoff 500 ms then 1 s; never on `1xxx`/`2xxx`; `2003` also sets §1.2's `UNAVAILABLE`;
 4. for each `item`: parse `last_price` to decimal text at the instrument's precision; if `(last_price, volume, turnover)` equals the last accepted triple, refresh health only; otherwise accept an observation with `source_time_ns: null`, `received_at_ns` now, sequence advanced;
 5. an instrument absent from the reply is a failure for that instrument alone (`DEGRADED`, last observation standing);
 6. exhaustion or any other failure: every instrument in the batch `DEGRADED`.
@@ -146,7 +146,7 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 - `provider::seam_only_with_data_root` — `MARKETRIG_TEST_HITHINK_URL` inert without the data root.
 - `provider::key_never_answered` — every route answer and event payload is key-free.
 - `catalog::entries_valid` — the §2.1 additions.
-- `feed::hithink_batches_one_request` — n due `CN` instruments → one request naming all n.
+- `feed::hithink_batches_one_request` — one cycle over the n `CN` instruments → one request naming all n.
 - `feed::a_share_feed_switch` — flipping the setting between cycles changes the next observation's `provider` without a node restart or a sequence reset.
 - `provider::toggle_requires_key` — `PATCH` refused `RESEARCH_UNCONFIGURED` without a key; `DELETE` forces `YAHOO`.
 - `feed::hithink_retry_bound` — 3 attempts on `4001`, none on `1001`/`2003`; `2003` flips the provider row.

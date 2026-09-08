@@ -5,6 +5,13 @@ export type ClientOptions = {
 };
 
 /**
+ * Which client serves the `CN` catalog entries (§1.1). The operator's choice,
+ * never the daemon's: a rejected key degrades the leg, it never substitutes
+ * Yahoo (root §12.2).
+ */
+export type AShareFeed = 'YAHOO' | 'HITHINK';
+
+/**
  * The `trading_actions` row as the routes return it (§7).
  */
 export type ActionRecord = {
@@ -100,6 +107,24 @@ export type Envelope = {
      * One English sentence.
      */
     message: string;
+};
+
+/**
+ * The `hithink_provider` row as the routes answer it — never a key (§1.2).
+ * Named `HithinkProvider` in the OpenAPI document, because the memory
+ * provider's own resource already holds `Provider` there (R5 §6.1).
+ */
+export type HithinkProvider = {
+    a_share_feed: AShareFeed;
+    api_key_present: boolean;
+    /**
+     * The compiled-in or seam value, never operator-set (§1.2).
+     */
+    base_url: string;
+    failure_code?: string | null;
+    failure_message?: string | null;
+    state: string;
+    validated_at_ns?: number | null;
 };
 
 /**
@@ -1158,6 +1183,89 @@ export type QuitError = QuitErrors[keyof QuitErrors];
 export type QuitResponses = {
     202: unknown;
 };
+
+export type HithinkDeleteData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/research/hithink';
+};
+
+export type HithinkDeleteErrors = {
+    401: Envelope;
+    503: Envelope;
+};
+
+export type HithinkDeleteError = HithinkDeleteErrors[keyof HithinkDeleteErrors];
+
+export type HithinkDeleteResponses = {
+    200: HithinkProvider;
+};
+
+export type HithinkDeleteResponse = HithinkDeleteResponses[keyof HithinkDeleteResponses];
+
+export type HithinkProviderData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/research/hithink';
+};
+
+export type HithinkProviderErrors = {
+    401: Envelope;
+    500: Envelope;
+};
+
+export type HithinkProviderError = HithinkProviderErrors[keyof HithinkProviderErrors];
+
+export type HithinkProviderResponses = {
+    200: HithinkProvider;
+};
+
+export type HithinkProviderResponse = HithinkProviderResponses[keyof HithinkProviderResponses];
+
+export type HithinkPatchData = {
+    body: unknown;
+    path?: never;
+    query?: never;
+    url: '/research/hithink';
+};
+
+export type HithinkPatchErrors = {
+    400: Envelope;
+    401: Envelope;
+    409: Envelope;
+};
+
+export type HithinkPatchError = HithinkPatchErrors[keyof HithinkPatchErrors];
+
+export type HithinkPatchResponses = {
+    200: HithinkProvider;
+};
+
+export type HithinkPatchResponse = HithinkPatchResponses[keyof HithinkPatchResponses];
+
+export type HithinkPutData = {
+    body: unknown;
+    path?: never;
+    query?: never;
+    url: '/research/hithink';
+};
+
+export type HithinkPutErrors = {
+    400: Envelope;
+    401: Envelope;
+    502: Envelope;
+    503: Envelope;
+};
+
+export type HithinkPutError = HithinkPutErrors[keyof HithinkPutErrors];
+
+export type HithinkPutResponses = {
+    200: HithinkProvider;
+};
+
+export type HithinkPutResponse = HithinkPutResponses[keyof HithinkPutResponses];
 
 export type RuntimesData = {
     body?: never;

@@ -1823,7 +1823,7 @@ fn cycle_and_prompt_atomic() {
     use crate::feed::{FeedBase, MarketState};
 
     let aapl = catalog::find("AAPL.XNAS").unwrap();
-    let (base, _hits) = crate::feed::scripted_server(vec![(
+    let (base, _hits, _) = crate::feed::scripted_server(vec![(
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -1900,7 +1900,7 @@ fn snapshot_restores_book() {
 
     let aapl = catalog::find("AAPL.XNAS").unwrap();
     let (_dir, store) = crate::store::open_temp();
-    let (base, hits) = feed::scripted_server(vec![(
+    let (base, hits, _) = feed::scripted_server(vec![(
         200,
         feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -2067,7 +2067,7 @@ fn limit_order_history_replays() {
 
     let aapl = catalog::find("AAPL.XNAS").unwrap();
     let (_dir, store) = crate::store::open_temp();
-    let (base, _hits) = feed::scripted_server(vec![(
+    let (base, _hits, _) = feed::scripted_server(vec![(
         200,
         feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -2168,7 +2168,7 @@ fn capture_repairs_a_chain_stored_without_its_acceptance() {
 
     let aapl = catalog::find("AAPL.XNAS").unwrap();
     let (_dir, store) = crate::store::open_temp();
-    let (base, _hits) = feed::scripted_server(vec![(
+    let (base, _hits, _) = feed::scripted_server(vec![(
         200,
         feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
@@ -2288,7 +2288,7 @@ fn pending_order_approval() {
 
     let aapl = catalog::find("AAPL.XNAS").unwrap();
     let (_dir, store) = crate::store::open_temp();
-    let (base, _hits) = crate::feed::scripted_server(vec![(
+    let (base, _hits, _) = crate::feed::scripted_server(vec![(
         200,
         crate::feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
     )]);
