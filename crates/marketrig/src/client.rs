@@ -9,7 +9,7 @@ use std::time::Duration;
 /// What a skill write may wait for, in place of §8's shared 10 s: the daemon
 /// makes two OpenViking calls of up to 15 s each and then projects
 /// (`openviking-continuity` §5.5).
-const SKILL_TIMEOUT: Duration = Duration::from_secs(60);
+const SKILL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A failure with the exit code it maps to (feature SPEC §8).
 pub struct Fault {

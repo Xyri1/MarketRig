@@ -58,6 +58,11 @@ const TAIL: usize = 4096;
 /// Every admin call's own bound (§3.2).
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A skill write (§5.3, §5.5): OpenViking summarizes and embeds the skill
+/// through the provider before it answers, so the bound is the provider's, not
+/// loopback's. Seen at 15 s against a real provider (E6, 2026-09-08).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// `ov.conf` exactly as §2.1 shows it. The two `${…}` references are
 /// OpenViking's own `os.path.expandvars` layer, so no secret is ever in the
 /// file; every substituted value arrives already JSON-quoted, which is what
@@ -1503,22 +1508,30 @@ impl OpenViking {
                 tracing::warn!(error = %e, "recording DESK_MEMORY_PROVISIONED failed");
             }
         }
-        self.upload_seed_skill(desk_id, &key).await;
+        // The upload summarizes and embeds through the provider (WRITE_TIMEOUT),
+        // so it runs behind the request that provisioned the desk and projects
+        // itself when it lands; nothing waits on it.
+        let (ov, desk_id) = (self.clone(), desk_id.to_owned());
+        tokio::spawn(async move {
+            if ov.upload_seed_skill(&desk_id, &key).await {
+                ov.project_skills(&desk_id).await;
+            }
+        });
         Ok(())
     }
 
     /// §5.3's seed upload: `GET /api/v1/skills/desk-improvement` missing means
     /// `POST /api/v1/skills` with the seed's `SKILL.md` under the desk's key,
     /// the desk name substituted and nothing else changed.
-    async fn upload_seed_skill(&self, desk_id: &str, key: &str) {
+    async fn upload_seed_skill(&self, desk_id: &str, key: &str) -> bool {
         let Some(port) = self.port() else {
-            return;
+            return false;
         };
         let name = match crate::desk::get(&self.store, desk_id) {
             Ok(desk) => desk.name,
             Err(e) => {
                 tracing::warn!(desk = desk_id, error = %e, "reading the desk to seed failed");
-                return;
+                return false;
             }
         };
         let seeded = match self
@@ -1526,15 +1539,19 @@ impl OpenViking {
             .await
         {
             // Already there: the seed is written once and never rewritten.
-            Ok(Some(_)) => return,
+            Ok(Some(_)) => return false,
             Ok(None) => {
                 let body = json!({ "data": crate::desk::SEED_SKILL.replace("<name>", &name) });
                 self.user_post(port, key, "skills", body).await
             }
             Err(e) => Err(e),
         };
-        if let Err(e) = seeded {
-            tracing::warn!(desk = desk_id, error = %e, "seeding desk-improvement failed");
+        match seeded {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(desk = desk_id, error = %e, "seeding desk-improvement failed");
+                false
+            }
         }
     }
 }
@@ -1581,29 +1598,50 @@ impl OpenViking {
         let home = self.roots.data.join(HOME).join("plugin").join(desk_id);
         let _ = fs::create_dir_all(&home);
         let text = |path: &Path| path.to_string_lossy().to_string();
+        // The credentials are the plugin's own `ovcli.conf`, one per desk under
+        // its home, rewritten at every launch; the runtime files and the
+        // environment carry only paths. Codex runs hooks and MCP servers inside
+        // the shared app-server, which inherits no per-desk environment, so a
+        // file named from the hook command is the one channel both runtimes
+        // share (E6, 2026-09-08).
+        let mut conf = json!({
+            "api_key": key,
+            "account": ACCOUNT,
+            "user": Self::desk_user(desk_id),
+        });
+        // The last known port; before the child has one the rest still stands.
+        if let Some(port) = self.port() {
+            conf["url"] = json!(format!("http://127.0.0.1:{port}"));
+        }
+        let conf_path = home.join("ovcli.conf");
+        if let Err(e) = crate::claude::write_private(&conf_path, &conf.to_string()) {
+            tracing::warn!(desk = desk_id, error = %e, "writing the desk's ovcli.conf failed");
+            return off;
+        }
         let mut env = vec![
-            ("OPENVIKING_API_KEY".to_string(), key),
-            ("OPENVIKING_ACCOUNT".to_string(), ACCOUNT.to_string()),
-            ("OPENVIKING_USER".to_string(), Self::desk_user(desk_id)),
             ("OPENVIKING_HOME".to_string(), text(&home)),
-            // Two files that do not exist, so `~/.openviking/` is never read.
+            ("OPENVIKING_CLI_CONFIG_FILE".to_string(), text(&conf_path)),
+            // A file that does not exist, so `~/.openviking/ov.conf` is never read.
             (
                 "OPENVIKING_CONFIG_FILE".to_string(),
                 text(&home.join("absent-ov.conf")),
             ),
-            (
-                "OPENVIKING_CLI_CONFIG_FILE".to_string(),
-                text(&home.join("absent-ovcli.conf")),
-            ),
             ("OPENVIKING_MEMORY_ENABLED".to_string(), "1".to_string()),
+            // Three plugin directories with their own variable rather than
+            // `OPENVIKING_HOME`, so nothing lands in `~/.openviking/`.
+            (
+                "OPENVIKING_STATE_DIR".to_string(),
+                text(&home.join("state")),
+            ),
+            (
+                "OPENVIKING_PENDING_DIR".to_string(),
+                text(&home.join("pending")),
+            ),
+            (
+                "OPENVIKING_CODEX_STATE_DIR".to_string(),
+                text(&home.join("codex-plugin-state")),
+            ),
         ];
-        // The last known port; before the child has one the rest still stands.
-        if let Some(port) = self.port() {
-            env.push((
-                "OPENVIKING_URL".to_string(),
-                format!("http://127.0.0.1:{port}"),
-            ));
-        }
         env.sort();
         RuntimeLaunch {
             node: Some(PathBuf::from(node)),
@@ -1807,7 +1845,7 @@ impl OpenViking {
             .http
             .request(method, format!("http://127.0.0.1:{port}/api/v1/{path}"))
             .bearer_auth(key)
-            .timeout(ADMIN_TIMEOUT);
+            .timeout(WRITE_TIMEOUT);
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -3143,14 +3181,17 @@ mod tests {
         assert_eq!(launch.node.as_deref(), Some(node.as_path()));
         let home = ov.roots.data.join(HOME).join("plugin").join(DESK_A);
         let text = |path: PathBuf| path.to_string_lossy().to_string();
+        // Paths only: the credentials are in the desk's own `ovcli.conf`.
         assert_eq!(
             launch.env,
             vec![
-                ("OPENVIKING_ACCOUNT".to_string(), ACCOUNT.to_string()),
-                ("OPENVIKING_API_KEY".to_string(), "the-key".to_string()),
                 (
                     "OPENVIKING_CLI_CONFIG_FILE".to_string(),
-                    text(home.join("absent-ovcli.conf")),
+                    text(home.join("ovcli.conf")),
+                ),
+                (
+                    "OPENVIKING_CODEX_STATE_DIR".to_string(),
+                    text(home.join("codex-plugin-state")),
                 ),
                 (
                     "OPENVIKING_CONFIG_FILE".to_string(),
@@ -3159,13 +3200,33 @@ mod tests {
                 ("OPENVIKING_HOME".to_string(), text(home.clone())),
                 ("OPENVIKING_MEMORY_ENABLED".to_string(), "1".to_string()),
                 (
-                    "OPENVIKING_URL".to_string(),
-                    "http://127.0.0.1:4321".to_string()
+                    "OPENVIKING_PENDING_DIR".to_string(),
+                    text(home.join("pending"))
                 ),
-                ("OPENVIKING_USER".to_string(), OpenViking::desk_user(DESK_A)),
+                ("OPENVIKING_STATE_DIR".to_string(), text(home.join("state"))),
             ]
         );
         assert!(home.is_dir(), "the plugin's own home is created");
+        let conf: Value =
+            serde_json::from_str(&fs::read_to_string(home.join("ovcli.conf")).unwrap()).unwrap();
+        assert_eq!(
+            conf,
+            json!({
+                "api_key": "the-key",
+                "account": ACCOUNT,
+                "user": OpenViking::desk_user(DESK_A),
+                "url": "http://127.0.0.1:4321",
+            })
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(home.join("ovcli.conf"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the key file is private");
+        }
     }
 
     /// Check 7: the rewrite, the swap, the permissions, the skipped name, and

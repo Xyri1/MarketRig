@@ -518,7 +518,7 @@ impl Inner {
         &self,
         workspace: &Path,
         desk_id: &str,
-        node: Option<&Path>,
+        launch: &crate::openviking::RuntimeLaunch,
     ) -> Result<(), String> {
         let dir = workspace.join(".codex");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -535,17 +535,28 @@ impl Inner {
             ));
         }
         let hooks = dir.join("hooks.json");
-        match node {
+        match launch.node.as_deref() {
             Some(node) => {
                 let plugin = crate::plugin::dir(workspace, "codex");
+                // The proxy runs inside the shared app-server too, so its
+                // path-only environment is the entry's own `env` table.
+                let env: Vec<String> = launch
+                    .env
+                    .iter()
+                    .map(|(name, value)| format!("{name} = {}", quote(value)))
+                    .collect();
                 toml.push_str(&format!(
                     "\n[mcp_servers.openviking-memory]\ncommand = {}\nargs = [{}]\n\
-                     startup_timeout_sec = 30\n",
+                     env = {{ {} }}\nstartup_timeout_sec = 30\n",
                     quote(&node.display().to_string()),
                     quote(&crate::plugin::proxy(&plugin)),
+                    env.join(", "),
                 ));
-                std::fs::write(&hooks, crate::plugin::codex_hooks(node, &plugin))
-                    .map_err(|e| e.to_string())?;
+                std::fs::write(
+                    &hooks,
+                    crate::plugin::codex_hooks(node, &plugin, &launch.env),
+                )
+                .map_err(|e| e.to_string())?;
             }
             None => {
                 let _ = std::fs::remove_file(&hooks);
@@ -616,7 +627,7 @@ impl Adapter for Codex {
         // (`openviking-continuity` §5.2).
         inner.openviking.project_skills(desk_id).await;
         let launch = inner.openviking.launch(desk_id);
-        inner.write_config(&workspace, desk_id, launch.node.as_deref())?;
+        inner.write_config(&workspace, desk_id, &launch)?;
 
         let url = inner.url.lock().expect("url").clone();
         let mut argv = vec![executable.display().to_string()];
@@ -1016,7 +1027,11 @@ mod tests {
         let quoted =
             |path: PathBuf| serde_json::Value::String(path.display().to_string()).to_string();
 
-        codex.0.write_config(&workspace, "d1", Some(&node)).unwrap();
+        let launch = crate::openviking::RuntimeLaunch {
+            node: Some(node.clone()),
+            env: vec![("OPENVIKING_HOME".to_string(), "/tmp/ov home".to_string())],
+        };
+        codex.0.write_config(&workspace, "d1", &launch).unwrap();
         let config = std::fs::read_to_string(workspace.join(".codex/config.toml")).unwrap();
         assert!(config.contains("[mcp_servers.openviking-memory]"));
         assert!(config.contains(&format!("command = {}", quoted(node.clone()))));
@@ -1025,6 +1040,8 @@ mod tests {
             quoted(plugin.join("servers").join("mcp-proxy.mjs"))
         )));
         assert!(config.contains("startup_timeout_sec = 30"));
+        // The proxy's path-only environment rides the entry's own table.
+        assert!(config.contains("env = { OPENVIKING_HOME = \"/tmp/ov home\" }"));
 
         let hooks: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(workspace.join(".codex/hooks.json")).unwrap(),
@@ -1038,16 +1055,27 @@ mod tests {
         let stop = &hooks["hooks"]["Stop"][0];
         assert_eq!(stop["matcher"], json!("*"));
         assert_eq!(stop["hooks"][0]["timeout"], json!(30));
+        // Hooks run inside the shared app-server, so the same environment is
+        // prefixed onto the command itself.
+        let prefix = if cfg!(windows) {
+            "set \"OPENVIKING_HOME=/tmp/ov home\" && "
+        } else {
+            "OPENVIKING_HOME=\"/tmp/ov home\" "
+        };
         assert_eq!(
             stop["hooks"][0][field],
             json!(format!(
-                "\"{}\" \"{}\"",
+                "{prefix}\"{}\" \"{}\"",
                 node.display(),
                 plugin.join("scripts").join("auto-capture.mjs").display()
             ))
         );
 
-        codex.0.write_config(&workspace, "d1", None).unwrap();
+        let off = crate::openviking::RuntimeLaunch {
+            node: None,
+            env: Vec::new(),
+        };
+        codex.0.write_config(&workspace, "d1", &off).unwrap();
         assert!(!workspace.join(".codex/hooks.json").exists());
         let config = std::fs::read_to_string(workspace.join(".codex/config.toml")).unwrap();
         assert!(!config.contains("openviking"));

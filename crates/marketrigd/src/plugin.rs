@@ -178,16 +178,32 @@ pub fn claude_hooks(node: &Path, plugin: &Path) -> Map<String, Value> {
 /// ponytail: the per-platform field is chosen at compile time, which is what
 /// the daemon writing its own launch files allows; a cross-rendered file would
 /// need both keys and a Codex that accepts them.
-pub fn codex_hooks(node: &Path, plugin: &Path) -> String {
+///
+/// `env` is the launch's path-only environment (`openviking-continuity`
+/// §4.3), prefixed onto every command: Codex runs hooks inside the shared
+/// app-server, which inherits nothing per desk, so the command line is the one
+/// channel to the hook. POSIX is `NAME="value" …`; Windows is
+/// `set "NAME=value" && …` under `cmd`.
+pub fn codex_hooks(node: &Path, plugin: &Path, env: &[(String, String)]) -> String {
     let node = node.to_string_lossy().to_string();
     let field = if cfg!(windows) {
         "commandWindows"
     } else {
         "command"
     };
+    let prefix: String = env
+        .iter()
+        .map(|(name, value)| {
+            if cfg!(windows) {
+                format!("set \"{name}={value}\" && ")
+            } else {
+                format!("{name}=\"{value}\" ")
+            }
+        })
+        .collect();
     let hooks = rewrite("codex", plugin, |script, timeout| {
         let mut hook = json!({ "type": "command" });
-        hook[field] = json!(format!("\"{node}\" \"{script}\""));
+        hook[field] = json!(format!("{prefix}\"{node}\" \"{script}\""));
         if let Some(timeout) = timeout {
             hook["timeout"] = timeout.clone();
         }
@@ -277,7 +293,7 @@ mod tests {
         assert_eq!(claude["Stop"][0]["hooks"][0]["timeout"], json!(45));
 
         let codex_plugin = Path::new("/desks/alpha/.marketrig/plugins/openviking-codex");
-        let codex: Value = serde_json::from_str(&codex_hooks(node, codex_plugin)).unwrap();
+        let codex: Value = serde_json::from_str(&codex_hooks(node, codex_plugin, &[])).unwrap();
         let field = if cfg!(windows) {
             "commandWindows"
         } else {

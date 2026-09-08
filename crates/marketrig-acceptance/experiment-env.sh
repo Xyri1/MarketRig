@@ -12,9 +12,10 @@
 # which skips E6 with evidence and still runs the rest of the cell. The key is
 # taken from MARKETRIG_EXPERIMENT_MEMORY_API_KEY if already set, else read
 # silently from the prompt; it is never echoed or written anywhere. Must be
-# sourced, not run.
+# sourced, not run; works under bash and zsh.
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+_self="${BASH_SOURCE[0]:-${(%):-%x}}"
+if [[ "$_self" == "$0" && -z "${ZSH_VERSION:-}" ]]; then
   echo "source this file; do not run it" >&2
   exit 2
 fi
@@ -27,7 +28,7 @@ esac
 unset MARKETRIG_ACCEPTANCE_OUT
 echo "cell=$MARKETRIG_EXPERIMENT" >&2
 
-_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+_root="$(cd "$(dirname "$_self")/../.." && pwd)"
 _python="${MARKETRIG_EXPERIMENT_PYTHON:-$(command -v python3.12)}"
 _node="${MARKETRIG_EXPERIMENT_NODE:-$(command -v node)}"
 _wheels="${MARKETRIG_EXPERIMENT_WHEELS:-$_root/openviking-wheels/macos-arm64}"
@@ -64,4 +65,4 @@ else
   unset MARKETRIG_EXPERIMENT_PYTHON MARKETRIG_EXPERIMENT_NODE MARKETRIG_EXPERIMENT_WHEELS
   echo "E6 will skip: python=${_python:-none} (${_python_minor:-?}) node=${_node:-none} (${_node_major:-?}) wheels=$_wheels key=${MARKETRIG_EXPERIMENT_MEMORY_API_KEY:+set}" >&2
 fi
-unset _root _python _node _wheels _python_minor _node_major _ready
+unset _self _root _python _node _wheels _python_minor _node_major _ready

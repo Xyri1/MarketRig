@@ -49,6 +49,9 @@ const PATIENCE: Duration = Duration::from_secs(900);
 /// How long a durable consequence of an action the session already took may
 /// take to land. This one is mechanical: the daemon writes it synchronously.
 const SETTLES: Duration = Duration::from_secs(60);
+/// E6: the seed skill's upload summarizes and embeds through a real provider
+/// behind the daemon's 90 s write bound, then projects.
+const SEED_LANDS: Duration = Duration::from_secs(120);
 
 #[test]
 fn e1_codex_cli() {
@@ -1233,15 +1236,16 @@ fn continuity(scenario: &str, cell: &str, runtime: &str, other: &str) {
     );
     assert_eq!(status, 202, "the runtime must be activatable: {activated}");
 
-    // The projection runs before the launch, so the seeded skill is on disk
-    // whatever the operator does next (§5.2, §5.3).
+    // The seed upload runs behind desk creation and projects itself when it
+    // lands, within the daemon's write bound (§5.3); the launch's own
+    // projection covers it when it landed earlier (§5.2).
     let seeded = workspace
         .join(".agents")
         .join("skills")
         .join("desk-improvement")
         .join("SKILL.md");
     assert!(
-        waited(SETTLES, "the seeded skill's projection", || {
+        waited(SEED_LANDS, "the seeded skill's projection", || {
             seeded.is_file()
         }),
         "activation projects the desk's skills before the session starts (§5.2): {}",

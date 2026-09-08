@@ -215,7 +215,7 @@ pub fn write_launch_files(
     Ok((mcp, settings))
 }
 
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)?;
     #[cfg(unix)]
     {
