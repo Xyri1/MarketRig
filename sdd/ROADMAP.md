@@ -1,12 +1,12 @@
 # MarketRig Roadmap
 
-This roadmap orders work by the smallest end-to-end evidence needed to validate MarketRig. It deliberately avoids completing subsystems horizontally before testing the persistent trading loop. The vertical-slice delivery strategy is set per D12; the milestone ladder runs R0 through R7.
+This roadmap orders work by the smallest end-to-end evidence needed to validate MarketRig. It deliberately avoids completing subsystems horizontally before testing the persistent trading loop. The vertical-slice delivery strategy is set per D12; the milestone ladder runs R0 through R8.
 
 Every milestone names the evidence that closes it, never a date. A milestone is done when its evidence has been produced by the checks that milestone authored — not when its feature list is exhausted. Each milestone's design lands in its own `features/<slug>/` folder before its implementation starts.
 
-Milestones R0 through R5 are delivered; Milestone R6's design is next.
+Milestones R0 through R5 are delivered; Milestone R6 (HiThink A-share data, per D84) is Active in [slice 013](slices/013-r6-hithink-a-share.md); crypto is deferred past MVP.
 
-**Memory and skills moved to OpenViking (2026-09-08):** [Slice 011](slices/011-openviking-migration.md) is frozen and merged back as D83; its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9) stays the detailed record. The gate is G1–G32 then O1–O10 on both platforms and both macOS E6 cells passed; the Windows E6 pair is R6's first entry check.
+**Memory and skills moved to OpenViking (2026-09-08):** [Slice 011](slices/011-openviking-migration.md) is frozen and merged back as D83; its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9) stays the detailed record. The gate is G1–G32 then O1–O10 on both platforms and both macOS E6 cells passed; the Windows E6 pair was R6's entry check and passed on 2026-09-08.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -230,15 +230,50 @@ The feature docs settle the pending-approval rows and their events before slicin
 
 Dependencies: Milestone R4.
 
-## Milestone R6 — Crypto, event triggers, localization, and packaging
+## Milestone R6 — HiThink A-share data
 
-This milestone realizes the choices recorded per D11, D13, D34, D49, D68, and D74.
+**Design complete 2026-09-08** — [`features/hithink-a-share/`](features/hithink-a-share/PRD.md) (PRD, DECISIONS HT-1 … HT-6, SPEC §1–§7); implemented in [`slices/013-r6-hithink-a-share.md`](slices/013-r6-hithink-a-share.md), Active.
+
+This milestone realizes the choices recorded per D4, D9, D49, D76, D78, and D84.
+
+**Goal:** Give the A-share leg the data an A-share trader actually reads, from the venue's own vendor, without moving the key or the research plane off the daemon.
+
+Expected outcomes:
+
+- one installation HiThink key in the credential store, validated by one bounded request, set from Settings (HT-1);
+- the `CN` catalog instruments polled from HiThink's batched snapshot on R1's cadence and synthesized book, with `provider: "hithink"`, a null source time exposed as null, and HiThink's own retry table; Yahoo unchanged for US and Hong Kong, which HiThink does not carry (HT-2);
+- the `CN` phase on HiThink's trading-day calendar, weekday rule as the named fallback — the first market to close D78's calendar gap (HT-3);
+- `marketrig research hithink <path>`: one allowlisted `GET` passthrough, envelope verbatim, large bodies to a file, informational and never a writer of trading state (HT-4);
+- the upstream `hithink-finance` skill vendored at a pin, script-rewritten to name only `marketrig`, and seeded into new desks (HT-5);
+- the HiThink stand-in in the gate and E7 on the real service (HT-6).
+
+Evidence of completion:
+
+```text
+a CN instrument reads provider hithink from one batched request per cycle, and a
+   scripted non-trading weekday reads CLOSED with the calendar named
+-> marketrig research hithink returns the upstream envelope verbatim, refuses an
+   unknown path and an unconfigured provider, and spills a large body to a file
+-> a desk created now carries the seeded skill naming no path but marketrig, and the
+   key is in no row, log, event, launch file, workspace file, or CLI output
+-> attended: a real session reads an A-share statement through marketrig, trades the
+   instrument on HiThink quotes, and the cycle closes with its evaluation queued
+```
+
+**Why here:** the loop is proven on equities and the desktop exists, so the next evidence worth buying is whether a desk learns better from honest venue data than from a chart endpoint's last price; that is a change to one leg of one proven feed plus one read-only command, and it goes before R7 because event triggers and localization do not depend on it and the attended E7 cells need no packaging.
+
+**Entry checks:** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — ran before anything else here, because it was R4's one outstanding cell (per D83); the record is under R7's entry checks below, where it was first written, and it is complete.
+
+Dependencies: Milestone R5.
+
+## Milestone R7 — Event triggers, localization, and packaging
+
+This milestone realizes the choices recorded per D11, D13, D34, D49, and D68. Kraken crypto, once the first item here, is deferred past MVP with its design kept in D74 (per D84).
 
 **Goal:** Widen every proven path to the full MVP surface.
 
 Expected outcomes:
 
-- the full Kraken crypto paper environment per D74: one margin account per desk across spot and futures, long and short, the sandbox's single-order types, funding/mark/index observations, and the inherited-limits statement in the seeded constitution;
 - desk-scoped EVENT trigger ingress, ingress-scoped occurrence identity, exact event-name matching, and duplicate suppression (per D34);
 - localization parity: the desktop, tray, and notifications in English and Simplified Chinese, the onboarding language step and locale setting, and an agent-facing contract that stays byte-identical under both (per D68);
 - packaging and distribution for both platforms, bundling `openviking-wheels/<platform>/` as the resource the memory child is provisioned from — no interpreter ships — plus code signing, autostart, and notifications;
@@ -247,21 +282,19 @@ Expected outcomes:
 Evidence of completion:
 
 ```text
-a short position and a futures position each close through one realized-P&L fact
-   and one queued evaluation, and a funding instant moves no paper balance
--> one desk-scoped event fires every matching enabled trigger, its duplicate is
+one desk-scoped event fires every matching enabled trigger, its duplicate is
    ignored, and a distinct later event refires only the recurring ones
 -> the packaged application runs the whole loop in zh-Hans while marketrig, the MCP
    surface, prompts, and seeded files stay byte-identical to the en run
 ```
 
-**Why here:** each item widens a mechanism the earlier milestones already proved — a second venue on the same trading topology, a second ingress on the same firing pipeline, a second locale over the same strings — so none of it buys new loop evidence and all of it can wait until the loop is closed.
+**Why here:** each item widens a mechanism the earlier milestones already proved — a second ingress on the same firing pipeline, a second locale over the same strings — so none of it buys new loop evidence and all of it can wait until the loop is closed.
 
-**Entry checks:** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — runs before anything else in this milestone, because it is R4's one outstanding cell (per D83) and it also settled the `commandWindows` form of the Codex hook commands: the first Windows Codex cell (`experiment-e6-codex-1788856799`, 2026-09-08) ran no plugin hook because Codex requires `command` beside the override and runs the override in PowerShell, so `set "NAME=value" && …` never held; the daemon now writes both keys with a PowerShell Windows form (feature SPEC §4.3, 25d2f1b). The Windows Codex cell then passed on it (`experiment-e6-codex-1788861052`, 2026-09-08, Codex 0.153.4, real OpenViking 0.4.17.1 provisioned offline from `openviking-wheels/windows-x64/` behind OpenRouter): a cycle closed and its `EVALUATION` was delivered as the session's next turn, the plugin's `Stop` hook captured the session under the desk's own user (`cx-<session>`, 77 messages, beside the MCP proxy's), the agent revised `desk-improvement` through `marketrig skill put`, the resumed activation projected it unchanged, and the switch read it through `.claude/skills`. The Windows Claude Code cell passed the same evening (`experiment-e6-claude-1788866224`, Claude Code 2.1.263) once provisioning moved to the bundled uv (d68f453; the first attempt, `experiment-e6-claude-1788863118`, timed out at pip's 16.5 minutes): the provisioning reached `AVAILABLE` in under two minutes, a cycle closed and its `EVALUATION` arrived as channel input the session acted on, the plugin's `Stop` hook captured 64 turns under the desk user (`cc-<session>`), the agent wrote a second skill `order-mechanics` through `marketrig skill put`, projected and kept across the resume, and the switch read both through `.agents/skills`. R6's first entry check is complete. One finding: the launched session had no `marketrig` on its `PATH` — the launch carries only the captured login `PATH` (root SPEC §7) — and the agent found a stale sidecar under `src-tauri/binaries/` before the current build; below, under known debts.
+**Entry checks (written when this content was R6, before D84 renumbered the ladder):** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — runs before anything else in this milestone, because it is R4's one outstanding cell (per D83) and it also settled the `commandWindows` form of the Codex hook commands: the first Windows Codex cell (`experiment-e6-codex-1788856799`, 2026-09-08) ran no plugin hook because Codex requires `command` beside the override and runs the override in PowerShell, so `set "NAME=value" && …` never held; the daemon now writes both keys with a PowerShell Windows form (feature SPEC §4.3, 25d2f1b). The Windows Codex cell then passed on it (`experiment-e6-codex-1788861052`, 2026-09-08, Codex 0.153.4, real OpenViking 0.4.17.1 provisioned offline from `openviking-wheels/windows-x64/` behind OpenRouter): a cycle closed and its `EVALUATION` was delivered as the session's next turn, the plugin's `Stop` hook captured the session under the desk's own user (`cx-<session>`, 77 messages, beside the MCP proxy's), the agent revised `desk-improvement` through `marketrig skill put`, the resumed activation projected it unchanged, and the switch read it through `.claude/skills`. The Windows Claude Code cell passed the same evening (`experiment-e6-claude-1788866224`, Claude Code 2.1.263) once provisioning moved to the bundled uv (d68f453; the first attempt, `experiment-e6-claude-1788863118`, timed out at pip's 16.5 minutes): the provisioning reached `AVAILABLE` in under two minutes, a cycle closed and its `EVALUATION` arrived as channel input the session acted on, the plugin's `Stop` hook captured 64 turns under the desk user (`cc-<session>`), the agent wrote a second skill `order-mechanics` through `marketrig skill put`, projected and kept across the resume, and the switch read both through `.agents/skills`. R6's first entry check is complete. One finding: the launched session had no `marketrig` on its `PATH` — the launch carries only the captured login `PATH` (root SPEC §7) — and the agent found a stale sidecar under `src-tauri/binaries/` before the current build; below, under known debts.
 
-Dependencies: Milestone R5.
+Dependencies: Milestone R6.
 
-## Milestone R7 — MVP acceptance
+## Milestone R8 — MVP acceptance
 
 Acceptance exercises the decisions recorded per D6, D7, D11, D12, D22, D38, D63, D67, and D75.
 
@@ -295,14 +328,14 @@ The MVP is accepted even if the strategy loses money or the agent learns nothing
 
 **Why here:** the deterministic gate grows scenario by scenario from R0 onward, so nothing waits for a final harness; what genuinely cannot run early is the attended cross-platform experiment on real runtimes, and that is all this milestone is. Every milestone before it keeps Windows in CI (per D11), so the attended Windows cells are the only platform work this milestone carries.
 
-Dependencies: Milestones R0–R6.
+Dependencies: Milestones R0–R7.
 
 # Known debts and open evidence
 
 These are known and unpaid. Each names the milestone that clears it, or the ceiling that stands.
 
 - **Scale is unmeasured beyond one trading desk per daemon.** R1's gate trades on one desk; isolation across concurrent books, larger fan-out, and per-desk footprint stay open and are deferred rather than designed for.
-- **The deterministic gate is hermetic for equities only** — R1's stand-in feed keeps it off the public market; the crypto milestone owes a stand-in venue speaking the Kraken adapter's protocol before its scenarios join the gate.
+- **The deterministic gate is hermetic for equities only** — R1's stand-in feed and R6's HiThink stand-in keep it off the public market; a crypto milestone, now post-MVP (per D84), owes a stand-in venue speaking the Kraken adapter's protocol before its scenarios join the gate.
 - **Claude Code exposes no structured interrupt**, so interruption on that runtime is the user's keyboard and the harness records only end-of-turn evidence.
 - **The memory child's credentials reach it through its environment, and each desk's key through a daemon-owned `0600` file** — two stated, deliberate exceptions to the credential boundary (per D49, D83) that must be restated wherever they are specified, not quietly dropped.
 - **`marketrig` is not on the launched session's `PATH`** — the launch environment is the captured login `PATH` and nothing more, while `ORIENTATION` names "the marketrig command"; the Windows Claude E6 (2026-09-08) had to search for the CLI and first found a stale sidecar under `src-tauri/binaries/`. Prepending the daemon's own directory, where the CLI sits beside it, is a one-line launch change behind a recorded decision; until then the operator puts the CLI on `PATH`.
@@ -326,15 +359,15 @@ Portability is excluded per D13. Mechanics intentionally left unresolved are lis
 - additional agent runtimes;
 - multi-agent collaboration within one desk;
 - cross-desk capital, positions, or trigger fan-out;
-- OpenBB research integration (per D9), deferred on scope: MVP evidence does not need research data;
+- OpenBB research integration (per D9), deferred on scope; HiThink covers A-share research in the MVP (per D84);
 - direct NautilusTrader or OpenBB APIs as product contracts;
 - automatic trigger execution or delivery retry;
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
-- venues beyond the supported equity markets and Kraken, and asset classes beyond equities and crypto (FX, options, …);
+- Kraken crypto paper trading — spot and futures, long and short, on a margin account — designed in D74 and deferred past MVP on 2026-09-08 (per D84); venues beyond the supported equity markets and asset classes beyond equities (FX, options, …);
 - a keyed real-book equity feed (broker OpenAPI or Alpaca-class source) behind the same data-client seam, if learning evidence needs honest spreads (per D76's ponytail note);
 - per-market exchange holiday calendars, a maintained instrument-catalog source or per-band tick logic, an installation-wide fetch layer behind the per-node feed clients, and a side-aware equity fee model (per D78's ponytail notes);
 - order lists (brackets, OCO) and execution algorithms;
-- paper simulation of funding payments, margin interest, or liquidation (per D74);
+- paper simulation of funding payments, margin interest, or liquidation, when crypto lands (per D74);
 - normalized universal agent transcripts;
 - automatic handoff or daemon-authored memory, reflection, or skill-governance workflows;
 - a canonical decision-attribution model beyond realized P&L as the reward signal;

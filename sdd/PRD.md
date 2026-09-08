@@ -5,7 +5,7 @@
 **Stage:** MVP / minimum viable experiment  
 **Agent runtimes:** Codex and Claude Code  
 **Platforms:** Windows and Apple Silicon macOS  
-**Trading mode:** paper only, on a bundled NautilusTrader sandbox — equities first (US, Hong Kong, China A-share), Kraken crypto after  
+**Trading mode:** paper only, on a bundled NautilusTrader sandbox — equities only for the MVP (US, Hong Kong, China A-share); Kraken crypto is deferred past MVP (per D84)  
 **Languages:** English and Simplified Chinese (desktop); English agent-facing contract
 
 ## 1. Product summary
@@ -182,7 +182,8 @@ MVP includes:
 - durable at-most-once trigger-result delivery;
 - a retained `STEER | QUEUE` daemon-prompt setting with only `QUEUE` enabled in MVP, using each runtime's own supported structured input path;
 - a bundled NautilusTrader sandbox as the required paper execution and accounting authority;
-- one isolated paper book per desk on a multi-currency account, carrying US, Hong Kong, and China A-share equities from one keyless market feed first — realized P&L in each instrument's own currency — and Kraken spot and futures — long and short, on a margin account, with the sandbox's single-order types — when crypto lands (per D74, D76);
+- one isolated paper book per desk on a multi-currency account, carrying US, Hong Kong, and China A-share equities — the US and Hong Kong legs from one keyless feed, the A-share leg from the official HiThink service behind one operator key — with realized P&L in each instrument's own currency (per D76, D84);
+- HiThink's A-share research endpoints read through `marketrig` as informational data, never a writer of trading state (per D9, D84);
 - complete immutable sandbox-produced trading history in MarketRig's durable store;
 - shared public reads with provider/as-of provenance;
 - one installation-wide local OpenViking child with local persistence, one isolated user per desk, and capture, recall, and the agent's memory tools through the seeded upstream plugins;
@@ -198,7 +199,7 @@ MVP does not include:
 
 - live trading;
 - a MarketRig risk-policy engine for spot, leverage, shorting, or bankroll rules;
-- asset classes beyond equities and crypto, or venues beyond the supported equity markets (US, Hong Kong, China A-share) and Kraken;
+- asset classes beyond equities, or venues beyond the supported equity markets (US, Hong Kong, China A-share); Kraken crypto — spot and futures, long and short — is deferred past MVP with its design kept in D74 (per D84);
 - a real equity order book: the keyless equity feed carries no bid or ask in any market, so the desk's equity book is synthesized and depth and spread are not modeled;
 - paper simulation of funding payments, margin interest, liquidation, latency, T+1 settlement, price limits, halts, auctions, or anything else the sandbox does not model (per D74, D76);
 - strategy/alpha recommendations;
