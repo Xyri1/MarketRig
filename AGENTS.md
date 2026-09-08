@@ -116,7 +116,7 @@ cargo run -p marketrigd -- --openapi > openapi.json  # the REST document the fro
 # A cell runs E1 or E2, then E3, E4, and E6, serialized: they share the operator.
 # E6 needs a real Python 3.12, Node >= 22, the locked wheel set, and a provider, and skips with evidence without them.
 node scripts/openviking-wheels.mjs --python <python3.12> --platform macos-arm64|windows-x64   # openviking-wheels/<platform>/ + its committed lockfile; --check verifies
-# Each lockfile is generated on its own platform (pip evaluates environment markers against the host); a download that drifts from the committed lockfile fails until --write-lock accepts it.
+# Each lockfile is generated on its own platform (pip evaluates environment markers against the host) and also names the pinned uv binary the script fetches beside the wheels and the daemon installs with; a download that drifts from the committed lockfile fails until --write-lock accepts it.
 export MARKETRIG_EXPERIMENT_PYTHON=<python3.12> MARKETRIG_EXPERIMENT_NODE=<node> MARKETRIG_EXPERIMENT_WHEELS=<repo>/openviking-wheels/<platform>
 export MARKETRIG_EXPERIMENT_MEMORY_BASE_URL=…  MARKETRIG_EXPERIMENT_MEMORY_API_KEY=…
 export MARKETRIG_EXPERIMENT_MEMORY_LLM_MODEL=…  MARKETRIG_EXPERIMENT_MEMORY_EMBEDDING_MODEL=…

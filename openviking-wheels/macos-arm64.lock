@@ -157,3 +157,4 @@ xxhash 4.0.1 xxhash-4.0.1-cp312-cp312-macosx_11_0_arm64.whl sha256=515a822c73abb
 yarl 1.24.5 yarl-1.24.5-cp312-cp312-macosx_11_0_arm64.whl sha256=9d399bdcfb4a0f659b9b3788bbc89babe63d9a6a65aacdf4d4e7065ff2e6316c
 zipp 4.1.0 zipp-4.1.0-py3-none-any.whl sha256=25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f
 zope_interface 8.6 zope_interface-8.6-cp312-cp312-macosx_11_0_arm64.whl sha256=a38b221cc649a2daacaff9d629a2ba9c4a8967669d253f9a6a597f46d46732f0
+uv 0.11.26 uv sha256=c9300ed8425e2c85230259a172066a32b475bc56f7ebe907783b2459159ea554

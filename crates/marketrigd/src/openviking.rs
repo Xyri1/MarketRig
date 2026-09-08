@@ -626,16 +626,29 @@ fn venv_dir(roots: &Roots) -> PathBuf {
 /// One executable inside the environment. On Windows a `.cmd` beside it is
 /// taken when no `.exe` is there.
 ///
-/// ponytail: the `.cmd` fallback is what lets a fake interpreter's `venv` write
-/// a runnable console script in a check; a real `pip install` writes the `.exe`.
+/// ponytail: the `.cmd` fallback is what lets a fake `uv` write a runnable
+/// console script in a check; a real install writes the `.exe`.
 fn venv_exe(venv: &Path, name: &str) -> PathBuf {
-    let bin = venv.join(if cfg!(windows) { "Scripts" } else { "bin" });
-    let exe = bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    let batch = bin.join(format!("{name}.cmd"));
+    tool(
+        &venv.join(if cfg!(windows) { "Scripts" } else { "bin" }),
+        name,
+    )
+}
+
+/// `<dir>/<name>` with the platform's executable suffix, or the `.cmd` beside
+/// it on Windows when no `.exe` is there.
+fn tool(dir: &Path, name: &str) -> PathBuf {
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let batch = dir.join(format!("{name}.cmd"));
     if cfg!(windows) && !exe.is_file() && batch.is_file() {
         return batch;
     }
     exe
+}
+
+/// The `uv` the locked wheel directory carries beside the wheels (§1.3).
+fn uv_in(wheels: &Path) -> PathBuf {
+    tool(wheels, "uv")
 }
 
 /// The executable one start spawns (§2.2, §7.1): the venv's console script, or
@@ -650,18 +663,24 @@ fn child_executable(row: &Setup) -> Option<PathBuf> {
 }
 
 /// One provisioning command, run to completion with both streams captured.
-/// There is no timeout: `--no-index` keeps every step off the network, so a step
-/// is bounded by local disk.
+/// There is no timeout: `--offline --no-index` keeps every step off the
+/// network, so a step is bounded by local disk.
 ///
 /// ponytail: no bound at all; a per-step deadline arrives if a real machine
-/// wedges inside `venv` or `pip`.
-fn output(mut command: std::process::Command) -> (bool, String) {
+/// wedges inside `uv`.
+fn output(mut command: std::process::Command, cache: &Path) -> (bool, String) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(crate::runtime::CREATE_NO_WINDOW);
     }
-    command.stdin(Stdio::null());
+    // uv's cache stays under the data root, nothing under the user's profile;
+    // it never fetches an interpreter, and it never draws progress bars.
+    command
+        .env("UV_CACHE_DIR", cache)
+        .env("UV_PYTHON_DOWNLOADS", "never")
+        .env("UV_NO_PROGRESS", "1")
+        .stdin(Stdio::null());
     match command.output() {
         Ok(out) => {
             let text = format!(
@@ -676,14 +695,22 @@ fn output(mut command: std::process::Command) -> (bool, String) {
 }
 
 /// The last non-empty line of a captured stream, which is what the row and the
-/// events carry (§1.3, §2.3).
+/// events carry (§1.3, §2.3). uv wraps its resolver's one sentence over several
+/// lines under a `No solution found` heading, so from that heading on the lines
+/// are joined back into the one line that names the package.
 fn last_line(text: &str) -> String {
-    text.lines()
-        .rev()
+    let lines: Vec<&str> = text
+        .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .to_string()
+        .filter(|line| !line.is_empty())
+        .collect();
+    match lines
+        .iter()
+        .rposition(|line| line.contains("No solution found"))
+    {
+        Some(at) => lines[at..].join(" "),
+        None => lines.last().copied().unwrap_or_default().to_string(),
+    }
 }
 
 fn first_line(message: &str) -> String {
@@ -696,28 +723,40 @@ fn first_line(message: &str) -> String {
 }
 
 /// §1.3, in order, stopping at the first failure with its last output line.
+/// `uv` does the environment and the install: it unpacks the locked set in
+/// parallel and writes no bytecode, which on Windows is the difference between
+/// 16 minutes under pip and under two (measured 2026-09-08, 101 k files against
+/// 54 k, Defender scanning each).
 fn run_steps(python: &Path, venv: &Path, wheels: &Path) -> Result<(), String> {
+    let uv = uv_in(wheels);
+    if !uv.is_file() {
+        return Err(format!("no uv beside the wheels: {}", uv.display()));
+    }
+    let cache = venv.with_file_name("uv-cache");
     let _ = fs::remove_dir_all(venv);
-    let mut create = crate::runtime::probe(python, &["-m", "venv"]);
-    create.arg(venv);
-    let (ok, out) = output(create);
+    let mut create = crate::runtime::probe(&uv, &["venv", "--python"]);
+    create.arg(python).arg(venv);
+    let (ok, out) = output(create, &cache);
     if !ok {
         return Err(last_line(&out));
     }
     let mut install = crate::runtime::probe(
-        &venv_exe(venv, "python"),
-        &["-m", "pip", "install", "--no-index", "--find-links"],
+        &uv,
+        &["pip", "install", "--offline", "--no-index", "--find-links"],
     );
-    install.arg(wheels);
+    install
+        .arg(wheels)
+        .arg("--python")
+        .arg(venv_exe(venv, "python"));
     install.arg(format!("openviking=={OPENVIKING_VERSION}"));
-    let (ok, out) = output(install);
+    let (ok, out) = output(install, &cache);
     if !ok {
         return Err(last_line(&out));
     }
-    let (ok, out) = output(crate::runtime::probe(
-        &venv_exe(venv, "openviking-server"),
-        &["--version"],
-    ));
+    let (ok, out) = output(
+        crate::runtime::probe(&venv_exe(venv, "openviking-server"), &["--version"]),
+        &cache,
+    );
     if !ok {
         return Err(last_line(&out));
     }
@@ -2364,54 +2403,77 @@ mod tests {
             .collect()
     }
 
-    /// A fake Python: it prints `3.12`, builds a venv whose own `python` is a
-    /// copy of itself and whose `openviking-server` answers `--version`, and
-    /// logs every invocation's arguments. `pip_fails` makes the install step
-    /// print what pip prints for a wheel that is not in the directory.
-    fn fake_python(dir: &Path, log: &Path, pip_fails: bool) -> PathBuf {
+    /// A fake Python: it prints `3.12` and logs every invocation's arguments.
+    fn fake_python(dir: &Path, log: &Path) -> PathBuf {
         let log = log.display().to_string();
-        let pip = if pip_fails {
-            "ERROR: Could not find a version that satisfies the requirement openviking==0.4.17.1"
-        } else {
-            "Successfully installed openviking-0.4.17.1"
-        };
-        let code = i32::from(pip_fails);
         #[cfg(windows)]
-        let body = format!(
-            "echo %*>>\"{log}\"\r\n\
-             if \"%~1\"==\"-c\" goto ver\r\n\
-             if \"%~2\"==\"venv\" goto mkvenv\r\n\
-             if \"%~2\"==\"pip\" goto pip\r\n\
-             exit /b 0\r\n\
-             :ver\r\n\
-             echo 3.12\r\n\
-             exit /b 0\r\n\
-             :mkvenv\r\n\
-             mkdir \"%~3\\Scripts\"\r\n\
-             copy /y \"%~f0\" \"%~3\\Scripts\\python.cmd\" >nul\r\n\
-             >\"%~3\\Scripts\\openviking-server.cmd\" echo @echo off\r\n\
-             >>\"%~3\\Scripts\\openviking-server.cmd\" echo echo openviking-server 0.4.17.1\r\n\
-             exit /b 0\r\n\
-             :pip\r\n\
-             echo {pip}\r\n\
-             exit /b {code}"
-        );
+        let body = format!("echo %*>>\"{log}\"\r\necho 3.12\r\nexit /b 0");
         #[cfg(not(windows))]
-        let body = format!(
-            "echo \"$@\" >> '{log}'\n\
-             case \"$1\" in\n\
-             -c) echo 3.12 ;;\n\
-             -m)\n\
-             case \"$2\" in\n\
-             venv) mkdir -p \"$3/bin\"; cp \"$0\" \"$3/bin/python\"; chmod 755 \"$3/bin/python\"; \
-             printf '#!/bin/sh\\necho openviking-server 0.4.17.1\\n' > \"$3/bin/openviking-server\"; \
-             chmod 755 \"$3/bin/openviking-server\" ;;\n\
-             pip) echo '{pip}'; exit {code} ;;\n\
-             esac ;;\n\
-             esac\n\
-             exit 0"
-        );
+        let body = format!("echo \"$@\" >> '{log}'\necho 3.12\nexit 0");
         script(dir, "fakepy", &body)
+    }
+
+    /// A fake `uv` beside the wheels: `venv` builds an environment whose
+    /// `openviking-server` answers `--version`, `pip install` prints what uv
+    /// prints, and every invocation's arguments are logged. `install_fails`
+    /// makes the install step print uv's wrapped resolver sentence for a wheel
+    /// that is not in the directory.
+    fn fake_uv(wheels: &Path, log: &Path, install_fails: bool) -> PathBuf {
+        let log = log.display().to_string();
+        let code = i32::from(install_fails);
+        const UNSATISFIABLE: [&str; 4] = [
+            "x No solution found when resolving dependencies:",
+            "--> Because openviking was not found in the provided package locations and",
+            "you require openviking==0.4.17.1, we can conclude that your requirements",
+            "are unsatisfiable.",
+        ];
+        #[cfg(windows)]
+        let body = {
+            let install = if install_fails {
+                UNSATISFIABLE
+                    .iter()
+                    .map(|line| format!("echo   {line}\r\n"))
+                    .collect::<String>()
+            } else {
+                "echo  + openviking==0.4.17.1\r\n".to_string()
+            };
+            format!(
+                "echo %*>>\"{log}\"\r\n\
+                 if \"%~1\"==\"venv\" goto mkvenv\r\n\
+                 if \"%~1\"==\"pip\" goto pip\r\n\
+                 exit /b 0\r\n\
+                 :mkvenv\r\n\
+                 mkdir \"%~4\\Scripts\"\r\n\
+                 >\"%~4\\Scripts\\openviking-server.cmd\" echo @echo off\r\n\
+                 >>\"%~4\\Scripts\\openviking-server.cmd\" echo echo openviking-server 0.4.17.1\r\n\
+                 exit /b 0\r\n\
+                 :pip\r\n\
+                 {install}\
+                 exit /b {code}"
+            )
+        };
+        #[cfg(not(windows))]
+        let body = {
+            let install = if install_fails {
+                UNSATISFIABLE
+                    .iter()
+                    .map(|line| format!("echo '  {line}'; "))
+                    .collect::<String>()
+            } else {
+                "echo ' + openviking==0.4.17.1'; ".to_string()
+            };
+            format!(
+                "echo \"$@\" >> '{log}'\n\
+                 case \"$1\" in\n\
+                 venv) mkdir -p \"$4/bin\"; \
+                 printf '#!/bin/sh\\necho openviking-server 0.4.17.1\\n' > \"$4/bin/openviking-server\"; \
+                 chmod 755 \"$4/bin/openviking-server\" ;;\n\
+                 pip) {install}exit {code} ;;\n\
+                 esac\n\
+                 exit 0"
+            )
+        };
+        script(wheels, "uv", &body)
     }
 
     #[tokio::test]
@@ -2420,10 +2482,11 @@ mod tests {
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let log = dir.path().join("calls.log");
-        let python = fake_python(&bin, &log, false);
+        let python = fake_python(&bin, &log);
         let node = echoing(&bin, "node22", "v22.11.0");
         let wheels = dir.path().join("wheels");
         fs::create_dir_all(&wheels).unwrap();
+        fake_uv(&wheels, &log, false);
         let request = || SetupRequest {
             python: python.to_string_lossy().into_owned(),
             node: node.to_string_lossy().into_owned(),
@@ -2447,22 +2510,25 @@ mod tests {
         // No provider row, so nothing is started (§2.2).
         assert_eq!(ov.child_state(), LiveState::NotStarted);
 
-        // §1.3's sequence, in order and with the exact arguments.
+        // §1.3's sequence, in order and with the exact arguments: the probe on
+        // the named Python, then uv's two steps.
         let seen = calls(&log);
         assert_eq!(seen.len(), 3, "{seen:?}");
         assert!(seen[0].contains("-c"), "{seen:?}");
         assert!(
-            seen[1].contains("-m")
-                && seen[1].contains("venv")
+            seen[1].starts_with("venv")
+                && seen[1].contains("--python")
+                && seen[1].contains(python.to_string_lossy().as_ref())
                 && seen[1].contains(venv.to_string_lossy().as_ref()),
             "{seen:?}"
         );
         assert!(
-            seen[2].contains("pip")
-                && seen[2].contains("install")
+            seen[2].starts_with("pip install")
+                && seen[2].contains("--offline")
                 && seen[2].contains("--no-index")
                 && seen[2].contains("--find-links")
                 && seen[2].contains(wheels.to_string_lossy().as_ref())
+                && seen[2].contains("--python")
                 && seen[2].contains("openviking==0.4.17.1"),
             "{seen:?}"
         );
@@ -2491,12 +2557,15 @@ mod tests {
         let bin = dir.path().join("bin");
         fs::create_dir_all(&bin).unwrap();
         let log = dir.path().join("calls.log");
-        let python = fake_python(&bin, &log, true);
+        let python = fake_python(&bin, &log);
         let node = echoing(&bin, "node22", "v22.11.0");
+        let wheels = dir.path().join("wheels");
+        fs::create_dir_all(&wheels).unwrap();
+        fake_uv(&wheels, &log, true);
         ov.setup(SetupRequest {
             python: python.to_string_lossy().into_owned(),
             node: node.to_string_lossy().into_owned(),
-            wheels: Some(dir.path().to_string_lossy().into_owned()),
+            wheels: Some(wheels.to_string_lossy().into_owned()),
             standin: None,
         })
         .await

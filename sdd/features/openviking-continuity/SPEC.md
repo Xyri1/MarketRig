@@ -25,12 +25,12 @@ On validation success the row becomes `PROVISIONING` and the route answers `202`
 
 ```text
 rm -rf <data root>/openviking/venv            (a previous environment is replaced, never repaired)
-<python> -m venv <data root>/openviking/venv
-<venv python> -m pip install --no-index --find-links <wheels> openviking==0.4.17.1
+<wheels>/uv venv --python <python> <data root>/openviking/venv
+<wheels>/uv pip install --offline --no-index --find-links <wheels> --python <venv python> openviking==0.4.17.1
 <venv>/bin/openviking-server --version        (prints "openviking-server 0.4.17.1"; Windows: <venv>\Scripts\openviking-server.exe)
 ```
 
-`<wheels>` is `wheels` from the request when present (absolute), else `<release unit>/openviking-wheels/<platform>/` beside the daemon binary. The wheel directory is the complete locked set for that platform and Python minor, produced by `pip download` at release build time and committed as a lockfile listing name, version, and hash; the directory carries the upstream license texts. Provisioning is offline by construction: `--no-index` makes any missing wheel a `PROVISION_FAILED`, never a network fetch. A second `PUT` while `PROVISIONING` is `409 SETUP_BUSY`. Provisioning while a child is live stops it first (§2.3) and the completed environment starts it again. Each platform's lockfile is produced on that platform, because `pip download --platform` selects wheel tags but still evaluates the dependencies' environment markers against the host, so a foreign host silently drops what a `sys_platform` marker guards.
+Both `uv` steps run with `UV_CACHE_DIR=<data root>/openviking/uv-cache`, `UV_PYTHON_DOWNLOADS=never`, and `UV_NO_PROGRESS=1`: the cache stays under the data root, nothing under the user's profile, and uv never fetches an interpreter. `<wheels>` is `wheels` from the request when present (absolute), else `<release unit>/openviking-wheels/<platform>/` beside the daemon binary. The wheel directory is the complete locked set for that platform and Python minor, produced by `pip download` at release build time, plus the pinned `uv` release binary (`uv` 0.11.26; `uv.exe` on Windows) with its MIT and Apache license texts, all committed as one lockfile listing name, version, and hash; the directory carries the upstream license texts. `uv` rather than the venv's own pip because it unpacks the set in parallel and writes no bytecode: on Windows, where every unpacked file meets Defender, the same 163 wheels took 988 s under pip (101 k files, 47 k of them `.pyc`) and 84 s under uv (54 k files), measured 2026-09-08; a missing `uv` beside the wheels is a `PROVISION_FAILED` naming its path. Provisioning is offline by construction: `--offline --no-index` makes any missing wheel a `PROVISION_FAILED`, never a network fetch. A second `PUT` while `PROVISIONING` is `409 SETUP_BUSY`. Provisioning while a child is live stops it first (§2.3) and the completed environment starts it again. Each platform's lockfile is produced on that platform, because `pip download --platform` selects wheel tags but still evaluates the dependencies' environment markers against the host, so a foreign host silently drops what a `sys_platform` marker guards.
 
 `ponytail:` `volcengine-python-sdk` ships wheel members whose paths exceed Windows' legacy 260-character `MAX_PATH`, so a Windows box provisioning under a deep data root needs `LongPathsEnabled`; a validation that names the ceiling instead of failing at `pip install` is deferred (root `sdd/SPEC.md` §18).
 
@@ -39,7 +39,7 @@ rm -rf <data root>/openviking/venv            (a previous environment is replace
 Scenarios:
 
 - **Wrong minor.** A Python 3.11 path: `400 PYTHON_UNSUPPORTED {found: "3.11"}`; the row is untouched; a desk activation on the same daemon proceeds.
-- **Missing wheel.** A `wheels` directory lacking one dependency: the row returns to `UNCONFIGURED PROVISION_FAILED` whose message names the package pip could not find; no network request was made (the gate runs with no network).
+- **Missing wheel.** A `wheels` directory lacking one dependency: the row returns to `UNCONFIGURED PROVISION_FAILED` whose message names the package uv could not find — uv wraps its one resolver sentence over several lines under a `No solution found` heading, and the daemon joins those lines back into the one it records; no network request was made (the gate runs with no network).
 - **Reprovision.** A second successful `PUT` with the same paths replaces the venv, restarts the child, and leaves `<data root>/openviking/data/` untouched: a skill uploaded before is listed after.
 
 ## 2. The child (OV-2)

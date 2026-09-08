@@ -161,3 +161,4 @@ xxhash 4.0.1 xxhash-4.0.1-cp312-cp312-win_amd64.whl sha256=5c2d525a3afabcd8e3549
 yarl 1.24.5 yarl-1.24.5-cp312-cp312-win_amd64.whl sha256=a929d878fec099030c292803b31e5d5540a7b6a31e6a3cc76cb4685fc2a2f51b
 zipp 4.1.0 zipp-4.1.0-py3-none-any.whl sha256=25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f
 zope_interface 8.6 zope_interface-8.6-cp312-cp312-win_amd64.whl sha256=64ed939d725876071823505b1c90074a86847a6e9be8617cec7ba759e0b86a7e
+uv 0.11.26 uv.exe sha256=deeaa21aac3e3e40b3fa00788208aa9a319cefbb3c2aa598cf580565a82ebc34

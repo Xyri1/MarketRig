@@ -1,7 +1,8 @@
 // Produces the locked OpenViking wheel set the release unit carries beside the
 // daemon (feature SPEC openviking-continuity §1.3): `pip download` on Python
-// 3.12 into `openviking-wheels/<platform>/`, plus `<platform>.lock` listing
-// name, version, and sha256 of every wheel, and the upstream license texts.
+// 3.12 into `openviking-wheels/<platform>/`, the pinned `uv` release binary
+// the daemon installs that set with, plus `<platform>.lock` listing name,
+// version, and sha256 of every wheel and of `uv`, and the upstream license texts.
 //
 //   node scripts/openviking-wheels.mjs --python <python3.12> [--platform macos-arm64|windows-x64] [--check] [--write-lock]
 //
@@ -17,6 +18,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
   copyFileSync,
@@ -39,6 +41,13 @@ const platform = opt('--platform', process.platform === 'win32' ? 'windows-x64' 
 const python = opt('--python');
 const tags = PLATFORMS[platform];
 if (!tags) throw new Error(`unknown platform ${platform}`);
+// The installer: uv unpacks the set in parallel and writes no bytecode, which
+// on Windows is the difference between 16 minutes under pip and under two.
+const UV_VERSION = '0.11.26';
+const UV = {
+  'macos-arm64': { archive: 'uv-aarch64-apple-darwin.tar.gz', member: 'uv-aarch64-apple-darwin/uv', binary: 'uv' },
+  'windows-x64': { archive: 'uv-x86_64-pc-windows-msvc.zip', member: 'uv.exe', binary: 'uv.exe' },
+}[platform];
 const dir = join(root, 'openviking-wheels', platform);
 const lockPath = join(root, 'openviking-wheels', `${platform}.lock`);
 
@@ -48,6 +57,9 @@ const entry = (file) => {
   return `${name} ${version} ${file} sha256=${sha256(join(dir, file))}`;
 };
 const wheels = () => readdirSync(dir).filter((f) => f.endsWith('.whl')).sort();
+const uvEntry = () => `uv ${UV_VERSION} ${UV.binary} sha256=${sha256(join(dir, UV.binary))}`;
+// Every locked file: the wheels, then uv.
+const have = () => [...wheels().map(entry), ...(existsSync(join(dir, UV.binary)) ? [uvEntry()] : [])];
 
 // Both directions: a wheel the lockfile names and the set lacks, and a wheel the
 // set carries and the lockfile does not.
@@ -58,13 +70,13 @@ const drift = (want, have) => [
 const committed = () => readFileSync(lockPath, 'utf8').trim().split('\n');
 
 if (args.includes('--check')) {
-  const have = wheels().map(entry);
-  const differs = drift(committed(), have);
+  const lines = have();
+  const differs = drift(committed(), lines);
   if (differs.length) {
     console.error(`openviking-wheels/${platform} differs from its lockfile:\n${differs.join('\n')}`);
     process.exit(1);
   }
-  console.log(`openviking-wheels/${platform}: ${have.length} wheels match ${platform}.lock`);
+  console.log(`openviking-wheels/${platform}: ${lines.length - 1} wheels and uv ${UV_VERSION} match ${platform}.lock`);
   process.exit(0);
 }
 
@@ -94,7 +106,27 @@ execFileSync(
 // OpenViking's own license text; every dependency's is already in the directory,
 // inside its wheel as `<dist-info>/LICENSE*`.
 for (const f of ['LICENSE']) copyFileSync(join(root, 'crates/marketrigd/seed/openviking', f), join(dir, `OPENVIKING-${f}`));
-const lines = wheels().map(entry);
+// uv from its GitHub release, one binary out of the archive, with its two
+// license texts from the same tag. Windows' own bsdtar reads the zip.
+const fetchTo = async (url, file) => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+};
+const release = `https://github.com/astral-sh/uv/releases/download/${UV_VERSION}`;
+const archive = join(dir, UV.archive);
+await fetchTo(`${release}/${UV.archive}`, archive);
+const tar = process.platform === 'win32' ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+execFileSync(tar, ['-xf', archive, '-C', dir, UV.member], { stdio: 'inherit' });
+if (UV.member !== UV.binary) {
+  renameSync(join(dir, UV.member), join(dir, UV.binary));
+  rmSync(join(dir, UV.member.split('/')[0]), { recursive: true, force: true });
+}
+rmSync(archive);
+for (const f of ['LICENSE-MIT', 'LICENSE-APACHE']) {
+  await fetchTo(`https://raw.githubusercontent.com/astral-sh/uv/${UV_VERSION}/${f}`, join(dir, `UV-${f}`));
+}
+const lines = have();
 // The committed lockfile is evidence, not an output: a download that resolved
 // something else says so and stops, unless the drift is the point.
 const differs = existsSync(lockPath) ? drift(committed(), lines) : [];
@@ -107,4 +139,4 @@ if (differs.length && !args.includes('--write-lock')) {
 }
 const written = !existsSync(lockPath) || differs.length > 0;
 if (written) writeFileSync(lockPath, lines.join('\n') + '\n');
-console.log(`openviking-wheels/${platform}: ${lines.length} wheels, lockfile ${written ? 'written' : 'unchanged'}`);
+console.log(`openviking-wheels/${platform}: ${lines.length - 1} wheels and uv ${UV_VERSION}, lockfile ${written ? 'written' : 'unchanged'}`);
