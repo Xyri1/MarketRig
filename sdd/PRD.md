@@ -16,7 +16,7 @@ MarketRig is a local persistent trading harness for general-purpose coding agent
 
 It does not embed a proprietary model or implement a daemon-owned trading reasoner. It gives Codex or Claude Code durable trader identities, real terminal sessions, market access, paper execution, scheduled and event-driven work, desk-scoped memory and skills, and continuity across disposable conversations.
 
-Its differentiator is a self-improving desk: the agent evaluates realized outcomes, retains experiential lessons in Hindsight, and improves its own reusable skills. MarketRig owns the durable environment, time, approvals, trading history, and access to authoritative trading reality; the agent owns interpretation, decisions, and learning.
+Its differentiator is a self-improving desk: the agent evaluates realized outcomes, its sessions are captured into desk-scoped memory, and it improves its own reusable skills. MarketRig owns the durable environment, time, approvals, trading history, and access to authoritative trading reality; the agent owns interpretation, decisions, and learning.
 
 ## 2. Problem
 
@@ -39,7 +39,7 @@ What they lack is a durable trading environment:
 
 > A general-purpose coding agent can operate and improve as a persistent, event-driven paper trader when given a durable market harness that survives individual agent sessions.
 
-MVP does not need to prove profitability, good strategy, or beneficial self-improvement. It must prove the complete mechanical loop from realized outcome through evaluation, Hindsight retention, skill improvement, and later reuse.
+MVP does not need to prove profitability, good strategy, or beneficial self-improvement. It must prove the complete mechanical loop from realized outcome through evaluation, memory retention, skill improvement, and later reuse.
 
 ## 4. Initial user
 
@@ -58,7 +58,7 @@ A **desk** is one durable autonomous trader identity.
 Each desk has its own:
 
 - workspace and always-loaded `AGENTS.md` constitution;
-- its own Hindsight bank and canonical cross-runtime skills;
+- its own OpenViking user holding its memory and its canonical cross-runtime skills;
 - selected runtime and native session pointers;
 - scheduled/event triggers;
 - isolated paper book;
@@ -105,7 +105,7 @@ Desk files plus authoritative MarketRig and sandbox state are the durable contra
 
 MarketRig accepts that conversation may be lost. It does not require handoff documents or maintain a normalized transcript archive.
 
-Each desk owns its `AGENTS.md`, Hindsight bank, and canonical skills shared between Codex and Claude Code only within that desk. MarketRig seeds the improvement skill, after which the agent may evolve it. MarketRig does not decide what evidence matters or whether a result warrants a memory or skill change.
+Each desk owns its `AGENTS.md`, its OpenViking memory, and canonical skills shared between Codex and Claude Code only within that desk. MarketRig seeds the improvement skill, after which the agent may evolve it. MarketRig does not decide what evidence matters or whether a result warrants a memory or skill change.
 
 ## 6. Responsibility model
 
@@ -114,11 +114,11 @@ The responsibility boundary is defined per D5, D6, D10, D22, and D38.
 MarketRig uses a modified OODA loop with durable continuity underneath it:
 
 - **Observe — MarketRig:** authoritative market, desk, and paper-book primitives, including stable references to mutable current quotes;
-- **Orient — agent:** research, code, Hindsight, skills, workspace, and shell tools;
+- **Orient — agent:** research, code, memory, skills, workspace, and shell tools;
 - **Decide — agent:** whether and how to act;
 - **Act — MarketRig:** idempotent sandbox/paper execution;
 - **Evaluate — agent:** select relevant history and judge the outcome using realized P&L per closed position cycle as the reward signal;
-- **Learn — agent:** retain desk-specific lessons in Hindsight and improve reusable procedures in skills;
+- **Learn — agent:** state desk-specific lessons in the session its memory plugin captures and improve reusable procedures in skills;
 - **Repeat:** return to Observe with durable desks, sessions, triggers, files, and history carrying continuity.
 
 MarketRig exposes facts and actions, not strategy conclusions such as `find_alpha`, `should_buy`, or `choose_strategy`.
@@ -137,7 +137,7 @@ A representative journey is:
 8. The desktop may close to tray while desks, sessions, and triggers continue.
 9. A trigger fires whether or not the desk has a live managed agent process, runs its code, persists its raw result, and queues an ordinary prompt through the runtime's structured interface.
 10. Any realized-P&L event is persisted with its trading evidence and queues an evaluation prompt without interrupting an active turn.
-11. The agent selects relevant history, evaluates the outcome, retains any desk-specific lesson in Hindsight, and improves a reusable desk skill when useful.
+11. The agent selects relevant history, evaluates the outcome, states any desk-specific lesson in the session its memory plugin captures, and improves a reusable desk skill when useful.
 12. A later session can recall that lesson and load the improved skill.
 13. A daemon restart preserves the desk, triggers, session pointers, approvals/provenance, paper state, and trading history.
 14. User may continue the last native session, start a new session, or switch runtime without creating a new desk.
@@ -156,7 +156,7 @@ Closing the window hides the existing warm UI to the tray; terminal presentation
 
 The desktop, tray, and notifications are available in English and Simplified Chinese. First-launch onboarding opens in the language detected from the system, lets the user confirm or change it, and the choice is an installation setting changeable later. Everything the agent consumes — the `marketrig` CLI, the MCP surface, JSON, daemon prompts, seeded `AGENTS.md`, and skills — is English under either choice.
 
-First-launch onboarding offers OS-login autostart, enabled by default and configurable. It also configures Hindsight's hosted models through one installation-wide OpenAI-compatible base URL, API key, LLM model selector, and embedding model, where the model list is fetched live whenever opened and is never persisted or cached.
+First-launch onboarding offers OS-login autostart, enabled by default and configurable. Memory stays optional and is set up from Settings: two prerequisite paths the operator confirms, and the hosted models behind one installation-wide OpenAI-compatible base URL, API key, LLM model selector, and embedding model, where the model list is fetched live whenever opened and is never persisted or cached.
 
 ## 9. MVP scope
 
@@ -185,8 +185,8 @@ MVP includes:
 - one isolated paper book per desk on a multi-currency account, carrying US, Hong Kong, and China A-share equities from one keyless market feed first — realized P&L in each instrument's own currency — and Kraken spot and futures — long and short, on a margin account, with the sandbox's single-order types — when crypto lands (per D74, D76);
 - complete immutable sandbox-produced trading history in MarketRig's durable store;
 - shared public reads with provider/as-of provenance;
-- one installation-wide local Hindsight instance with embedded persistence, one isolated bank per desk, and agent-driven retain, recall, and reflect through `marketrig`;
-- hosted Hindsight LLM and embedding models behind one installation-level OpenAI-compatible base URL, API key, and selected models, with no reranking model;
+- one installation-wide local OpenViking child with local persistence, one isolated user per desk, and capture, recall, and the agent's memory tools through the seeded upstream plugins;
+- hosted memory LLM and embedding models behind one installation-level OpenAI-compatible base URL, API key, and selected models, with no reranking model;
 - one canonical cross-runtime skill set and one seeded improvement skill per desk;
 - structured session, trigger, approval, action, and failure history;
 - an English and Simplified Chinese desktop, tray, and notifications selected per installation, with an English-only agent-facing CLI, MCP, JSON, prompt, and seeded-file contract;
@@ -247,10 +247,10 @@ Acceptance requires:
 5. Approved trigger code can use MarketRig public reads and paper actions.
 6. Results are persisted before at-most-once structured delivery and can activate a desk with no live managed session without keystroke emulation or delivery-triggered interruption.
 7. The sandbox remains authoritative for paper execution and accounting; MarketRig durably preserves its resulting orders, fills, position cycles, fees, and realized P&L without recalculating them.
-8. Hindsight unavailability is explicit but does not block sessions, triggers, or paper trading.
+8. Memory unavailability is explicit but does not block sessions, triggers, or paper trading.
 9. Core state survives daemon restart without relying on conversation or mandatory handoff.
 10. The core smoke flow passes with real Codex and Claude Code on Windows and Apple Silicon macOS.
-11. The acceptance exercise demonstrates isolated desk banks and a realized-P&L event durably queueing evaluation, after which the agent retains a Hindsight lesson through `marketrig` and improves a desk skill that a later session uses.
+11. The acceptance exercise demonstrates isolated desk memories and a realized-P&L event durably queueing evaluation, after which the agent's lesson is captured and it improves a desk skill that a later session uses.
 12. Real Codex and Claude Code sessions can resolve and reread the same stable MarketRig market resource; reads expose new observations after market updates and preserve the same sequence when no update occurred; and both runtimes can submit and cancel a paper order through the typed order tools, with malformed arguments refused by MarketRig rather than by the client.
 13. The desktop, tray, and notifications work in Simplified Chinese and English, while `marketrig`, the MCP surface, daemon prompts, and seeded desk files are byte-identical under both.
 14. An equity round trip on a real market quote closes through one realized-P&L fact, net of the fees the sandbox charged, and queues one evaluation, in at least one US-market instrument and one non-USD-market instrument whose P&L lands in its own currency (per D76).

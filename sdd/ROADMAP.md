@@ -6,7 +6,7 @@ Every milestone names the evidence that closes it, never a date. A milestone is 
 
 Milestones R0 through R5 are delivered; Milestone R6's design is next.
 
-**Active migration design (2026-09-07):** [Slice 011 — OpenViking memory and skills migration](slices/011-openviking-migration.md) opens the replacement of Hindsight and local canonical skill ownership with OpenViking. Local deployment excludes Docker; a user-installed Python prerequisite is acceptable. Its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) is design complete (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9, 2026-09-07); C50–C58 are implemented on `master` (2026-09-07) with the gate O1–O10 green on macOS; Windows evidence is complete (2026-09-07); the attended E6 cells are deferred by decision and remain the one item before the slice freezes and merges back.
+**Memory and skills moved to OpenViking (2026-09-08):** [Slice 011](slices/011-openviking-migration.md) is frozen and merged back as D83; its feature folder [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9) stays the detailed record. The gate is G1–G32 then O1–O10 on both platforms and both macOS E6 cells passed; the Windows E6 pair is R6's first entry check.
 
 ## Milestone R0 — Workspace, daemon, and desk identity
 
@@ -150,18 +150,18 @@ Dependencies: Milestone R2.
 
 ## Milestone R4 — Memory, skills, and the closed loop
 
-**Delivered 2026-09-04** — designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) (PRD, DECISIONS R4-1 … R4-6, SPEC) and implemented in [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md). Its eight module checks, the gate's G33–G37, and the static checks are green on macOS (bundle `gate-1788509422`, and the run after the stop fix); Windows CI run 33862124921 failed only on a CRLF checkout of the seed files, fixed by `.gitattributes` (538dc01), and run 33863116603 is green on macOS and Windows. E5 attended on both macOS cells on 2026-09-04, and on both Windows cells the same evening (Windows 11, Codex CLI 0.153.0 `experiment-e5-codex-1788529410`, one NVDA.XNAS cycle; Claude Code 2.1.260 `experiment-e5-claude-1788530120`, one AAPL.XNAS cycle; each retained a lesson, edited the improvement skill, and recalled from the resumed session, the second desk's bank empty, and the job object took the embedded PostgreSQL with the child). The Windows cells found two defects the gate cannot see: the launcher's block-glyph banner killed the child on a GBK code page before `/health` (`experiment-e5-codex-1788528765`; fixed by `PYTHONUTF8=1`, add97a2), and the seeded Claude hook command's backslashed path collapsed under bash (fixed by a quoted forward-slash path, 1600c8c); pg0 ignores the redirected profile on Windows, recorded in SPEC §16 and §18 (3c8310b).
+**Delivered 2026-09-04** as D81, designed in [`features/r4-memory-skills-loop/`](features/r4-memory-skills-loop/PRD.md) and implemented in [`slices/005-r4-memory-skills-loop.md`](slices/005-r4-memory-skills-loop.md); **re-founded on OpenViking 2026-09-08** as D83, designed in [`features/openviking-continuity/`](features/openviking-continuity/PRD.md) (PRD, DECISIONS OV-1…OV-7, SPEC §1–§9) and implemented in [`slices/011-openviking-migration.md`](slices/011-openviking-migration.md), which is the milestone's current shape. Both slices are frozen; the earlier one stays historical evidence and nothing reads its memory system any more.
 
-This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65, and settles their mechanics as D81. Hindsight facts were verified against `hindsight-api-slim[embedded-db]==0.9.2`.
+This milestone realizes the choices recorded per D16, D17, D18, D19, D21, D22, D47, and D65, and settles their mechanics as D81 and then D83. OpenViking facts were verified against `openviking==0.4.17.1`.
 
 **Goal:** Close the loop — an outcome becomes a retained lesson that a later session reuses.
 
 Expected outcomes:
 
-- one installation-wide Hindsight instance as a supervised child, launched against the interpreter and environment the installation ships for it and nothing else (per D47, D65);
-- one isolated bank per desk, derived from desk identity, with explicit degradation when Hindsight is unavailable (per D18);
-- the `marketrig memory` retain / recall / reflect surface;
-- the seeded `AGENTS.md` constitution, one canonical cross-runtime skill set per desk, and the seeded improvement skill the agent may then evolve (per D19, D21);
+- one installation-wide OpenViking child, started with the daemon from a virtual environment provisioned offline from the bundled wheels against the operator-named Python 3.12 and Node (per D47, D65, D83);
+- one OpenViking user per desk under one account, derived from desk identity, with explicit degradation when the child is unavailable (per D18);
+- capture and recall through the seeded upstream plugins, whose MCP tools are the agent's memory plane, with no memory command on `marketrig`;
+- the seeded `AGENTS.md` constitution, skills canonical in OpenViking and projected read-only into `.agents/skills/` for both runtimes, `marketrig skill put|delete` as the write path, and the seeded improvement skill the agent may then evolve (per D19, D21);
 - the agent-owned Evaluate and Learn cycle driven by the queued realized-P&L prompt (per D22).
 
 Evidence of completion:
@@ -169,14 +169,14 @@ Evidence of completion:
 ```text
 a realized-P&L evaluation prompt reaches a live session
 -> the agent selects its own evidence and judges the outcome
--> it retains one desk-specific lesson and improves one desk skill
--> a later session recalls the lesson and loads the improved skill
--> the other desk's bank is untouched throughout
--> Hindsight stopped: sessions, triggers, and paper trading continue, and the
+-> its session is captured, and it writes one desk skill
+-> a later session finds the lesson and loads the skill from either runtime
+-> the other desk's user is untouched throughout
+-> the child stopped: sessions, triggers, and paper trading continue, and the
    failure is explicit
 ```
 
-**Produced** by the gate's G33–G37 on macOS (bundle `gate-1788509422`, G1–G37) — the provider configured and the key and bearer absent from the database, the log root, and every event; one lesson retained on `alpha` and invisible to `beta`, and a trigger's own script retaining with both identifiers; the `EVALUATION` prompt of a closed cycle read as the stand-in session's own `INPUT` line, followed by the retain and the skill edit the harness performs through public surfaces; a later session recalling that lesson and reading the improved skill through `.claude/skills` after a runtime switch; and the child lost, restarted once, then `UNAVAILABLE` while a firing, an order, and an activation succeed, ending with a hard kill whose child the next start reaps — and by the attended E5 on both macOS cells, on `hindsight-api-slim[embedded-db]==0.9.2` behind OpenRouter (`z-ai/glm-5.3-flash`, `openai/text-embedding-3-small`): a real session closed one AAPL.XNAS cycle, took the `EVALUATION`, retained a lesson tagged `lesson` and the instrument, edited its own improvement skill, and recalled the lesson after an exit and a resume, with the second desk's bank empty and the provider key present only in the relocated credential file (bundles `experiment-e5-codex-1788514468`, Codex CLI 0.153.2, and `experiment-e5-claude-1788515113`, Claude Code 2.1.260).
+**Produced** by the gate's O1–O6 on both platforms — setup and the three secrets absent from the database, the log root, every event, and every launch file; two desks provisioned under distinct users, each listing exactly the seeded skill and neither able to read the other's; the projection matching the seed byte for byte and read-only, refreshed at turn end and by `marketrig skill put` and `delete`; the plugin hooks, MCP entries, and per-desk credential file written for both runtimes and absent when unconfigured; the child lost, then `UNAVAILABLE` while a firing, an order, and an activation succeed with the previous projection intact, Retry returning the same desk key, and a hard kill reaped at the next start; and reprovisioning keeping the store — and by the attended E6 on both macOS cells on 2026-09-08 (real OpenViking 0.4.17.1 provisioned offline behind OpenRouter, Codex 0.153.4 and Claude Code): a real session closed a cycle, took the `EVALUATION`, was captured under its own desk user, revised the seeded skill through `marketrig skill put`, kept it across a resume, and read it through the other runtime's path (bundles `experiment-e6-codex-1788840484` and `experiment-e6-claude-1788841651`).
 
 **Why here:** it is the last piece of the loop, and retention is only meaningful once a realized outcome can actually reach a live session, which needs R1 and R3 both standing. At the end of this milestone the product thesis is proven without a desktop.
 
@@ -184,7 +184,7 @@ Dependencies: Milestone R3.
 
 ## Milestone R5 — Desktop and approval controls
 
-**Delivered 2026-09-06** — designed in [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC) and implemented in [`slices/006-r5-approval-policies.md`](slices/006-r5-approval-policies.md) (2026-09-05, the daemon and CLI: policies, approvals, the events tail, the sockets, `--openapi`), [`slices/007-r5-shell-control-plane.md`](slices/007-r5-shell-control-plane.md) (2026-09-05, the `marketrig-desktop` crate, the root Vue frontend over the generated client, CI's `frontend` job, REST CORS on the origin allowlist), and [`slices/008-r5-tray-quit-smoke.md`](slices/008-r5-tray-quit-smoke.md) (2026-09-06, close-hides, the tray, Quit, autostart, and the packaged smoke), all frozen. Its nine module checks, the gate's G38–G41, and the static and frontend checks are green on macOS and Windows CI (run on commit 1fab454); `pnpm smoke` is 5/5 once per platform from a wiped per-user root — `target/acceptance/smoke-darwin-2026-09-06T10-20-13-770/` (10 s) and `target/acceptance/smoke-win32-2026-09-06T10-51-25-019/` (36 s), each bundle holding its WebdriverIO report and the shell's own log.
+**Delivered 2026-09-06** — designed in [`features/r5-desktop-approval-controls/`](features/r5-desktop-approval-controls/PRD.md) (PRD, DECISIONS R5-1 … R5-8, SPEC) and implemented in [`slices/006-r5-approval-policies.md`](slices/006-r5-approval-policies.md) (2026-09-05, the daemon and CLI: policies, approvals, the events tail, the sockets, `--openapi`), [`slices/007-r5-shell-control-plane.md`](slices/007-r5-shell-control-plane.md) (2026-09-05, the `marketrig-desktop` crate, the root Vue frontend over the generated client, CI's `frontend` job, REST CORS on the origin allowlist), and [`slices/008-r5-tray-quit-smoke.md`](slices/008-r5-tray-quit-smoke.md) (2026-09-06, close-hides, the tray, Quit, autostart, and the packaged smoke), all frozen. Its nine module checks, the gate's G38–G41 (renumbered O7–O10 per D83), and the static and frontend checks are green on macOS and Windows CI (run on commit 1fab454); `pnpm smoke` is 5/5 once per platform from a wiped per-user root — `target/acceptance/smoke-darwin-2026-09-06T10-20-13-770/` (10 s) and `target/acceptance/smoke-win32-2026-09-06T10-51-25-019/` (36 s), each bundle holding its WebdriverIO report and the shell's own log.
 
 This milestone realizes the choices recorded per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D70, D71, and D72, and settles their mechanics as D82.
 
@@ -210,7 +210,7 @@ a desk's real terminal attaches, survives a tray hide and reopen, and keeps work
 -> the packaged application does all of the above from a freshly wiped per-user root
 ```
 
-**Produced** by the gate's G38–G41 on both platforms, by the frontend's own checks, and by the packaged smoke. The gate proved the policy resource with `STEER` refused, the event tail read live and reconnected gaplessly with a slow consumer closed `4408`, a trigger whose pending code never became due through enable, disable, or an elapsed occurrence and whose denial left no firing, execution, or prompt, an order that reached no sandbox while pending, replayed idempotently, refused its cancel, and after approval filled, closed a cycle, and queued its evaluation exactly as an ungated one, and the three sockets under a foreign origin, a wrong first frame, and a hard kill after which both pending records were still decidable. The smoke drove the packaged application through all five steps on each platform: a first launch that found no daemon and started one, the stand-in runtime registered by path through Settings, a desk created and its terminal attached, the window hidden and a second launch focusing the same warm webview with the bytes written meanwhile, a paper order approved and another denied from the Approvals tab with the desk's pending badge following, and Quit ending the managed processes, the daemon, and the shell. Close-hides itself stays confirmed by hand, because a WebDriver close destroys the window rather than requesting one.
+**Produced** by the gate's G38–G41 (renumbered O7–O10 per D83) on both platforms, by the frontend's own checks, and by the packaged smoke. The gate proved the policy resource with `STEER` refused, the event tail read live and reconnected gaplessly with a slow consumer closed `4408`, a trigger whose pending code never became due through enable, disable, or an elapsed occurrence and whose denial left no firing, execution, or prompt, an order that reached no sandbox while pending, replayed idempotently, refused its cancel, and after approval filled, closed a cycle, and queued its evaluation exactly as an ungated one, and the three sockets under a foreign origin, a wrong first frame, and a hard kill after which both pending records were still decidable. The smoke drove the packaged application through all five steps on each platform: a first launch that found no daemon and started one, the stand-in runtime registered by path through Settings, a desk created and its terminal attached, the window hidden and a second launch focusing the same warm webview with the bytes written meanwhile, a paper order approved and another denied from the Approvals tab with the desk's pending badge following, and Quit ending the managed processes, the daemon, and the shell. Close-hides itself stays confirmed by hand, because a WebDriver close destroys the window rather than requesting one.
 
 **Why here:** the control plane is cheapest to build once the daemon's surface has stopped moving, and nothing before it needs a window — the loop is already proven headless by R4; approvals ride with it because the approval boundary is worth little until something can present the prompt.
 
@@ -239,7 +239,7 @@ Expected outcomes:
 - the full Kraken crypto paper environment per D74: one margin account per desk across spot and futures, long and short, the sandbox's single-order types, funding/mark/index observations, and the inherited-limits statement in the seeded constitution;
 - desk-scoped EVENT trigger ingress, ingress-scoped occurrence identity, exact event-name matching, and duplicate suppression (per D34);
 - localization parity: the desktop, tray, and notifications in English and Simplified Chinese, the onboarding language step and locale setting, and an agent-facing contract that stays byte-identical under both (per D68);
-- packaging and distribution for both platforms, including the interpreter and environment the memory child needs, code signing, autostart, and notifications;
+- packaging and distribution for both platforms, bundling `openviking-wheels/<platform>/` as the resource the memory child is provisioned from — no interpreter ships — plus code signing, autostart, and notifications;
 - uninstall preserves user data unless erasure is explicitly requested (per D13).
 
 Evidence of completion:
@@ -254,6 +254,8 @@ a short position and a futures position each close through one realized-P&L fact
 ```
 
 **Why here:** each item widens a mechanism the earlier milestones already proved — a second venue on the same trading topology, a second ingress on the same firing pipeline, a second locale over the same strings — so none of it buys new loop evidence and all of it can wait until the loop is closed.
+
+**Entry checks:** the Windows E6 pair — one Codex cell and one Claude Code cell on real OpenViking provisioned offline from `openviking-wheels/windows-x64/` — runs before anything else in this milestone, because it is R4's one outstanding cell (per D83) and it also settles whether `set "NAME=value" && …` holds as the `commandWindows` form of the Codex hook commands.
 
 Dependencies: Milestone R5.
 
@@ -276,14 +278,14 @@ create multiple isolated desks
 -> the sandbox produces the authoritative execution/accounting outcome
 -> MarketRig preserves complete trading history, raw result, approval, and provenance
 -> any realized P&L queues evaluation exactly once without interrupting active work
--> agent selects evidence, retains a Hindsight lesson, and improves a desk skill
+-> agent selects evidence, its lesson is captured into desk memory, and it improves a desk skill
 -> a later session uses durable history, files, memory, and skills
 -> daemon restart does not erase identity or truth
 ```
 
 Expected outcomes:
 
-- the attended experiment run once per platform/runtime cell — Windows/Codex, Windows/Claude Code, macOS/Codex, macOS/Claude Code — on the real CLIs and real Hindsight, with agent-owned scenarios ending inconclusive rather than failed (per D75);
+- the attended experiment run once per platform/runtime cell — Windows/Codex, Windows/Claude Code, macOS/Codex, macOS/Claude Code — on the real CLIs and a real OpenViking child, with agent-owned scenarios ending inconclusive rather than failed (per D75);
 - the scenario-to-check mapping, so every scenario of the acceptance flow is answered by a named check (per D75);
 - an evidence bundle per cell.
 
@@ -300,8 +302,9 @@ These are known and unpaid. Each names the milestone that clears it, or the ceil
 - **Scale is unmeasured beyond one trading desk per daemon.** R1's gate trades on one desk; isolation across concurrent books, larger fan-out, and per-desk footprint stay open and are deferred rather than designed for.
 - **The deterministic gate is hermetic for equities only** — R1's stand-in feed keeps it off the public market; the crypto milestone owes a stand-in venue speaking the Kraken adapter's protocol before its scenarios join the gate.
 - **Claude Code exposes no structured interrupt**, so interruption on that runtime is the user's keyboard and the harness records only end-of-turn evidence.
-- **The memory child's credentials reach it through its environment** — a stated, deliberate exception to the credential boundary (per D49) that must be restated wherever that child is specified, not quietly dropped.
-- **The memory child's embedded database ships with default loopback credentials** — an unclosed ceiling with a written upgrade path.
+- **The memory child's credentials reach it through its environment, and each desk's key through a daemon-owned `0600` file** — two stated, deliberate exceptions to the credential boundary (per D49, D83) that must be restated wherever they are specified, not quietly dropped.
+- **The Windows E6 pair has not run** — R4's evidence is complete on macOS only; it is R6's first entry check (per D83).
+- **The Claude Code memory plugin writes to `~/.openviking/`** — a hard-coded inject file and probe cache the vendored plugin owns; unmodified vendoring is the reason it stands (per D83).
 - **Paper physics gaps stand as stated, not approximated** (per D74, D76): no funding, margin interest, rollover, liquidation, latency, T+1 settlement, price limits, halts, or auctions; and the equity book carries no real bid or ask in any market.
 
 # Deferred / post-MVP
@@ -324,6 +327,7 @@ Portability is excluded per D13. Mechanics intentionally left unresolved are lis
 - OpenBB research integration (per D9), deferred on scope: MVP evidence does not need research data;
 - direct NautilusTrader or OpenBB APIs as product contracts;
 - automatic trigger execution or delivery retry;
+- replaying a `LIMIT` order in trading history: its stored events carry no `OrderSubmitted` or `OrderAccepted`, so `GET /desks/{id}/history/orders` cannot reconstruct it and omits it — found by E6 on 2026-09-08, and the fix owes a gate regression on a limit order that never fills ([SPEC.md](SPEC.md) §18);
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
 - venues beyond the supported equity markets and Kraken, and asset classes beyond equities and crypto (FX, options, …);
 - a keyed real-book equity feed (broker OpenAPI or Alpaca-class source) behind the same data-client seam, if learning evidence needs honest spreads (per D76's ponytail note);

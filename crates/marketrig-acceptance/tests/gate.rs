@@ -4045,13 +4045,16 @@ fn gate() {
         "the new desk's OpenViking user, its key, and its seeded skill",
         || key_issued(&g, &kappa_key) && skill_names(&g, &kappa_key) == ["desk-improvement"],
     );
+    // The seed upload runs behind creation and projects itself when it
+    // lands (§3.2, §5.3), so the file follows the row without an activation.
     let skills_dir = g.workspace(&kappa).join(".agents").join("skills");
-    assert!(
-        projected_names(&skills_dir).is_empty(),
-        "creation writes no skill file (§5.3)"
+    within(
+        Duration::from_secs(30),
+        "the seeded skill's own projection after creation",
+        || projected_names(&skills_dir) == ["desk-improvement"],
     );
 
-    // Activation on Codex projects before the runtime starts (§5.2).
+    // Activation on Codex projects again before the runtime starts (§5.2).
     let (status, activated) = g.api(
         "O3",
         &endpoint,
@@ -4253,29 +4256,41 @@ fn gate() {
         .join("plugin")
         .join(&kappa_id);
     let echoed = transcript(&rt, &endpoint, &kappa_id, Duration::from_secs(30), |text| {
-        text.contains("ENV OPENVIKING_URL=")
+        text.contains("ENV OPENVIKING_HOME=")
     });
-    for expected in [
-        "ENV OPENVIKING_ACCOUNT=marketrig".to_string(),
-        format!("ENV OPENVIKING_API_KEY={kappa_key}"),
-        format!("ENV OPENVIKING_USER={}", desk_user(&kappa_id)),
-        format!("ENV OPENVIKING_HOME={}", plugin_home.display()),
-        format!(
-            "ENV OPENVIKING_CONFIG_FILE={}",
-            plugin_home.join("absent-ov.conf").display()
+    // Paths only: the credentials are the desk's own `ovcli.conf` (§4.3).
+    let path_env = [
+        ("OPENVIKING_HOME", plugin_home.clone()),
+        ("OPENVIKING_CLI_CONFIG_FILE", plugin_home.join("ovcli.conf")),
+        ("OPENVIKING_CONFIG_FILE", plugin_home.join("absent-ov.conf")),
+        ("OPENVIKING_STATE_DIR", plugin_home.join("state")),
+        ("OPENVIKING_PENDING_DIR", plugin_home.join("pending")),
+        (
+            "OPENVIKING_CODEX_STATE_DIR",
+            plugin_home.join("codex-plugin-state"),
         ),
-        format!(
-            "ENV OPENVIKING_CLI_CONFIG_FILE={}",
-            plugin_home.join("absent-ovcli.conf").display()
-        ),
-        "ENV OPENVIKING_MEMORY_ENABLED=1".to_string(),
-        format!("ENV OPENVIKING_URL=http://127.0.0.1:{}", child_port(&g)),
-    ] {
+    ];
+    for (name, value) in &path_env {
+        let expected = format!("ENV {name}={}", value.display());
         assert!(
             echoed.contains(&expected),
             "the runtime process carries §4.3's set: {expected} is missing"
         );
     }
+    assert!(echoed.contains("ENV OPENVIKING_MEMORY_ENABLED=1"));
+    assert!(
+        !echoed.contains("ENV OPENVIKING_API_KEY="),
+        "no secret on the process environment (§4.3)"
+    );
+    let ovcli = parse(&fs::read_to_string(plugin_home.join("ovcli.conf")).expect("ovcli.conf"));
+    assert_eq!(ovcli["api_key"], kappa_key, "{ovcli}");
+    assert_eq!(ovcli["account"], "marketrig");
+    assert_eq!(ovcli["user"], desk_user(&kappa_id));
+    assert_eq!(
+        ovcli["url"],
+        format!("http://127.0.0.1:{}", child_port(&g)),
+        "{ovcli}"
+    );
 
     // Back on Codex: the config entry and the hooks file, which R3's launches
     // never wrote (§4.3).
@@ -4297,6 +4312,17 @@ fn gate() {
         "{config}"
     );
     assert!(config.contains("startup_timeout_sec = 30"), "{config}");
+    // The app-server runs the proxy and the hooks with no per-desk
+    // environment, so the path set is the entry's `env` table and every
+    // hook command's prefix (§4.3).
+    let quoted = |path: &std::path::Path| json!(path.display().to_string()).to_string();
+    assert!(
+        config.contains(&format!(
+            "OPENVIKING_CLI_CONFIG_FILE = {}",
+            quoted(&plugin_home.join("ovcli.conf"))
+        )),
+        "{config}"
+    );
     let codex_hooks = parse(&fs::read_to_string(codex_dir.join("hooks.json")).expect("hooks.json"));
     let field = if cfg!(windows) {
         "commandWindows"
@@ -4304,16 +4330,23 @@ fn gate() {
         "command"
     };
     let capture = codex_hooks["hooks"]["Stop"][0]["hooks"][0].clone();
-    assert_eq!(
-        capture[field],
-        format!(
-            "\"{node}\" \"{}\"",
-            codex_plugin
-                .join("scripts")
-                .join("auto-capture.mjs")
-                .display()
-        ),
-        "one quoted string under the per-platform field (§4.3): {codex_hooks}"
+    let command = capture[field].as_str().unwrap_or_default();
+    let home_prefix = if cfg!(windows) {
+        format!("set \"OPENVIKING_HOME={}\" && ", plugin_home.display())
+    } else {
+        format!("OPENVIKING_HOME=\"{}\" ", plugin_home.display())
+    };
+    assert!(
+        command.contains(&home_prefix)
+            && command.ends_with(&format!(
+                "\"{node}\" \"{}\"",
+                codex_plugin
+                    .join("scripts")
+                    .join("auto-capture.mjs")
+                    .display()
+            ))
+            && !command.contains("OPENVIKING_API_KEY"),
+        "the path set prefixed onto one quoted string under the per-platform field (§4.3): {codex_hooks}"
     );
     assert_eq!(capture["timeout"], 30);
 
@@ -4427,18 +4460,27 @@ fn gate() {
         || g.call(&endpoint, "GET", "/openviking", None).1["desks"][&kappa_id] == json!(true),
     );
     // "The key handed to a session started before a loss equals the one obtained
-    // after Retry" (§3.2). The key lives in the launch environment and nowhere
-    // else, so the next session's echo is where it is read; it is the seeded one,
-    // derived here from OpenViking's own rule.
+    // after Retry" (§3.2). The key lives in the desk's `ovcli.conf`, rewritten
+    // at every launch (§4.3), so the file after the next launch is where it is
+    // read; it is the seeded one, derived here from OpenViking's own rule.
     end_session(&mut g, "O5", &endpoint, &kappa_id);
     one_activation(&mut g, "O5", &kappa, &kappa_id, "o5-again");
-    let same_key = format!("ENV OPENVIKING_API_KEY={kappa_key}");
-    let after_retry = transcript(&rt, &endpoint, &kappa_id, Duration::from_secs(30), |text| {
-        text.contains(&same_key)
-    });
-    assert!(
-        after_retry.contains(&same_key),
-        "the session started after the Retry carries the same seeded key (§3.2)"
+    let ovcli_path = g
+        .out
+        .join("data")
+        .join("openviking")
+        .join("plugin")
+        .join(&kappa_id)
+        .join("ovcli.conf");
+    let after_retry = parse(&fs::read_to_string(&ovcli_path).expect("ovcli.conf after Retry"));
+    assert_eq!(
+        after_retry["api_key"], kappa_key,
+        "the session started after the Retry carries the same seeded key (§3.2): {after_retry}"
+    );
+    assert_eq!(
+        after_retry["url"],
+        format!("http://127.0.0.1:{}", child_port(&g)),
+        "and the restarted child's port (§4.3)"
     );
 
     // The hard kill: the record outlives the daemon, and only the successor's
@@ -4703,6 +4745,10 @@ fn gate() {
             rows.iter()
                 .filter(|row| row["desk_id"].as_str() == Some(id.as_str()))
                 .map(|row| row["kind"].as_str().unwrap_or_default())
+                // The seed skill's own projection lands behind creation on its
+                // own schedule (`openviking-continuity` §3.2, §5.3), so its row
+                // is not part of what creation replays.
+                .filter(|kind| *kind != "SKILLS_PROJECTED")
                 .collect::<Vec<_>>(),
             [
                 "DESK_CREATED",
@@ -4762,6 +4808,13 @@ fn gate() {
 
     // The listing: one desk's own rows, newest first, and `before` paging back
     // through the flood (§4.3).
+    // The seed skill's projection lands behind creation on its own schedule
+    // (`openviking-continuity` §3.2, §5.3); once it has, the listing is settled.
+    within(
+        Duration::from_secs(30),
+        "eta's seeded skill to project itself",
+        || !payloads(&g, &fresh[0], "SKILLS_PROJECTED").is_empty(),
+    );
     let (exit, listed) = g.cli_json("O7", &["--json", "desk", "events", &eta]);
     assert_eq!(exit, 0, "{listed}");
     assert_eq!(
@@ -4771,7 +4824,12 @@ fn gate() {
             .iter()
             .map(|row| row["kind"].as_str().unwrap_or_default())
             .collect::<Vec<_>>(),
-        ["DESK_MEMORY_PROVISIONED", "DESK_READY", "DESK_CREATED"],
+        [
+            "SKILLS_PROJECTED",
+            "DESK_MEMORY_PROVISIONED",
+            "DESK_READY",
+            "DESK_CREATED"
+        ],
         "newest first, and only this desk's (§4.3)"
     );
     let (exit, one) = g.cli_json("O7", &["--json", "desk", "events", &eta, "--limit", "1"]);
@@ -4790,7 +4848,7 @@ fn gate() {
         3,
         "occurred_at_ns, kind, payload as one line (§4.3): {printed:?}"
     );
-    assert_eq!(cells[1], "DESK_MEMORY_PROVISIONED");
+    assert_eq!(cells[1], "SKILLS_PROJECTED");
 
     let mut query = "?limit=3".to_string();
     let mut walked: Vec<(i64, String)> = Vec::new();
