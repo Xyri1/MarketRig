@@ -2423,7 +2423,7 @@ mod tests {
         let code = i32::from(install_fails);
         const UNSATISFIABLE: [&str; 4] = [
             "x No solution found when resolving dependencies:",
-            "--> Because openviking was not found in the provided package locations and",
+            "Because openviking was not found in the provided package locations and",
             "you require openviking==0.4.17.1, we can conclude that your requirements",
             "are unsatisfiable.",
         ];
