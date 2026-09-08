@@ -52,6 +52,11 @@ const SETTLES: Duration = Duration::from_secs(60);
 /// E6: the seed skill's upload summarizes and embeds through a real provider
 /// behind the daemon's 90 s write bound, then projects.
 const SEED_LANDS: Duration = Duration::from_secs(120);
+/// E6: the offline install of the locked wheel set into a cold venv. Pip
+/// unpacks about 100 k files, and on Windows each one meets NTFS and Defender:
+/// 13-17 min measured on 2026-09-08 with `target/acceptance` unexcluded, past
+/// the 15 min patience (the first Windows Claude cell timed out 90 s short).
+const PROVISIONS: Duration = Duration::from_secs(1800);
 
 #[test]
 fn e1_codex_cli() {
@@ -1061,7 +1066,7 @@ fn continuity(scenario: &str, cell: &str, runtime: &str, other: &str) {
     );
     let installation = |g: &Harness| g.call(&endpoint, "GET", "/openviking", None).1;
     assert!(
-        waited(PATIENCE, "the offline provisioning to finish", || {
+        waited(PROVISIONS, "the offline provisioning to finish", || {
             installation(&g)["setup"]["state"] != "PROVISIONING"
         }),
         "provisioning did not finish within the cell's patience: {}",
