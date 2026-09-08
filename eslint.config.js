@@ -14,9 +14,11 @@ export default [
       // with a second candidate `tsconfig.json`.
       ".worktrees/**",
       "scripts/**",
-      // Upstream's plugin trees, vendored byte for byte (feature SPEC
-      // `openviking-continuity` §4.1); linting them would be linting upstream.
+      // Upstream's plugin and skill trees, vendored byte for byte (feature SPEC
+      // `openviking-continuity` §4.1, `hithink-a-share` §5.1); linting them
+      // would be linting upstream.
       "crates/marketrigd/seed/**",
+      "vendor/**",
     ],
   },
   js.configs.recommended,

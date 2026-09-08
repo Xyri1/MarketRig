@@ -104,16 +104,16 @@ No event, no row, no attribution headers read. The route is `GET` only; there is
 
 ### 5.1 Vendoring
 
-`vendor/hithink-finance/` = upstream `skills/hithink-finance/` at commit `<pinned at slice time>` plus `LICENSE`, with `VENDOR.md` naming the commit and date. Unmodified.
+`vendor/hithink-finance/` = upstream `skills/hithink-finance/` at commit `44b7aa34dd504675f3ddaa15b3d478ea16f97884` (`main`, vendored 2026-09-08) plus `LICENSE`, with `VENDOR.md` naming the repository, the commit, the date and the re-vendoring recipe. Unmodified.
 
 ### 5.2 The rewrite script
 
 `scripts/hithink-skill.mjs` (Node, no dependencies) writes `crates/marketrigd/seed/skills/hithink-finance/`:
 
-1. copy `SKILL.md` and `references/api/**`; skip `references/cli*`, `references/mcp*`, `references/python-sdk*`;
-2. in `SKILL.md`, replace the frontmatter `description` with an English one naming `marketrig research hithink`; delete the sections whose headings are `## Skill 低频自更新引导`, `## CLI 低频静默更新自检`, `## 接入方式决策`, `## 统一 API Key`, `## CLI 推荐与联动`, `## 故障路由`; insert after the title the English preamble from `scripts/hithink-skill-preamble.md`, which states: one path — `marketrig research hithink <path> [--param k=v]…`; the daemon holds the key, nothing to install, configure, log into, or update; the response is HiThink's own envelope (`code`, `message`, `request_id`, `data`), success is `code == 0`; large results arrive as a file path; the service covers A-share only, with `thscode` disambiguation through `meta/tickers/search` first; paper trading itself is through the MCP tools, not through this data;
-3. in every kept page, rewrite each fenced `curl 'https://fuyao.aicubes.cn/api/<path>?<q>' \ -H 'X-api-key: …'` block into `marketrig research hithink <path> --param k=v …` by pattern; replace the reference in `api.md` to `llms-full.txt` and to `docs/api/` with the seeded paths;
-4. emit `research_paths.rs` from `references/api/capability-map.md`'s endpoint tables.
+1. copy `SKILL.md`, `references/api.md`, `references/api/**` and `LICENSE` (upstream is MIT: the notice travels with the copy); skip `references/cli*`, `references/mcp*`, `references/python-sdk*` and `agents/`;
+2. in `SKILL.md`, replace the frontmatter `description` with an English one naming `marketrig research hithink`; delete the sections whose headings are `## Skill 低频自更新引导`, `## CLI 低频静默更新自检`, `## 接入方式决策`, `## 统一 API Key`, `## CLI 推荐与联动`, `## 故障路由`; insert after the title the English preamble from `scripts/hithink-skill-preamble.md`, which states: one path — `marketrig research hithink <path> [--param k=v]…`; the daemon holds the key, nothing to install, configure, log into, or update; the response is HiThink's own envelope (`code`, `message`, `request_id`, `data`), success is `code == 0`; large results arrive as a file path; the service covers A-share only, with `thscode` disambiguation through `meta/tickers/search` first; paper trading itself is through the `marketrig` MCP server, not through this data;
+3. in every kept page, rewrite each fenced `curl [-flags] 'https://fuyao.aicubes.cn/api/<path>?<q>' \ -H 'X-api-key: …'` block into `marketrig research hithink <path> --param k=v …` by pattern, whatever wraps it (a `$(…)` capture, a trailing pipe) surviving; then drop every remaining line naming a surface the desk cannot reach — the CLI, an MCP server, the Python SDK, an API key or credential file, a dropped page, the four-surface routing itself — together with the list children that line introduced, renumbering an ordered list the drop broke, and drop `api.md`'s `## 维护规则`, which tells its reader to edit the projection and run upstream's mirror script (the projection is read-only, per D83). All links in the kept tree are relative and resolve inside it;
+4. emit `research_paths.rs` from `references/api/capability-map.md`'s endpoint tables: the header, `RESEARCH_PATHS`, and the `#[cfg(test)]` module lines for the two hand-written check modules under `crates/marketrigd/src/research_paths/`.
 
 The output is committed; CI runs the script and fails on a diff (like `pnpm generate`).
 
@@ -153,12 +153,12 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 - `feed::hithink_change_detection` — an unchanged triple refreshes health without advancing sequence.
 - `feed::cn_phase_from_trading_days` — today absent → `CLOSED` with `HITHINK`; no set → weekday rule with `WEEKDAY`; refresh after Shanghai midnight.
 - `feed::observation_provenance` — extended with `provider`, `calendar`, and the null `source_time_ns`.
-- `research::allowlist_matches_capability_map` — regenerate and compare.
+- `research::allowlist_matches_capability_map` — parse the vendored capability map and compare; 59 paths.
 - `research::codes` — each §4.1 refusal; upstream nonzero `code` passes through as `200`.
 - `research::spacing` — two back-to-back calls are ≥ 200 ms apart upstream.
 - `cli::research_spill` — 256 KiB boundary and `--out`.
 - `skill::rewritten_examples_route_through_marketrig` — the seed contains no forbidden strings (§6.2 H4) and reports how many curl blocks the pattern rewrote versus left.
-- `skill::seed_is_current` — script output equals the committed seed.
+- `skill::seed_is_current` — `node scripts/hithink-skill.mjs --check` succeeds; skipped with a printed note where `node` is not on PATH, since CI runs the same check itself.
 - `store::migration_9_applies`.
 
 **Gate:** H1–H4 after O10 on the stand-in.

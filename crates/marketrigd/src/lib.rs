@@ -15,6 +15,7 @@ pub mod node;
 pub mod openviking;
 pub mod plugin;
 pub mod policy;
+pub mod research_paths;
 pub mod runtime;
 pub mod schedule;
 pub mod session;
