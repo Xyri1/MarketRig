@@ -75,6 +75,8 @@ a desk buys and sells one equity on a real market quote
 
 **Produced** by the gate's G13, G15, and G17 on both platforms — a USD round trip whose closing fill commits the cycle and its queued evaluation in one transaction, a Hong Kong round trip closing in HKD with commissions at the HK rate, and a restart after which a resting order stands under its original client order identifier — and by the attended E1 and E2 on 2026-09-02 across the four cells: a real Codex CLI session and a real Claude Code session each read the desk's quote resource twice, then submitted and cancelled a resting paper order through the typed tools, the harness verifying by the daemon's own rows (macOS bundles `experiment-codex-1788316954` and `experiment-claude-1788317581`; Windows bundles `experiment-codex-1788357048` and `experiment-claude-1788356517`).
 
+**Corrective slice (2026-09-08):** [012 — limit-order history](slices/012-limit-order-history.md) makes an order's stored chain the node's own event list, so a limit order that fills on arrival — whose `OrderSubmitted` and `OrderAccepted` NautilusTrader never publishes — replays into `GET /desks/{id}/history/orders` instead of being dropped from it. Found by E6 on 2026-09-08; covered by a module check and by G14.
+
 **Why here:** stocks lead the trading ladder (per D76), the trading plane is the product's reason to exist and the one thing the spikes proved outright, and running both real runtimes against the MCP surface this early settles the surface-split risk (per D4) before four other milestones depend on it.
 
 Dependencies: Milestone R0.
@@ -327,7 +329,6 @@ Portability is excluded per D13. Mechanics intentionally left unresolved are lis
 - OpenBB research integration (per D9), deferred on scope: MVP evidence does not need research data;
 - direct NautilusTrader or OpenBB APIs as product contracts;
 - automatic trigger execution or delivery retry;
-- replaying a `LIMIT` order in trading history: its stored events carry no `OrderSubmitted` or `OrderAccepted`, so `GET /desks/{id}/history/orders` cannot reconstruct it and omits it — found by E6 on 2026-09-08, and the fix owes a gate regression on a limit order that never fills ([SPEC.md](SPEC.md) §18);
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;
 - venues beyond the supported equity markets and Kraken, and asset classes beyond equities and crypto (FX, options, …);
 - a keyed real-book equity feed (broker OpenAPI or Alpaca-class source) behind the same data-client seam, if learning evidence needs honest spreads (per D76's ponytail note);

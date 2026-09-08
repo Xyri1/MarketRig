@@ -1248,76 +1248,168 @@ pub(crate) fn install_capture(desk_id: String, store: Store, cache: Rc<RefCell<C
     );
 }
 
+/// A fill's `fills` columns, as decimal text exactly as NautilusTrader reported
+/// them (§5).
+struct FillRow {
+    trade_id: String,
+    side: String,
+    quantity: String,
+    price: String,
+    commission: String,
+    currency: String,
+}
+
+/// One `order_events` row — and, for a fill, its `fills` row — as plain data the
+/// database thread can take.
+struct EventRow {
+    /// NautilusTrader's own `event_id`, which is what makes a row identifiable
+    /// across captures without a schema of MarketRig's own.
+    event_id: String,
+    instrument_id: String,
+    /// The event's own type name, which is what `order_events.kind` records (§5).
+    kind: &'static str,
+    payload: String,
+    occurred_at_ns: i64,
+    fill: Option<FillRow>,
+}
+
+fn event_row(event: &OrderEventAny) -> Result<EventRow, serde_json::Error> {
+    let boxed = event.clone().into_boxed();
+    Ok(EventRow {
+        event_id: boxed.id().to_string(),
+        instrument_id: event.instrument_id().to_string(),
+        kind: boxed.type_name(),
+        payload: serde_json::to_string(event)?,
+        occurred_at_ns: event.ts_event().as_u64() as i64,
+        fill: match event {
+            OrderEventAny::Filled(fill) => Some(FillRow {
+                trade_id: fill.trade_id.to_string(),
+                side: fill.order_side.to_string(),
+                quantity: fill.last_qty.to_string(),
+                price: fill.last_px.to_string(),
+                // ponytail: with the explicit fee model the sandbox is configured
+                // with, nautilus always reports a commission; the "0" exists only
+                // because `fills.commission` is STRICT NOT NULL. The upgrade path is
+                // a nullable column if a legitimate `None` ever appears.
+                commission: fill
+                    .commission
+                    .map_or_else(|| "0".to_string(), |money| money.as_decimal().to_string()),
+                currency: fill.currency.code.to_string(),
+            }),
+            _ => None,
+        },
+    })
+}
+
+/// The `event_id` inside a stored `order_events` payload. NautilusTrader
+/// serializes an order event as a one-key object naming the variant, so the id
+/// is one level down, whatever the variant is.
+fn stored_event_id(payload: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(payload).ok()?;
+    let (_, body) = value.as_object()?.iter().next()?;
+    Some(body.get("event_id")?.as_str()?.to_owned())
+}
+
 fn capture_order(desk_id: &str, store: &Store, cache: &Rc<RefCell<Cache>>, event: &OrderEventAny) {
-    let payload = match serde_json::to_string(event) {
-        Ok(payload) => payload,
+    let client_order_id = event.client_order_id();
+    let book = cache.borrow();
+    // The node's *order* is the chain MarketRig stores, not the stream that woke
+    // this handler. The sandbox execution client installs an event handler on its
+    // matching engine, so both dispatch their order events through the runner
+    // channel rather than straight to the execution engine (nautilus-sandbox
+    // `execution.rs`, `set_event_handler` at nautilus-execution
+    // `matching_engine/mod.rs`), and one submit's events are all drained after it
+    // returns. By then a limit order that was marketable on arrival has had its
+    // cached order replaced by the matching engine's own accepted copy, so the
+    // `OrderSubmitted` and `OrderAccepted` that follow are refused as invalid
+    // transitions and never published. Storing only what is published leaves a
+    // chain `OrderAny::from_events` cannot replay, and the order drops out of the
+    // history (§5, R1-5). These are still NautilusTrader's own event payloads,
+    // verbatim (per D38).
+    let chain: Vec<OrderEventAny> = book
+        .order(&client_order_id)
+        .map(|order| order.events().into_iter().cloned().collect())
+        .unwrap_or_default();
+    let snapshot = snapshot_payload(&book);
+    drop(book);
+
+    let rows = chain
+        .iter()
+        .chain(std::iter::once(event))
+        .map(event_row)
+        .collect::<Result<Vec<_>, _>>();
+    let mut rows = match rows {
+        Ok(rows) => rows,
         Err(e) => {
             tracing::error!("an order event could not be captured: {e}");
             return;
         }
     };
-    let desk = desk_id.to_owned();
-    let client_order_id = event.client_order_id().to_string();
-    let instrument_id = event.instrument_id().to_string();
-    // The event's own type name, which is what `order_events.kind` records (§5).
-    let kind = event.clone().into_boxed().type_name();
-    let occurred_at_ns = event.ts_event().as_u64() as i64;
-    let fill = match event {
-        OrderEventAny::Filled(fill) => Some((
-            fill.trade_id.to_string(),
-            fill.order_side.to_string(),
-            fill.last_qty.to_string(),
-            fill.last_px.to_string(),
-            // ponytail: with the explicit fee model the sandbox is configured
-            // with, nautilus always reports a commission; the "0" exists only
-            // because `fills.commission` is STRICT NOT NULL. The upgrade path is
-            // a nullable column if a legitimate `None` ever appears.
-            fill.commission
-                .map_or_else(|| "0".to_string(), |money| money.as_decimal().to_string()),
-            fill.currency.code.to_string(),
-        )),
-        _ => None,
-    };
-    let snapshot = snapshot_payload(&cache.borrow());
+    // The order speaks for this event only when it already carries it; an event
+    // for an order the node never cached is stored on its own. Either way the
+    // event appended above is a duplicate of a chain entry or the whole answer.
+    let this = rows.pop().expect("the event's own row");
+    if !rows.iter().any(|row| row.event_id == this.event_id) {
+        rows = vec![this];
+    }
 
+    let desk = desk_id.to_owned();
+    let client_order_id = client_order_id.to_string();
     let written = store.unit(move |tx| {
-        tx.execute(
-            "INSERT INTO order_events \
-             (id, desk_id, client_order_id, instrument_id, kind, payload_version, payload, occurred_at_ns) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                Uuid::now_v7().to_string(),
-                desk,
-                client_order_id,
-                instrument_id,
-                kind,
-                PAYLOAD_VERSION,
-                payload,
-                occurred_at_ns
-            ],
-        )?;
-        if let Some((trade_id, side, quantity, price, commission, currency)) = fill {
+        // Identity, never position: the stored rows need not be a prefix of the
+        // order's chain — a database written before this rule, or a restored
+        // order re-placed without its client-side `OrderSubmitted`, is not one —
+        // and re-inserting an event would duplicate its fill too.
+        let mut seen: Vec<String> = Vec::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT payload FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
+            )?;
+            let mut stored = statement.query(params![desk, client_order_id])?;
+            while let Some(row) = stored.next()? {
+                seen.extend(stored_event_id(&row.get::<_, String>(0)?));
+            }
+        }
+        for row in rows.iter().filter(|row| !seen.contains(&row.event_id)) {
             tx.execute(
-                "INSERT INTO fills \
-                 (id, desk_id, client_order_id, trade_id, instrument_id, side, quantity, price, \
-                  commission, currency, payload_version, payload, occurred_at_ns) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO order_events \
+                 (id, desk_id, client_order_id, instrument_id, kind, payload_version, payload, occurred_at_ns) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     Uuid::now_v7().to_string(),
                     desk,
                     client_order_id,
-                    trade_id,
-                    instrument_id,
-                    side,
-                    quantity,
-                    price,
-                    commission,
-                    currency,
+                    row.instrument_id,
+                    row.kind,
                     PAYLOAD_VERSION,
-                    payload,
-                    occurred_at_ns
+                    row.payload,
+                    row.occurred_at_ns
                 ],
             )?;
+            // Gated by the same identity, so one trade id can never land twice.
+            if let Some(fill) = &row.fill {
+                tx.execute(
+                    "INSERT INTO fills \
+                     (id, desk_id, client_order_id, trade_id, instrument_id, side, quantity, price, \
+                      commission, currency, payload_version, payload, occurred_at_ns) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        Uuid::now_v7().to_string(),
+                        desk,
+                        client_order_id,
+                        fill.trade_id,
+                        row.instrument_id,
+                        fill.side,
+                        fill.quantity,
+                        fill.price,
+                        fill.commission,
+                        fill.currency,
+                        PAYLOAD_VERSION,
+                        row.payload,
+                        row.occurred_at_ns
+                    ],
+                )?;
+            }
         }
         write_snapshot(tx, &desk, &snapshot)
     });
@@ -1960,6 +2052,181 @@ fn snapshot_restores_book() {
         "restoration added no order events; the cancel added its own: {before:?} -> {after:?}"
     );
     restarted.stop_all();
+}
+
+/// A LIMIT order's stored chain must replay through `OrderAny::from_events`, so
+/// `GET /desks/{id}/history/orders` lists it (§7, R1-5). The marketable one
+/// fills on arrival, the other rests and is cancelled: both chains must come
+/// back.
+#[cfg(test)]
+#[test]
+fn limit_order_history_replays() {
+    use std::sync::Arc;
+
+    use crate::feed::{self, MarketState};
+
+    let aapl = catalog::find("AAPL.XNAS").unwrap();
+    let (_dir, store) = crate::store::open_temp();
+    let (base, _hits) = feed::scripted_server(vec![(
+        200,
+        feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let desk = crate::node::seeded_desk(&store, "alpha");
+    let registry = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(feed::FeedBase::standin(base)),
+    );
+    registry.ensure(&desk).expect("the node starts");
+    crate::node::within(10, "the first observation", || {
+        registry.market().read(aapl, now_ns()).sequence == 1
+    });
+
+    // Marketable: the venue accepts and fills it in the same turn.
+    let (filled, _) = submit(
+        &store,
+        &registry,
+        &desk,
+        r#"{"action_id":"limit-fill-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"LIMIT","quantity":"1","price":"400.00"}"#,
+        &Source::Session,
+    )
+    .expect("the marketable limit buy is accepted");
+    assert_eq!(filled.outcome.clone().unwrap()["status"], "FILLED");
+
+    // Resting, then cancelled.
+    let (rested, _) = submit(
+        &store,
+        &registry,
+        &desk,
+        r#"{"action_id":"limit-rest-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"LIMIT","quantity":"5","price":"200.00"}"#,
+        &Source::Session,
+    )
+    .expect("the resting limit buy is accepted");
+    assert_eq!(rested.outcome.clone().unwrap()["status"], "ACCEPTED");
+    cancel(
+        &store,
+        &registry,
+        &desk,
+        "limit-rest-1",
+        r#"{"action_id":"cancel-limit-1"}"#,
+        &Source::Session,
+    )
+    .expect("the resting limit buy cancels");
+    registry.stop_all();
+
+    let stored: Vec<(String, String)> = store
+        .call(|conn| {
+            conn.prepare(
+                "SELECT client_order_id, kind FROM order_events ORDER BY occurred_at_ns, id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
+        })
+        .unwrap();
+
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|(id, _)| id == "limit-fill-1")
+            .map(|(_, kind)| kind.as_str())
+            .collect::<Vec<_>>(),
+        // The node's own chain: the sandbox never publishes this order's
+        // `OrderSubmitted`, and its `OrderAccepted` reaches only the order.
+        vec!["OrderInitialized", "OrderAccepted", "OrderFilled"],
+        "the stored chain is the node's own: {stored:?}"
+    );
+
+    let history = history_orders(&store, &desk).expect("the history reads");
+    let listed: Vec<(&str, &str)> = history
+        .iter()
+        .map(|order| {
+            (
+                order["client_order_id"].as_str().unwrap(),
+                order["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        vec![("limit-rest-1", "CANCELED"), ("limit-fill-1", "FILLED")],
+        "every limit order replays, newest first; stored chain: {stored:?}"
+    );
+}
+
+/// A chain stored before §5's rule — the E6 databases, `OrderInitialized` and
+/// `OrderFilled` with the acceptance missing — is repaired by the next capture
+/// and never duplicated. Selecting the tail by position would re-insert the fill
+/// and its `fills` row; identity does not.
+#[cfg(test)]
+#[test]
+fn capture_repairs_a_chain_stored_without_its_acceptance() {
+    use std::sync::Arc;
+
+    use crate::feed::{self, MarketState};
+
+    let aapl = catalog::find("AAPL.XNAS").unwrap();
+    let (_dir, store) = crate::store::open_temp();
+    let (base, _hits) = feed::scripted_server(vec![(
+        200,
+        feed::chart_body("AAPL", "USD", "316.85", 1_788_206_401),
+    )]);
+    let desk = crate::node::seeded_desk(&store, "alpha");
+    let registry = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(feed::FeedBase::standin(base)),
+    );
+    registry.ensure(&desk).expect("the node starts");
+    crate::node::within(10, "the first observation", || {
+        registry.market().read(aapl, now_ns()).sequence == 1
+    });
+
+    // Marketable for one lot, so it fills once and rests: cancellable later.
+    submit(
+        &store,
+        &registry,
+        &desk,
+        r#"{"action_id":"old-aapl-1","instrument_id":"AAPL.XNAS",
+            "side":"BUY","type":"LIMIT","quantity":"5","price":"400.00"}"#,
+        &Source::Session,
+    )
+    .expect("the marketable limit buy is accepted");
+
+    // Rewind to what the old rule stored: only what the bus carried.
+    store
+        .unit(|tx| tx.execute("DELETE FROM order_events WHERE kind = 'OrderAccepted'", []))
+        .expect("the acceptance is removed");
+    assert_eq!(count(&store, "SELECT count(*) FROM order_events"), 2);
+    assert_eq!(count(&store, "SELECT count(*) FROM fills"), 1);
+
+    cancel(
+        &store,
+        &registry,
+        &desk,
+        "old-aapl-1",
+        r#"{"action_id":"cancel-old-1"}"#,
+        &Source::Session,
+    )
+    .expect("the order cancels");
+    registry.stop_all();
+
+    assert_eq!(
+        count(&store, "SELECT count(*) FROM order_events"),
+        4,
+        "the acceptance is restored and nothing is stored twice"
+    );
+    assert_eq!(
+        count(&store, "SELECT count(*) FROM fills"),
+        1,
+        "one trade id, one fill row"
+    );
+    let history = history_orders(&store, &desk).expect("the history reads");
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0]["client_order_id"], "old-aapl-1");
+    assert_eq!(history[0]["status"], "CANCELED");
+    assert_eq!(history[0]["filled_quantity"], "1");
 }
 
 /// Every venue account's total balance, as decimal text — the comparable shape

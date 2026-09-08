@@ -138,6 +138,25 @@ fn history_counts(g: &Harness, desk_id: &str) -> (i64, i64, i64) {
     )
 }
 
+/// The whole log root, greppable. The appender writes straight through, so a
+/// line a route logged is on disk by the time that route has answered. Every
+/// step is unwrapped: an assertion over an unreadable log root would pass
+/// vacuously.
+fn logs(g: &Harness) -> String {
+    let root = g.out.join("logs");
+    let read = fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("the log root {} must be readable: {e}", root.display()));
+    let text: String = read
+        .map(|entry| {
+            let path = entry.expect("a log entry").path();
+            fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()))
+        })
+        .collect();
+    assert!(!text.is_empty(), "the log root {} is empty", root.display());
+    text
+}
+
 /// One code-bearing trigger's snapshot source: the single line the
 /// `trigger-code` binary reads back (R2 feature SPEC §10.1). The file lives in
 /// the evidence bundle, so every script the gate ran is in it by construction.
@@ -1312,6 +1331,88 @@ fn gate() {
     let (_, open) = g.call(&endpoint, "GET", &orders_path, None);
     assert_eq!(open["orders"].as_array().map(Vec::len), Some(0));
 
+    // A limit order that is marketable on arrival takes the venue's other path:
+    // it is accepted and filled inside one turn, and NautilusTrader then refuses
+    // its own `OrderSubmitted` and `OrderAccepted` as invalid transitions, so
+    // neither is ever published. The desk's chain must still be the node's own,
+    // and the order must still replay into the history (slice 012).
+    let (status, taker) = g.api(
+        "G14",
+        &endpoint,
+        "POST",
+        &orders_path,
+        Some(&limit("g14-taker-aapl", "AAPL.XNAS", "BUY", "5", "999.00")),
+    );
+    assert_eq!(status, 201, "{taker}");
+    assert_eq!(taker["outcome"]["status"], "PARTIALLY_FILLED", "{taker}");
+    let (status, taker_cancelled) = g.api(
+        "G14",
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk}/orders/g14-taker-aapl/cancel"),
+        Some(r#"{"action_id":"g14-cancel-taker"}"#),
+    );
+    assert_eq!(status, 200, "{taker_cancelled}");
+    assert_eq!(taker_cancelled["outcome"]["status"], "CANCELED");
+    let taker_filled = taker_cancelled["outcome"]["filled_quantity"].clone();
+
+    let kinds = g.column(
+        "SELECT kind FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2 \
+         ORDER BY occurred_at_ns, id",
+        &[&desk, &"g14-taker-aapl"],
+    );
+    assert_eq!(
+        (
+            kinds.first().map(String::as_str),
+            kinds.get(1).map(String::as_str),
+            kinds.last().map(String::as_str),
+        ),
+        (
+            Some("OrderInitialized"),
+            Some("OrderAccepted"),
+            Some("OrderCanceled"),
+        ),
+        "the acceptance the bus never carried is stored from the node's own order: {kinds:?}",
+    );
+    let (_, history) = g.api(
+        "G14",
+        &endpoint,
+        "GET",
+        &format!("/desks/{desk}/history/orders"),
+        None,
+    );
+    let replayed = history["orders"]
+        .as_array()
+        .expect("orders")
+        .iter()
+        .find(|order| order["client_order_id"] == "g14-taker-aapl")
+        .unwrap_or_else(|| panic!("the marketable limit order must be listed: {history}"));
+    assert_eq!(replayed["status"], "CANCELED");
+    assert_eq!(replayed["filled_quantity"], taker_filled);
+    assert!(
+        !logs(&g).contains("could not be replayed"),
+        "no order was dropped from the history"
+    );
+
+    // Flat again, so what follows sees the book G13 left.
+    let (status, flattened) = g.api(
+        "G14",
+        &endpoint,
+        "POST",
+        &orders_path,
+        Some(&limit(
+            "g14-flat-aapl",
+            "AAPL.XNAS",
+            "SELL",
+            taker_filled.as_str().expect("a filled quantity"),
+            "1.00",
+        )),
+    );
+    assert_eq!(status, 201, "{flattened}");
+    assert_eq!(flattened["outcome"]["status"], "FILLED", "{flattened}");
+    let (_, positions) = g.api("G14", &endpoint, "GET", &positions_path, None);
+    assert_eq!(positions["positions"].as_array().map(Vec::len), Some(0));
+
     let (status, envelope) = g.api(
         "G14",
         &endpoint,
@@ -1323,8 +1424,8 @@ fn gate() {
     assert_eq!(envelope["code"], "ORDER_NOT_FOUND");
     g.note(
         "G14",
-        "a limit order rested, replayed once, cancelled, and an unknown id refused",
-        json!({ "record": rested, "cancel": cancelled }),
+        "a limit order rested, replayed once, cancelled, a marketable one filled on arrival and still replayed into the history, and an unknown id was refused",
+        json!({ "record": rested, "cancel": cancelled, "taker": taker_cancelled, "replayed": replayed }),
     );
 
     // --- G15 — non-USD cycle ------------------------------------------------
