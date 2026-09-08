@@ -46,4 +46,6 @@ jobs:
       - run: pnpm generate
       - name: The generated client matches the daemon's document
         run: git diff --exit-code openapi.json src/client
+      - name: The seeded HiThink skill matches the vendored one
+        run: node scripts/hithink-skill.mjs --check
       - run: pnpm check
