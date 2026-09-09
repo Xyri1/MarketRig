@@ -399,11 +399,31 @@ fn build(
         )
         .map_err(|e| e.to_string())?;
 
+    // The A-share feasibility spike's controlled-clock seam
+    // (`feasibility/clock.rs`). It compiles only under `cfg(test)`, and only a
+    // desk the harness registered gets one; every other desk, and every non-test
+    // build, takes the branches below unchanged.
+    #[cfg(test)]
+    let controlled = crate::feasibility::clock::controlled(desk_id);
+    #[cfg(test)]
+    if let Some(clock) = controlled.clone() {
+        builder = builder.with_clock_factory(move || clock.clone() as Rc<RefCell<dyn Clock>>);
+    }
+
     for (venue, market_key) in venues() {
+        let exec_factory: Box<dyn nautilus_common::factories::SimulatedExecutionClientFactory> = {
+            #[cfg(test)]
+            match controlled.clone() {
+                Some(clock) => Box::new(crate::feasibility::clock::ControlledSandboxFactory(clock)),
+                None => Box::new(SandboxExecutionClientFactory::new()),
+            }
+            #[cfg(not(test))]
+            Box::new(SandboxExecutionClientFactory::new())
+        };
         builder = builder
             .add_simulated_exec_client(
                 Some(venue.to_string()),
-                Box::new(SandboxExecutionClientFactory::new()),
+                exec_factory,
                 Box::new(sandbox_config(trader_id, desk_id, venue, market_key)),
             )
             .map_err(|e| e.to_string())?;
