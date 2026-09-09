@@ -436,9 +436,9 @@ fn pause_gates_cn_matching_and_submission() {
     let TradeError::Rejected(reason) = &refused else {
         panic!("expected a sandbox rejection, got {refused:?}");
     };
-    assert!(
-        reason.contains("PAUSED") && reason.contains("600519.XSHG"),
-        "the sandbox names the paused market: {reason:?}"
+    assert_eq!(
+        reason, "Market 600519.XSHG is PAUSED, cannot accept order f1-pause-shut",
+        "the sandbox's own words for the refusal"
     );
     assert_eq!(
         kinds(&store, &desk, "f1-pause-shut"),
@@ -491,6 +491,34 @@ fn pause_gates_cn_matching_and_submission() {
     assert_eq!(
         filled.1, CN_1300 as i64,
         "and it is stamped at the reopen instant"
+    );
+
+    // The day close is the same mechanism with a different action:
+    // `MarketStatusAction::Close` (or `Halt`) reaches `MarketStatus::Closed`
+    // (`mod.rs:2307-2311`), which gates `iterate` and `process_order` exactly as
+    // `Paused` does — so §5.1's lunch pause and its 14:57 close need no separate
+    // machinery, only a different word in the refusal.
+    let close = CN_1300 + 6_420 * SECOND_NS;
+    advance(&node, close);
+    publish_status(&node, moutai(), MarketStatusAction::Close, close);
+    let shut = order(
+        &store,
+        &registry,
+        &desk,
+        "f1-pause-late",
+        "600519.XSHG",
+        "BUY",
+        "LIMIT",
+        100,
+        Some("1800.00"),
+    )
+    .expect_err("the closed engine refuses a new order");
+    let TradeError::Rejected(reason) = &shut else {
+        panic!("expected a sandbox rejection, got {shut:?}");
+    };
+    assert_eq!(
+        reason,
+        "Market 600519.XSHG is CLOSED, cannot accept order f1-pause-late",
     );
     registry.stop_all();
 }
