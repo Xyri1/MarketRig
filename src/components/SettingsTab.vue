@@ -20,6 +20,10 @@ import {
 } from "reka-ui";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
+  hithinkDelete,
+  hithinkPatch,
+  hithinkProvider,
+  hithinkPut,
   memoryProvider,
   memoryProviderRow,
   openviking,
@@ -34,6 +38,7 @@ import {
 } from "../client";
 import type {
   Envelope,
+  HithinkProvider,
   OpenVikingStatus,
   Provider,
   Resource,
@@ -50,6 +55,10 @@ const { quit } = useDaemon();
 const rows = ref<Runtime[]>([]);
 const explicit = reactive(new Map<string, string>());
 const memory = ref<Provider | null>(null);
+const hithink = ref<HithinkProvider | null>(null);
+// Write-only like the memory key: the row answers `api_key_present`, never a
+// key (feature SPEC §1.2).
+const hithinkKey = ref("");
 const ov = ref<OpenVikingStatus | null>(null);
 const paths = reactive({ python: "", node: "" });
 // What the daemon's fixed-list search found, kept so a refetch of an
@@ -84,6 +93,30 @@ async function loadMemory(): Promise<void> {
   form.base_url = answer.data?.base_url ?? "";
   form.llm = answer.data?.llm_model ?? "";
   form.embedding = answer.data?.embedding_model ?? "";
+}
+
+async function loadHithink(): Promise<void> {
+  const answer = await hithinkProvider();
+  if (refused(answer.error)) return;
+  hithink.value = answer.data ?? null;
+}
+
+async function saveHithink(): Promise<void> {
+  const answer = await hithinkPut({ body: { api_key: hithinkKey.value } });
+  if (!refused(answer.error)) hithinkKey.value = "";
+  await loadHithink();
+}
+
+async function removeHithink(): Promise<void> {
+  refused((await hithinkDelete()).error);
+  await loadHithink();
+}
+
+/** The tick box is the whole choice of which client serves `CN` (§1.4). */
+async function setAShareFeed(hithinkFeed: boolean): Promise<void> {
+  const body = { a_share_feed: hithinkFeed ? "HITHINK" : "YAHOO" };
+  refused((await hithinkPatch({ body })).error);
+  await loadHithink();
 }
 
 /** The row and the child's live state; `PROVISIONING` polls itself (§8). */
@@ -172,6 +205,7 @@ async function toggleAutostart(on: boolean): Promise<void> {
 const off = [
   on(["RUNTIME_DISCOVERED", "RUNTIME_UNAVAILABLE"], () => void loadRuntimes()),
   on("OPENVIKING_CONFIGURED", () => void loadMemory()),
+  on("HITHINK_PROVIDER_CHANGED", () => void loadHithink()),
   on(
     [
       "OPENVIKING_PROVISIONED",
@@ -192,6 +226,7 @@ onMounted(async () => {
   await Promise.all([
     loadRuntimes(),
     loadMemory(),
+    loadHithink(),
     loadOpenViking(),
     loadPolicies(),
   ]);
@@ -371,6 +406,70 @@ onMounted(async () => {
           {{ t("settings.memory.save") }}
         </button>
       </form>
+    </section>
+
+    <section v-if="hithink" class="flex flex-col gap-2" data-testid="hithink">
+      <p class="text-xs text-ink-muted">{{ t("settings.hithink.title") }}</p>
+      <p class="terminal text-sm wrap-anywhere">
+        {{ hithink.state }}
+        {{
+          hithink.validated_at_ns
+            ? new Date(hithink.validated_at_ns / 1_000_000).toLocaleString()
+            : ""
+        }}
+      </p>
+      <p
+        v-if="hithink.failure_message"
+        class="terminal text-sm wrap-anywhere"
+        data-testid="hithink-failure"
+      >
+        {{ hithink.failure_code }} {{ hithink.failure_message }}
+      </p>
+      <p class="text-xs text-ink-muted">
+        {{
+          t(
+            hithink.api_key_present
+              ? "settings.hithink.keySet"
+              : "settings.hithink.keyUnset",
+          )
+        }}
+      </p>
+      <form class="flex gap-2" @submit.prevent="saveHithink()">
+        <input
+          v-model="hithinkKey"
+          type="password"
+          class="terminal flex-1 rounded-control border border-line px-2 py-1"
+          data-testid="hithink-key"
+          :aria-label="t('settings.hithink.apiKey')"
+          :placeholder="t('settings.hithink.apiKey')"
+        />
+        <button
+          type="submit"
+          class="rounded-control border border-line px-2 py-1"
+          data-testid="hithink-save"
+        >
+          {{ t("settings.hithink.save") }}
+        </button>
+        <button
+          v-if="hithink.api_key_present"
+          type="button"
+          class="rounded-control border border-line px-2 py-1"
+          data-testid="hithink-remove"
+          @click="removeHithink()"
+        >
+          {{ t("settings.hithink.remove") }}
+        </button>
+      </form>
+      <label class="flex items-center gap-2">
+        <input
+          type="checkbox"
+          data-testid="hithink-feed"
+          :checked="hithink.a_share_feed === 'HITHINK'"
+          :disabled="!hithink.api_key_present"
+          @change="setAShareFeed(($event.target as HTMLInputElement).checked)"
+        />
+        <span>{{ t("settings.hithink.aShareFeed") }}</span>
+      </label>
     </section>
 
     <section v-if="policy" class="flex flex-col gap-2">

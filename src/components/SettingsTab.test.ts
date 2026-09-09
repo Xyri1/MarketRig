@@ -37,7 +37,22 @@ function status(
   return { setup, child, desks: {} };
 }
 
+/** `GET /research/hithink`; the row never carries a key (feature SPEC §1.2). */
+function hithinkRow(
+  over: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    state: "UNCONFIGURED",
+    a_share_feed: "YAHOO",
+    api_key_present: false,
+    base_url: "https://fuyao.aicubes.cn",
+    ...over,
+  };
+}
+
 let put: string | null = null;
+let hithinkSent: string | null = null;
+let hithink: Record<string, unknown>;
 let runtimes: unknown[] = [];
 let ov: Record<string, unknown>;
 let candidates: Record<string, unknown>;
@@ -45,6 +60,8 @@ let setupAnswer: () => { status: number; body?: unknown };
 
 beforeEach(() => {
   put = null;
+  hithinkSent = null;
+  hithink = hithinkRow();
   vi.mocked(enable).mockClear();
   vi.mocked(isEnabled).mockResolvedValue(false);
   runtimes = [
@@ -65,6 +82,25 @@ beforeEach(() => {
         embedding_model: "m-2",
       },
     }),
+    "GET /research/hithink": () => ({ status: 200, body: hithink }),
+    "PUT /research/hithink": (request) => {
+      hithinkSent = request.body;
+      hithink = hithinkRow({
+        state: "AVAILABLE",
+        a_share_feed: "HITHINK",
+        api_key_present: true,
+        validated_at_ns: 1_700_000_000_000_000_000,
+      });
+      return { status: 200, body: hithink };
+    },
+    "PATCH /research/hithink": (request) => {
+      hithinkSent = request.body;
+      return { status: 200, body: hithink };
+    },
+    "DELETE /research/hithink": () => {
+      hithink = hithinkRow();
+      return { status: 200, body: hithink };
+    },
     "GET /openviking": () => ({ status: 200, body: ov }),
     "GET /openviking/candidates": () => ({ status: 200, body: candidates }),
     "PUT /openviking/setup": () => setupAnswer(),
@@ -215,6 +251,110 @@ it("shows a PYTHON_UNSUPPORTED refusal beside the fields", async () => {
   expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
     "UNCONFIGURED",
   );
+});
+
+it("renders each HiThink state, with the message the row carries", async () => {
+  let wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  expect(wrapper.get('[data-testid="hithink"]').text()).toContain(
+    "UNCONFIGURED",
+  );
+  expect(wrapper.find('[data-testid="hithink-failure"]').exists()).toBe(false);
+
+  hithink = hithinkRow({
+    state: "AVAILABLE",
+    a_share_feed: "HITHINK",
+    api_key_present: true,
+    validated_at_ns: 1_700_000_000_000_000_000,
+  });
+  wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  expect(wrapper.get('[data-testid="hithink"]').text()).toContain("AVAILABLE");
+
+  hithink = hithinkRow({
+    state: "UNAVAILABLE",
+    a_share_feed: "HITHINK",
+    api_key_present: true,
+    failure_code: "KEY_REJECTED",
+    failure_message: "HiThink rejected the stored key.",
+  });
+  wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  expect(wrapper.get('[data-testid="hithink-failure"]').text()).toContain(
+    "KEY_REJECTED HiThink rejected the stored key.",
+  );
+});
+
+it("saves the HiThink key, clears the field, and never shows it back", async () => {
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  await wrapper.get('[data-testid="hithink-key"]').setValue("k-1");
+  await wrapper.get('[data-testid="hithink"] form').trigger("submit");
+  await flushPromises();
+
+  expect(hithinkSent).toBe('{"api_key":"k-1"}');
+  const field = wrapper.get('[data-testid="hithink-key"]')
+    .element as HTMLInputElement;
+  expect(field.value).toBe("");
+  expect(wrapper.get('[data-testid="hithink"]').text()).not.toContain("k-1");
+
+  // Remove appears only once a key is stored, and returns the row.
+  await wrapper.get('[data-testid="hithink-remove"]').trigger("click");
+  await flushPromises();
+  expect(wrapper.get('[data-testid="hithink"]').text()).toContain(
+    "UNCONFIGURED",
+  );
+});
+
+it("gates the A-share tick box on a stored key and PATCHes the feed", async () => {
+  let wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  const unkeyed = wrapper.get('[data-testid="hithink-feed"]');
+  expect(unkeyed.attributes("disabled")).toBeDefined();
+  expect((unkeyed.element as HTMLInputElement).checked).toBe(false);
+
+  hithink = hithinkRow({
+    state: "AVAILABLE",
+    a_share_feed: "HITHINK",
+    api_key_present: true,
+  });
+  wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+  const box = wrapper.get('[data-testid="hithink-feed"]');
+  expect(box.attributes("disabled")).toBeUndefined();
+  expect((box.element as HTMLInputElement).checked).toBe(true);
+
+  await box.setValue(false);
+  await flushPromises();
+  expect(hithinkSent).toBe('{"a_share_feed":"YAHOO"}');
+});
+
+it("refetches the HiThink row when the tail reports a change", async () => {
+  installFakeWebSocket();
+  const { connect, disconnect } = useEvents();
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  connect(7100, "b");
+  FakeWebSocket.instances[0].open();
+  hithink = hithinkRow({
+    state: "AVAILABLE",
+    a_share_feed: "HITHINK",
+    api_key_present: true,
+  });
+  FakeWebSocket.instances[0].message(
+    JSON.stringify({
+      id: "e-1",
+      kind: "HITHINK_PROVIDER_CHANGED",
+      occurred_at_ns: 1,
+      payload: { state: "AVAILABLE", a_share_feed: "HITHINK" },
+    }),
+  );
+  await flushPromises();
+
+  expect(wrapper.get('[data-testid="hithink"]').text()).toContain("AVAILABLE");
+  disconnect();
 });
 
 it("turns UNAVAILABLE with Retry when the tail reports a loss", async () => {

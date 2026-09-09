@@ -104,6 +104,15 @@
       "embeddingModel": "Embedding model",
       "save": "Save provider"
     },
+    "hithink": {
+      "title": "HiThink",
+      "apiKey": "API key",
+      "keySet": "An API key is stored.",
+      "keyUnset": "No API key is stored.",
+      "save": "Save key",
+      "remove": "Remove key",
+      "aShareFeed": "Use HiThink for A-share"
+    },
     "policies": {
       "title": "Approvals",
       "triggerCode": "Trigger code",
