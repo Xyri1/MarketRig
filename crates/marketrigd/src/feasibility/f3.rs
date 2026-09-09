@@ -53,6 +53,26 @@
 //!    asserted in [`restored_order_fills_against_a_crossing_quote`] — and
 //!    nothing else: they touch no order, and `crate::trade::install_capture`
 //!    subscribes only order and position events, so no row is written.
+//! 8. [`a_closed_market_does_not_survive_a_restart`] — F1's `InstrumentStatus`
+//!    gate is per-`OrderMatchingEngine` in-memory state
+//!    (`nautilus-execution-0.62.0/src/matching_engine/mod.rs:200`, engines built
+//!    lazily at `nautilus-sandbox-0.62.0/src/execution.rs:185-208`) and
+//!    `book_snapshots` carries none of it. A desk that closed CN at 14:57 comes
+//!    back `Open`, and the same crossing quote that matched nothing before the
+//!    stop fills the restored order after it. The daemon must re-publish the
+//!    session status on every node start.
+//! 9. [`the_recommended_restart_order_terminates_once`] — the recommended order
+//!    is **restore → terminate → status → first quote**, proven end to end.
+//!    Publishing the status *before* restoration is wrong: the same
+//!    `process_order` refuses everything it validates while the market is not
+//!    `Open` (`mod.rs:2728-2738`, exercised here through a new order), so it
+//!    would reject the orders that must survive the restart too. The status also
+//!    cannot protect the restoration window at all, because it travels the data
+//!    channel and finding 3 puts exec commands ahead of it.
+//! 10. [`a_second_rehand_under_a_closed_market_is_a_no_op`] — restoration is
+//!     idempotent at the engine level: `process_order` returns on
+//!     `core.order_exists(..)` (`mod.rs:2696-2699`) before the status check, so
+//!     re-handing an order the engine already holds changes nothing.
 //!
 //! # How prior-day state is produced (FEASIBILITY.md's rule)
 //!
@@ -79,18 +99,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nautilus_common::live::runner::get_data_event_sender;
 use nautilus_common::messages::DataEvent;
-use nautilus_common::messages::execution::{CancelOrder, TradingCommand};
+use nautilus_common::messages::execution::{CancelOrder, SubmitOrder, TradingCommand};
 use nautilus_common::msgbus::{self, MessagingSwitchboard};
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::data::{Data, QuoteTick};
-use nautilus_model::enums::OrderStatus;
+use nautilus_model::data::{Data, InstrumentStatus, QuoteTick};
+use nautilus_model::enums::{MarketStatusAction, OrderStatus};
 use nautilus_model::identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId};
 use nautilus_model::orders::Order;
 use nautilus_model::types::{Price, Quantity};
 
 use crate::catalog::Entry;
 use crate::feasibility::clock::{
-    self, CN_0935, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry, stored_events,
+    self, CN_0935, CN_1457, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry,
+    stored_events,
 };
 use crate::feed::{self, FeedBase, MarketState};
 use crate::node::{Node, Registry, within};
@@ -129,6 +150,14 @@ fn moutai() -> &'static Entry {
 /// No feed at all, so the only market data day D ever saw is the single
 /// non-crossing quote published here.
 fn rested_at_0935(store: &Store, name: &'static str) -> ClockHandle {
+    rested_at_0935_then(store, name, false)
+}
+
+/// [`rested_at_0935`], optionally closing the CN instrument's matching engine
+/// at 14:57 before the stop — which is what the daemon would have done at the
+/// day-lifetime boundary, and what
+/// [`a_closed_market_does_not_survive_a_restart`] then looks for.
+fn rested_at_0935_then(store: &Store, name: &'static str, close_at_1457: bool) -> ClockHandle {
     let (registry, handle) = controlled_registry(store, None, name, CN_0935);
     let node = registry.ensure(handle.desk_id()).expect("the node starts");
     clock::publish_quote(&node, moutai(), "1700.00", 100, CN_0935);
@@ -160,8 +189,103 @@ fn rested_at_0935(store: &Store, name: &'static str) -> ClockHandle {
         "the day-D snapshot holds the resting order"
     );
 
+    if close_at_1457 {
+        advance(&node, CN_1457);
+        publish_status(&node, MarketStatusAction::Close, CN_1457);
+        // The gate is on: a crossing quote at the boundary matches nothing.
+        clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1457);
+        await_quote(&node, "1500.00");
+        assert_eq!(
+            status(&node, ORDER),
+            OrderStatus::Accepted,
+            "the closed engine did not match the boundary quote"
+        );
+    }
+
     registry.stop_all();
     handle
+}
+
+/// Publishes one `InstrumentStatus` for the CN instrument on the same data path
+/// a quote takes, and waits for the `DataEngine` to have cached it — which is
+/// what proves the sandbox's status handler ran
+/// (`nautilus-sandbox-0.62.0/src/execution.rs:288-308`). Copied from
+/// `crate::feasibility::f1_f5`, which owns the F1 findings.
+fn publish_status(node: &Node, action: MarketStatusAction, ts_ns: u64) {
+    let instrument_id = InstrumentId::from(moutai().instrument_id);
+    node.call(move |_| {
+        let status = InstrumentStatus::new(
+            instrument_id,
+            action,
+            UnixNanos::from(ts_ns),
+            UnixNanos::from(ts_ns),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        get_data_event_sender()
+            .send(DataEvent::Data(Data::InstrumentStatus(status)))
+            .expect("the data runner takes the status");
+    })
+    .expect("the node answers");
+    within(10, "the instrument status reaches the node", || {
+        node.call(move |context| {
+            context
+                .cache
+                .borrow()
+                .instrument_status(&instrument_id)
+                .map(|cached| cached.action)
+                == Some(action)
+        })
+        .unwrap()
+    });
+}
+
+/// Re-hands an already-cached order to the node exactly as
+/// `crate::trade::hand_to_node(context, order, false)` does inside
+/// `crate::trade::apply`: `SubmitOrder::from_order`, no `OrderInitialized`
+/// announcement, the risk engine's queued endpoint. `apply` adds the order to
+/// the cache first; here it is already there, which is the same state.
+fn rehand(node: &Node, client_order_id: &'static str) {
+    node.call(move |context| {
+        let order = context
+            .cache
+            .borrow()
+            .order(&ClientOrderId::from(client_order_id))
+            .expect("the order is cached")
+            .cloned();
+        let command = SubmitOrder::from_order(
+            &order,
+            context.trader_id,
+            None,
+            None,
+            UUID4::new(),
+            context.clock.borrow().timestamp_ns(),
+        );
+        msgbus::send_trading_command(
+            MessagingSwitchboard::risk_engine_queue_execute(),
+            TradingCommand::SubmitOrder(command),
+        );
+    })
+    .expect("the node answers");
+}
+
+/// Waits for the CN instrument's cached quote to read `price` on both sides.
+fn await_quote(node: &Node, price: &'static str) {
+    let instrument_id = InstrumentId::from(moutai().instrument_id);
+    within(10, "the quote reaches the node", || {
+        node.call(move |context| {
+            context
+                .cache
+                .borrow()
+                .quote(&instrument_id)
+                .map(|quote| quote.ask_price)
+                == Some(Price::from(price))
+        })
+        .unwrap()
+    });
 }
 
 /// The desk's single `book_snapshots` row.
@@ -206,6 +330,15 @@ fn chain(store: &Store, desk_id: &str) -> Vec<(String, i64)> {
     stored_events(store, desk_id)
         .into_iter()
         .filter(|(id, _, _)| id == ORDER)
+        .map(|(_, kind, ns)| (kind, ns))
+        .collect()
+}
+
+/// [`chain`], for any client order id.
+fn chain_of(store: &Store, desk_id: &str, client_order_id: &str) -> Vec<(String, i64)> {
+    stored_events(store, desk_id)
+        .into_iter()
+        .filter(|(id, _, _)| id == client_order_id)
         .map(|(_, kind, ns)| (kind, ns))
         .collect()
 }
@@ -873,5 +1006,206 @@ fn a_fresh_order_on_a_restarted_node_still_releases() {
         restored,
         "and its lock is released in full, back to the stranded restored figure"
     );
+    registry.stop_all();
+}
+
+/// F3 × F1: `MarketStatus` is per-`OrderMatchingEngine` in-memory state and does
+/// **not** survive a restart. Day D ends with the CN instrument `Closed` — the
+/// F1 gate, proven there to stop matching and refuse new orders — and the
+/// crossing boundary quote matches nothing. The restart builds a brand-new
+/// engine at `MarketStatus::Open`
+/// (`nautilus-execution-0.62.0/src/matching_engine/mod.rs:200`, created lazily
+/// by `nautilus-sandbox-0.62.0/src/execution.rs:185-208`), `book_snapshots`
+/// carries no status, and the very same crossing quote now fills the restored
+/// order.
+///
+/// So the daemon must re-publish the session status on every node start; a
+/// restart is always a reopened market until it does.
+#[test]
+fn a_closed_market_does_not_survive_a_restart() {
+    let (_dir, store) = crate::store::open_temp();
+    let handle = rested_at_0935_then(&store, "f3-status-restart", true);
+    let desk_id = handle.desk_id().to_owned();
+    assert_eq!(fills(&store), 0, "day D closed with nothing filled");
+
+    let (registry, node) = restart(&store, None, &desk_id);
+    assert_eq!(status(&node, ORDER), OrderStatus::Accepted);
+    assert!(
+        node.call(|context| {
+            context
+                .cache
+                .borrow()
+                .instrument_status(&InstrumentId::from("600519.XSHG"))
+                .is_none()
+        })
+        .unwrap(),
+        "and no status came back with the snapshot"
+    );
+
+    advance(&node, CN_1530);
+    clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1530);
+    within(10, "the restored order closes", || {
+        status(&node, ORDER) != OrderStatus::Accepted
+    });
+    assert_eq!(
+        status(&node, ORDER),
+        OrderStatus::Filled,
+        "the restart reopened the market and the day-D gate is gone"
+    );
+    registry.stop_all();
+}
+
+/// F3 × F1, the recommended restart order, and the counter-evidence against the
+/// other one.
+///
+/// Recommended: **restore → terminate → status → first quote.** Proven here on
+/// the restarted node: the `CancelOrder` terminates the prior-day order once,
+/// `MarketStatusAction::Close` then re-establishes the session gate, and the
+/// first quote after it fills nothing.
+///
+/// Not "status → restore": on a fresh node the engine core holds no order, so
+/// `OrderMatchingEngine::process_order` runs its validate block for every
+/// re-handed order, and that block refuses anything while
+/// `market_status != MarketStatus::Open`
+/// (`nautilus-execution-0.62.0/src/matching_engine/mod.rs:2728-2738`). The
+/// refusal itself is exercised here, on that same function, with the sandbox's
+/// own words. Applied to restoration it would turn every re-handed order into
+/// `OrderRejected` — including the ones that must survive: an order rested at
+/// 09:35 and restarted at 12:10 still has to be resting at 13:00. The restored
+/// order's own first hand could not be exercised from test-only code; see
+/// [`a_second_rehand_under_a_closed_market_is_a_no_op`].
+///
+/// The status is also the wrong tool for the restoration window on its own: it
+/// travels the **data** channel, and `AsyncRunner::recv` drains `exec_cmd_rx`
+/// before `data_evt_rx`, so a status queued in the same job as the re-handed
+/// `SubmitOrder` is processed *after* it. What protects the window is holding
+/// the first publish ([`holding_the_first_publish_lets_recovery_win`]); the
+/// status is what re-establishes the steady-state session gate afterwards.
+#[test]
+fn the_recommended_restart_order_terminates_once() {
+    let (_dir, store) = crate::store::open_temp();
+    let handle = rested_at_0935(&store, "f3-order-status");
+    let desk_id = handle.desk_id().to_owned();
+
+    // 1. restore — done by `Registry::ensure`, with no data published at all.
+    let (registry, node) = restart(&store, None, &desk_id);
+    advance(&node, CN_1530);
+    assert_eq!(status(&node, ORDER), OrderStatus::Accepted);
+
+    // 2. terminate the expired order.
+    cancel_at(&node, CN_1530, None);
+    within(10, "the restored order is terminated", || {
+        status(&node, ORDER) == OrderStatus::Canceled
+    });
+    let captured = chain(&store, &desk_id);
+    assert_eq!(
+        kinds(&captured),
+        vec![
+            "OrderInitialized",
+            "OrderSubmitted",
+            "OrderAccepted",
+            "OrderCanceled"
+        ],
+        "exactly one terminal event: {captured:?}"
+    );
+
+    // 3. re-establish the session gate for the current phase.
+    publish_status(&node, MarketStatusAction::Close, CN_1530);
+
+    // 4. only now the first quote.
+    clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1530);
+    await_quote(&node, "1500.00");
+    assert_eq!(
+        fills(&store),
+        0,
+        "no fill: the order is terminal and the market closed"
+    );
+    assert_eq!(
+        chain(&store, &desk_id),
+        captured,
+        "and no event follows the terminal one"
+    );
+
+    // The counter-evidence: while the market is closed, `process_order` refuses
+    // whatever it is handed — which is what restoration would hand it if the
+    // status were published first.
+    let refused = trade::submit(
+        &store,
+        &registry,
+        &desk_id,
+        r#"{"action_id":"f3-after-close","instrument_id":"600519.XSHG",
+            "side":"BUY","type":"LIMIT","quantity":"100","price":"1600.00"}"#,
+        &trade::Source::Session,
+    )
+    .expect_err("the closed engine refuses the order");
+    let crate::trade::TradeError::Rejected(reason) = &refused else {
+        panic!("expected a sandbox rejection, got {refused:?}");
+    };
+    assert_eq!(
+        reason, "Market 600519.XSHG is CLOSED, cannot accept order f3-after-close",
+        "the sandbox's own words — and what every re-handed order would get"
+    );
+    assert_eq!(
+        kinds(&chain_of(&store, &desk_id, "f3-after-close")),
+        vec!["OrderInitialized", "OrderSubmitted", "OrderRejected"],
+        "one native terminal event, not a fabricated one"
+    );
+    registry.stop_all();
+}
+
+/// Why "status → restore" could not be exercised here, and what was measured
+/// instead.
+///
+/// `trade::restore` runs inside `Registry::ensure`, before any test job can
+/// reach the node, so a status cannot be published ahead of the *first*
+/// re-hand. Handing the order a **second** time under a `Closed` market — the
+/// closest reachable approximation — turns out to be a no-op:
+/// `OrderMatchingEngine::process_order` returns immediately on
+/// `self.core.order_exists(order.client_order_id())`
+/// (`nautilus-execution-0.62.0/src/matching_engine/mod.rs:2696-2699`), before
+/// the `market_status` check at `:2728`. Nothing is captured, the order stays
+/// `ACCEPTED` and open, and the engine still holds it — proven by reopening and
+/// filling it on the next crossing quote.
+///
+/// So restoration is idempotent at the engine level, but the "status first"
+/// ordering itself stays a source-level claim: `process_order` rejects whatever
+/// it validates while `market_status != MarketStatus::Open`, which
+/// [`the_recommended_restart_order_terminates_once`] exercises on the same
+/// function through a new order, and F1's `pause_gates_cn_matching_and_submission`
+/// exercises for `Paused`.
+#[test]
+fn a_second_rehand_under_a_closed_market_is_a_no_op() {
+    let (_dir, store) = crate::store::open_temp();
+    let handle = rested_at_0935(&store, "f3-rehand");
+    let desk_id = handle.desk_id().to_owned();
+    let (registry, node) = restart(&store, None, &desk_id);
+    advance(&node, CN_1530);
+    let restored = chain(&store, &desk_id);
+
+    publish_status(&node, MarketStatusAction::Close, CN_1530);
+    rehand(&node, ORDER);
+    // A rejection would have to travel exec_evt_rx, which the runner drains
+    // ahead of the data channel; the reopen and quote below give it every
+    // chance to land.
+    assert_eq!(
+        chain(&store, &desk_id),
+        restored,
+        "the second re-hand produced no event at all"
+    );
+    assert_eq!(status(&node, ORDER), OrderStatus::Accepted);
+    assert_eq!(trade::open_orders(&node).unwrap().len(), 1);
+
+    publish_status(&node, MarketStatusAction::Trading, CN_1530);
+    clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1530);
+    within(10, "the restored order closes", || {
+        status(&node, ORDER) != OrderStatus::Accepted
+    });
+    assert_eq!(
+        status(&node, ORDER),
+        OrderStatus::Filled,
+        "the engine still held the order, so the re-hand neither rejected nor \
+         dropped it"
+    );
+    assert_eq!(fills(&store), 1, "and it filled exactly once");
     registry.stop_all();
 }
