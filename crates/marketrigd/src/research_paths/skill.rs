@@ -1,6 +1,7 @@
-//! `skill::rewritten_examples_route_through_marketrig` and `skill::seed_is_current`
-//! (feature SPEC `hithink-a-share` §7): the committed seed says only what a desk
-//! can act on, and it is still what the script produces from the vendor tree.
+//! `skill::rewritten_examples_route_through_marketrig`, `skill::seed_is_current`
+//! and `skill::seed_is_whole` (feature SPEC `hithink-a-share` §7): the committed
+//! seed says only what a desk can act on, it is still what the script produces
+//! from the vendor tree, and it is what §5.3 uploads, whole.
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +70,41 @@ fn rewritten_examples_route_through_marketrig() {
     // presigned S3 URL a rewritten call returned, and carries no key
     // (endpoints-market-dumps.md, 完整下载流程).
     assert_eq!(left, 1, "an unrewritten curl example reached the seed");
+}
+
+/// The archive §5.3 uploads is the committed directory and nothing less: every
+/// file on disk is in `HITHINK_SKILL_FILES` at its own relative path, with its
+/// own bytes.
+#[test]
+fn seed_is_whole() {
+    let root = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/seed/skills/hithink-finance"
+    ));
+    let mut on_disk: Vec<(String, String)> = seed_files()
+        .iter()
+        .map(|file| {
+            (
+                file.strip_prefix(root)
+                    .expect("a seed file under the seed root")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                std::fs::read_to_string(file).unwrap_or_else(|e| panic!("{file:?}: {e}")),
+            )
+        })
+        .collect();
+    on_disk.sort();
+    let mut uploaded: Vec<(String, String)> = crate::desk::HITHINK_SKILL_FILES
+        .iter()
+        .map(|(path, text)| ((*path).to_string(), (*text).to_string()))
+        .collect();
+    uploaded.sort();
+    assert_eq!(
+        uploaded.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        on_disk.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        "the uploaded archive and the committed seed name different files"
+    );
+    assert_eq!(uploaded, on_disk, "a seeded file went up with other bytes");
 }
 
 #[test]

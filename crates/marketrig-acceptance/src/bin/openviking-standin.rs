@@ -4,9 +4,10 @@
 //! speaks exactly the subset the daemon and the vendored plugins consume (§2.2,
 //! §3.2, §5.2, §5.3) and nothing more: `--version`, `/health`, `/ready`, the
 //! three admin routes with the seeded key rule, the skills routes with content
-//! and files, `content/read`, sessions with messages and a scripted commit
-//! task, and substring `find` — all behind `api_key` auth over a per-user
-//! store. It runs no MCP, no Node, and no Python.
+//! and files, the temporary upload the seed archive goes through,
+//! `content/read`, sessions with messages and a scripted commit task, and
+//! substring `find` — all behind `api_key` auth over a per-user store. It runs
+//! no MCP, no Node, and no Python.
 //!
 //! Every knob comes from the `openviking` object of the one JSON file
 //! `MARKETRIG_STANDIN_SCRIPT` names, the same file `runtime-standin` reads. It
@@ -86,7 +87,9 @@ async fn main() {
         .as_ref()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_else(|| json!({"accounts": {}, "keys": {}, "users": {}, "tasks": {}}));
+        .unwrap_or_else(
+            || json!({"accounts": {}, "keys": {}, "users": {}, "tasks": {}, "uploads": {}}),
+        );
 
     let state = Arc::new(Ov {
         root_key,
@@ -128,6 +131,7 @@ async fn main() {
             "/api/v1/admin/accounts/{account}/users/{user}/key",
             post(issue_key),
         )
+        .route("/api/v1/resources/temp_upload", post(temp_upload))
         .route("/api/v1/skills", get(list_skills).post(create_skill))
         .route(
             "/api/v1/skills/{name}",
@@ -205,7 +209,8 @@ struct Ov {
     store_path: Option<PathBuf>,
     /// `{accounts: {id: {admin_user_id, users: [id]}}, keys: {key: user},
     ///   users: {id: {skills: {name: {content, files: {path: text}}},
-    ///                sessions: {id: [message]}}}, tasks: {id: status}}`
+    ///                sessions: {id: [message]}}}, tasks: {id: status},
+    ///   uploads: {temp_file_id: {path: text}}}`
     store: Mutex<Value>,
 }
 
@@ -536,16 +541,109 @@ async fn read_skill(
     }))
 }
 
-/// `POST /api/v1/skills` — the seed upload (§5.3) and the harness's own writes.
-/// The name comes from the frontmatter, as it does upstream.
+/// `POST /api/v1/resources/temp_upload` — the multipart half of the multi-file
+/// seed upload (`hithink-a-share` §5.3). The daemon sends one `file` part
+/// holding a stored ZIP, so the archive is found by its own signature rather
+/// than by parsing the envelope, unpacked, and kept under the id the create
+/// consumes.
+async fn temp_upload(
+    State(state): State<Arc<Ov>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> Response {
+    if let Err(denied) = state.user(&headers) {
+        return denied;
+    }
+    let Some(at) = bytes.windows(4).position(|four| four == b"PK\x03\x04") else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "the upload carries no ZIP archive",
+        );
+    };
+    let files: Value = unzip_stored(&bytes[at..]).into_iter().collect();
+    let id = format!(
+        "temp-{:?}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+    );
+    let mut store = state.store();
+    store["uploads"][&id] = files;
+    state.persist(&store);
+    drop(store);
+    ok(json!({"temp_file_id": id}))
+}
+
+/// A stored (uncompressed) ZIP, read back as `path -> text`: local headers in
+/// order, stopping at the first signature that is not one — the central
+/// directory, which this reader does not need.
+///
+/// ponytail: stored entries only, because the only writer is the daemon's own
+/// `zip_stored`. Upgrade path: the `zip` crate, if the stand-in ever has to read
+/// an archive it did not receive from MarketRig.
+fn unzip_stored(bytes: &[u8]) -> Vec<(String, Value)> {
+    let integer = |at: usize, width: usize| {
+        bytes[at..at + width]
+            .iter()
+            .rev()
+            .fold(0usize, |value, byte| (value << 8) | *byte as usize)
+    };
+    let mut files = Vec::new();
+    let mut at = 0;
+    while at + 30 <= bytes.len() && bytes[at..at + 4] == *b"PK\x03\x04" {
+        let (size, name_len, extra_len) = (
+            integer(at + 18, 4),
+            integer(at + 26, 2),
+            integer(at + 28, 2),
+        );
+        let name_at = at + 30;
+        let data_at = name_at + name_len + extra_len;
+        if data_at + size > bytes.len() {
+            break;
+        }
+        files.push((
+            String::from_utf8_lossy(&bytes[name_at..name_at + name_len]).into_owned(),
+            json!(String::from_utf8_lossy(&bytes[data_at..data_at + size])),
+        ));
+        at = data_at + size;
+    }
+    files
+}
+
+/// `POST /api/v1/skills` — the seed uploads (§5.3, `hithink-a-share` §5.3) and
+/// the harness's own writes. `data` is one `SKILL.md`; `temp_file_id` names an
+/// unpacked archive whose root `SKILL.md` is the skill and whose other files
+/// are its auxiliary ones, which is what upstream's skill processor does with
+/// a directory. The name comes from the frontmatter either way.
 async fn create_skill(State(state): State<Arc<Ov>>, headers: HeaderMap, text: String) -> Response {
     let user = match state.user(&headers) {
         Ok(user) => user,
         Err(denied) => return denied,
     };
     let request = body(&text);
-    let data = request["data"].as_str().unwrap_or_default();
-    let name = front(data, "name");
+    let (data, files) = match request["temp_file_id"].as_str() {
+        None => (
+            request["data"].as_str().unwrap_or_default().to_owned(),
+            request["files"].clone(),
+        ),
+        Some(id) => {
+            let mut archive = state.store()["uploads"][id].clone();
+            let Some(unpacked) = archive.as_object_mut() else {
+                return error(
+                    StatusCode::NOT_FOUND,
+                    "NOT_FOUND",
+                    &format!("no upload {id}"),
+                );
+            };
+            let skill_md = unpacked.remove("SKILL.md").unwrap_or(Value::Null);
+            (
+                skill_md.as_str().unwrap_or_default().to_owned(),
+                Value::Object(unpacked.clone()),
+            )
+        }
+    };
+    let name = front(&data, "name");
     if name.is_empty() {
         return error(
             StatusCode::BAD_REQUEST,
@@ -560,7 +658,7 @@ async fn create_skill(State(state): State<Arc<Ov>>, headers: HeaderMap, text: St
             &format!("skill {name} already exists"),
         );
     }
-    write_skill(&state, &user, &name, data, &request["files"]);
+    write_skill(&state, &user, &name, &data, &files);
     let root = root_uri(&user);
     ok(json!({"name": name, "uri": format!("{root}/{name}"), "root_uri": root}))
 }

@@ -53,9 +53,48 @@ fn agents_seed(name: &str) -> String {
 const SEED_SKILL: &str = include_str!("../../marketrigd/seed/desk-improvement.SKILL.md");
 
 /// The seeded HiThink skill (`hithink-a-share` §5.2, §5.3), which goes up
-/// verbatim — its own `<name>` is a `meta/tickers/search` placeholder, not the
-/// desk's — and which H4 reads back out of the projection byte for byte.
-const SEED_HITHINK: &str = include_str!("../../marketrigd/seed/skills/hithink-finance/SKILL.md");
+/// verbatim as a whole directory — its own `<name>` is a `meta/tickers/search`
+/// placeholder, not the desk's — and which H4 reads back out of the projection
+/// file by file, byte for byte. Read at run time rather than embedded, because
+/// the whole tree is the assertion.
+fn hithink_seed() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, found: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(dir)
+            .expect("the committed HiThink seed")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, root, found);
+            } else {
+                found.push((
+                    path.strip_prefix(root)
+                        .expect("a seed file under the seed root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}")),
+                ));
+            }
+        }
+    }
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../marketrigd/seed/skills/hithink-finance"
+    ));
+    let mut found = Vec::new();
+    walk(root, root, &mut found);
+    found.sort();
+    found
+}
+
+/// The surfaces a desk cannot reach, which no seeded file may name (§6.2 H4).
+const FORBIDDEN: [&str; 5] = [
+    "X-api-key",
+    "fuyao.aicubes.cn/mcp",
+    "hithink-finance auth",
+    "pip install",
+    "npx",
+];
 
 /// What every desk's user, and every desk's projection, lists after
 /// provisioning (`openviking-continuity` §5.3 as `hithink-a-share` §5.3 extends
@@ -6303,29 +6342,41 @@ fn gate() {
         "both seeded skills in the new desk's projection",
         || projected_names(&mu_skills) == SEEDED_SKILLS,
     );
-    let seeded = fs::read_to_string(mu_skills.join("hithink-finance").join("SKILL.md"))
-        .expect("the projected HiThink skill");
-    assert_eq!(
-        seeded, SEED_HITHINK,
-        "the committed seed, byte for byte (§5.3)"
+    // The whole seed directory reaches the workspace, not `SKILL.md` alone: the
+    // upload is one archive and the projection writes every file it carries
+    // (§5.3). The reference pages arrive behind the skill, so the tree is
+    // waited on rather than asserted the moment the directory appears.
+    let hithink = mu_skills.join("hithink-finance");
+    let seed = hithink_seed();
+    assert!(seed.len() > 10, "the committed seed lost its pages");
+    within(
+        Duration::from_secs(120),
+        "every seeded file in the projection",
+        || seed.iter().all(|(path, _)| hithink.join(path).is_file()),
     );
-    for forbidden in [
-        "X-api-key",
-        "fuyao.aicubes.cn/mcp",
-        "hithink-finance auth",
-        "pip install",
-        "npx",
-    ] {
-        assert!(
-            !seeded.contains(forbidden),
-            "{forbidden} reached the desk's projection (§6.2 H4)"
+    for (path, text) in &seed {
+        let projected =
+            fs::read_to_string(hithink.join(path)).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(
+            &projected, text,
+            "{path} is not the committed seed, byte for byte (§5.3)"
         );
+        for forbidden in FORBIDDEN {
+            assert!(
+                !projected.contains(forbidden),
+                "{forbidden} reached the desk's projection in {path} (§6.2 H4)"
+            );
+        }
     }
     g.stop("H4", daemon20);
     g.note(
         "H4",
-        "a desk created on this daemon listed desk-improvement and hithink-finance in its projection, the HiThink skill matched the committed seed byte for byte, and no line of it named a surface the desk cannot reach",
-        json!({ "desk": mu_id, "projected": projected_names(&mu_skills) }),
+        "a desk created on this daemon listed desk-improvement and hithink-finance in its projection, every file of the HiThink seed — SKILL.md and its reference pages — matched the committed tree byte for byte, and no line of any of them named a surface the desk cannot reach",
+        json!({
+            "desk": mu_id,
+            "projected": projected_names(&mu_skills),
+            "files": seed.iter().map(|(path, _)| path).collect::<Vec<_>>(),
+        }),
     );
 
     let evidence = g.out.display().to_string();

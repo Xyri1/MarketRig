@@ -1560,19 +1560,21 @@ impl OpenViking {
     }
 
     /// §5.3's seed uploads, in order: for each seeded skill, `GET
-    /// /api/v1/skills/<skill>` missing means `POST /api/v1/skills` with the
-    /// seed's `SKILL.md` under the desk's key, the desk name substituted into
-    /// `desk-improvement` and nothing else changed. `hithink-finance` is
-    /// `hithink-a-share` §5.3's, uploaded verbatim. Answers whether anything
-    /// was written, so the projection runs only then.
-    ///
-    /// ponytail: `SKILL.md` alone, so `hithink-finance`'s `references/` do not
-    /// reach the projection. OpenViking takes auxiliary files only as an
-    /// archive through `POST /api/v1/resources/temp_upload` then `POST
-    /// /api/v1/skills {temp_file_id}` — its request model forbids extra keys
-    /// and a dict `data` is a skill dict, not a file map. Upgrade path: that
-    /// two-step upload, here and on the acceptance stand-in, once a desk needs
-    /// the reference pages in the workspace (`hithink-a-share` §5.3).
+    /// /api/v1/skills/<skill>` missing means an upload under the desk's key.
+    /// `desk-improvement` is one `SKILL.md`, so it goes up as `POST
+    /// /api/v1/skills {data}` with the desk name substituted. `hithink-finance`
+    /// (`hithink-a-share` §5.3) carries reference pages its `SKILL.md` tells the
+    /// agent to read, and OpenViking takes auxiliary files only as an archive —
+    /// `AddSkillRequest` forbids extra keys and a dict `data` is a skill dict,
+    /// not a file map — so the whole committed directory goes up as one stored
+    /// ZIP through `POST /api/v1/resources/temp_upload`, then `POST
+    /// /api/v1/skills {temp_file_id}`, which unpacks it and writes every file
+    /// but the root `SKILL.md` beside the skill (`openviking/server/routers/
+    /// resources.py`, `openviking/utils/skill_processor.py`, openviking
+    /// 0.4.17.1). §5.2 then projects them. It goes up verbatim: its own
+    /// `<name>` is the placeholder of a `meta/tickers/search` example, not the
+    /// desk. Answers whether anything was written, so the projection runs only
+    /// then.
     async fn upload_seed_skill(&self, desk_id: &str, key: &str) -> bool {
         let Some(port) = self.port() else {
             return false;
@@ -1585,26 +1587,25 @@ impl OpenViking {
             }
         };
         let mut written = false;
-        // `hithink-finance` goes up verbatim: its own `<name>` is the
-        // placeholder of a `meta/tickers/search` example, not the desk.
-        for (skill, seed) in [
-            (
-                "desk-improvement",
-                crate::desk::SEED_SKILL.replace("<name>", &name),
-            ),
-            ("hithink-finance", crate::desk::HITHINK_SKILL.to_string()),
-        ] {
-            let seeded = match self
+        for skill in ["desk-improvement", "hithink-finance"] {
+            match self
                 .user_get(port, key, &format!("skills/{skill}"), &[])
                 .await
             {
                 // Already there: a seed is written once and never rewritten.
                 Ok(Some(_)) => continue,
-                Ok(None) => {
-                    let body = json!({ "data": seed });
-                    self.user_post(port, key, "skills", body).await
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(desk = desk_id, skill, error = %e, "seeding a skill failed");
+                    continue;
                 }
-                Err(e) => Err(e),
+            }
+            let seeded = if skill == "desk-improvement" {
+                let body = json!({ "data": crate::desk::SEED_SKILL.replace("<name>", &name) });
+                self.user_post(port, key, "skills", body).await
+            } else {
+                self.upload_skill_archive(port, key, skill, crate::desk::HITHINK_SKILL_FILES)
+                    .await
             };
             match seeded {
                 Ok(_) => written = true,
@@ -1615,6 +1616,119 @@ impl OpenViking {
         }
         written
     }
+
+    /// One skill directory as a stored ZIP: `POST /api/v1/resources/temp_upload`
+    /// with a single `file` part, then `POST /api/v1/skills {temp_file_id}`.
+    ///
+    /// ponytail: the multipart body and the archive are both written by hand —
+    /// one fixed part and thirteen small text files do not earn reqwest's
+    /// `multipart` feature or a `zip` dependency. Upgrade path: those two
+    /// crates, if MarketRig ever uploads something it did not author.
+    async fn upload_skill_archive(
+        &self,
+        port: u16,
+        key: &str,
+        skill: &str,
+        files: &[(&str, &str)],
+    ) -> Result<Value, String> {
+        let boundary = format!("marketrig{}", uuid::Uuid::now_v7().simple());
+        let mut body = Vec::new();
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        body.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"{skill}.zip\"\r\n\
+                 Content-Type: application/zip\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(&zip_stored(files));
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let response = self
+            .http
+            .post(format!(
+                "http://127.0.0.1:{port}/api/v1/resources/temp_upload"
+            ))
+            .bearer_auth(key)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .timeout(WRITE_TIMEOUT)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| self.memory.redact(&e.to_string()))?;
+        let uploaded = self.result(response).await?;
+        let temp_file_id = uploaded["temp_file_id"]
+            .as_str()
+            .ok_or_else(|| format!("the {skill} upload answered no temp_file_id"))?;
+        self.user_post(port, key, "skills", json!({ "temp_file_id": temp_file_id }))
+            .await
+    }
+}
+
+/// A stored (uncompressed) ZIP of `files`, each at its own relative path.
+/// Python's `zipfile` reads the central directory, so both halves are written;
+/// nothing else in MarketRig reads one back.
+fn zip_stored(files: &[(&str, &str)]) -> Vec<u8> {
+    // 1980-01-01, the DOS epoch: the archive is content, not a snapshot of a
+    // filesystem, so it carries no clock.
+    const DOS_EPOCH: u32 = 0x0021_0000;
+    let (mut out, mut central) = (Vec::new(), Vec::new());
+    for (path, text) in files {
+        let (name, data) = (path.as_bytes(), text.as_bytes());
+        let offset = out.len() as u32;
+        let size = data.len() as u32;
+        // The 26 bytes a local header and a central header share: version
+        // needed, the UTF-8 name flag, stored, the date, the CRC, both sizes,
+        // and the two lengths.
+        let mut shared = Vec::new();
+        shared.extend_from_slice(&20u16.to_le_bytes());
+        shared.extend_from_slice(&0x0800u16.to_le_bytes());
+        shared.extend_from_slice(&0u16.to_le_bytes());
+        shared.extend_from_slice(&DOS_EPOCH.to_le_bytes());
+        shared.extend_from_slice(&crc32(data).to_le_bytes());
+        shared.extend_from_slice(&size.to_le_bytes());
+        shared.extend_from_slice(&size.to_le_bytes());
+        shared.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        shared.extend_from_slice(&0u16.to_le_bytes());
+
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&shared);
+        out.extend_from_slice(name);
+        out.extend_from_slice(data);
+
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&shared);
+        // Comment length, disk number, and both attribute fields: all zero.
+        central.extend_from_slice(&[0u8; 10]);
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name);
+    }
+    let (at, size) = (out.len() as u32, central.len() as u32);
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// The ZIP checksum, bit by bit: one archive of small files per desk creation.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in data {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
 }
 
 // ---------------------------------------------------------------------------
@@ -3055,7 +3169,14 @@ mod tests {
         noise: bool,
         delay_ms: u64,
         listings: usize,
+        /// One entry per upload, in order: the `SKILL.md` a `{data}` create
+        /// carried, or the whole archive a `{temp_file_id}` create unpacked,
+        /// read as text — the entries are stored, so every path and every
+        /// file's bytes are in it verbatim.
         uploaded: Vec<String>,
+        /// The last archive `POST /api/v1/resources/temp_upload` took, waiting
+        /// for the `{temp_file_id}` create that consumes it.
+        archive: String,
     }
 
     type Fake = Arc<Mutex<FakeSkills>>;
@@ -3096,15 +3217,36 @@ mod tests {
                 })
                 .post(
                     async |State(state): State<Fake>, axum::Json(body): axum::Json<Value>| {
-                        let data = body["data"].as_str().unwrap_or_default().to_string();
-                        // Upstream derives the name from the frontmatter (§5.5).
-                        let name = frontmatter_name(&data).to_string();
                         let mut fake = lock(&state);
+                        let (data, name) = match body["data"].as_str() {
+                            // Upstream derives the name from the frontmatter (§5.5).
+                            Some(data) => (data.to_string(), frontmatter_name(data).to_string()),
+                            // The archive half: the fake never unpacks it, and
+                            // reads the name off the one `name:` line the
+                            // stored `SKILL.md` puts in it.
+                            None => {
+                                let archive = std::mem::take(&mut fake.archive);
+                                let name = archive
+                                    .lines()
+                                    .find_map(|line| line.strip_prefix("name: "))
+                                    .unwrap_or_default()
+                                    .trim()
+                                    .to_string();
+                                (archive, name)
+                            }
+                        };
                         fake.uploaded.push(data.clone());
                         fake.items.insert(name, (data, Vec::new()));
                         axum::Json(json!({"status": "ok", "result": {}}))
                     },
                 ),
+            )
+            .route(
+                "/api/v1/resources/temp_upload",
+                axum::routing::post(async |State(state): State<Fake>, body: axum::body::Bytes| {
+                    lock(&state).archive = String::from_utf8_lossy(&body).into_owned();
+                    axum::Json(json!({"status": "ok", "result": {"temp_file_id": "seed"}}))
+                }),
             )
             .route(
                 "/api/v1/skills/{name}",
@@ -3439,8 +3581,10 @@ mod tests {
 
     /// Check 5's seed uploads and check 8's byte-for-byte seeds: both seeded
     /// skills go up, in order, with the desk name the only substitution, and a
-    /// skill that is already there is left alone. `hithink-finance` carries the
-    /// committed seed and none of `hithink-a-share` §6.2 H4's forbidden strings.
+    /// skill that is already there is left alone. `desk-improvement` is one
+    /// `SKILL.md` on `{data}`; `hithink-finance` is the whole committed
+    /// directory as one archive on `{temp_file_id}`, and no file in it carries
+    /// one of `hithink-a-share` §6.2 H4's forbidden strings.
     #[tokio::test]
     async fn the_seed_skills_are_uploaded_once() {
         let (_dir, ov) = scratch();
@@ -3449,14 +3593,25 @@ mod tests {
         plant_ready(&ov, DESK_A, "alpha", port);
 
         ov.upload_seed_skill(DESK_A, "desk-key").await;
+        let uploaded = fake.lock().unwrap().uploaded.clone();
+        assert_eq!(uploaded.len(), 2, "one upload per seeded skill");
         assert_eq!(
-            fake.lock().unwrap().uploaded,
-            vec![
-                crate::desk::SEED_SKILL.replace("<name>", "alpha"),
-                crate::desk::HITHINK_SKILL.to_string(),
-            ]
+            uploaded[0],
+            crate::desk::SEED_SKILL.replace("<name>", "alpha")
         );
-        let hithink = fake.lock().unwrap().uploaded[1].clone();
+
+        // The archive: every committed file at its own path, with its own
+        // bytes, `SKILL.md` among them. The gate's H4 reads the same tree back
+        // out of a real unpack and the projection.
+        let archive = &uploaded[1];
+        assert!(
+            crate::desk::HITHINK_SKILL_FILES.len() > 10,
+            "the seed lost its reference pages"
+        );
+        for (path, text) in crate::desk::HITHINK_SKILL_FILES {
+            assert!(archive.contains(path), "{path} is not in the archive");
+            assert!(archive.contains(text), "{path} went up with other bytes");
+        }
         for forbidden in [
             "X-api-key",
             "fuyao.aicubes.cn/mcp",
@@ -3464,12 +3619,49 @@ mod tests {
             "pip install",
             "npx",
         ] {
-            assert!(!hithink.contains(forbidden), "{forbidden} reached the desk");
+            assert!(!archive.contains(forbidden), "{forbidden} reached the desk");
         }
 
         // Present now, so a second provisioning uploads nothing.
         ov.upload_seed_skill(DESK_A, "desk-key").await;
         assert_eq!(fake.lock().unwrap().uploaded.len(), 2);
+    }
+
+    /// The same archive read by the library that will unpack it: Python's
+    /// `zipfile`, which is what OpenViking's skill processor uses. Skipped
+    /// where no `python3` is on PATH, like `research_paths::skill`'s own
+    /// script check.
+    #[test]
+    fn the_seed_archive_is_a_real_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hithink-finance.zip");
+        fs::write(&path, zip_stored(crate::desk::HITHINK_SKILL_FILES)).unwrap();
+        let read = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import json,sys,zipfile\n\
+                 z = zipfile.ZipFile(sys.argv[1])\n\
+                 print(json.dumps({n: z.read(n).decode() for n in z.namelist()}))",
+            ])
+            .arg(&path)
+            .output();
+        let Ok(read) = read else {
+            println!("skipped: python3 is not on PATH");
+            return;
+        };
+        assert!(
+            read.status.success(),
+            "python3 refused the archive: {}",
+            String::from_utf8_lossy(&read.stderr)
+        );
+        let unpacked: BTreeMap<String, String> = serde_json::from_slice(&read.stdout).unwrap();
+        assert_eq!(
+            unpacked,
+            crate::desk::HITHINK_SKILL_FILES
+                .iter()
+                .map(|(path, text)| ((*path).to_string(), (*text).to_string()))
+                .collect()
+        );
     }
 
     /// Check 11: §5.5's write path — the `GET` decides between the create and

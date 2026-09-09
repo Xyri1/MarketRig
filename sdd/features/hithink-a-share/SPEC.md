@@ -119,9 +119,20 @@ The output is committed; CI runs the script and fails on a diff (like `pnpm gene
 
 ### 5.3 Seeding
 
-At desk creation, after `desk-improvement`, the daemon uploads `hithink-finance` into the desk's OpenViking user by the same path (root §16), skipped when one of that name exists; it reaches the workspace through the projection. The upload is part of `openviking-continuity` §3.2's provisioning, which runs for every `READY` desk at every OpenViking readiness, so a desk created before this feature gains the skill at the daemon's next readiness exactly as it gained `desk-improvement`; nothing else about it changes, and its constitution is never rewritten (per D20).
+At desk creation, after `desk-improvement`, the daemon uploads `hithink-finance` into the desk's OpenViking user under the desk key, skipped when one of that name exists; it reaches the workspace through the projection. The upload is part of `openviking-continuity` §3.2's provisioning, which runs for every `READY` desk at every OpenViking readiness, so a desk created before this feature gains the skill at the daemon's next readiness exactly as it gained `desk-improvement`; nothing else about it changes, and its constitution is never rewritten (per D20).
 
-`ponytail:` the upload carries `SKILL.md` alone, as `openviking-continuity` §5.5's does, so the seed's `references/` do not reach the projection; the rewritten `SKILL.md` stands on its own and names every path shape the command takes. OpenViking accepts auxiliary files only as an archive through `POST /api/v1/resources/temp_upload` followed by `POST /api/v1/skills {temp_file_id}` — its `AddSkillRequest` forbids extra keys and a dict `data` is a skill dict, not a file map (`openviking/server/routers/resources.py`, `openviking/utils/skill_processor.py`, read 2026-09-09). Upgrade path: that two-step upload, on the daemon and on the acceptance stand-in, once a desk needs the reference pages in the workspace.
+The whole seed directory goes up, `SKILL.md` and the `references/` pages it tells the agent to read, because OpenViking accepts auxiliary files only as an archive: its `AddSkillRequest` forbids extra keys, and a dict `data` is a skill dict, not a file map (`openviking/server/routers/resources.py`, `openviking/utils/skill_processor.py`, openviking 0.4.17.1, read 2026-09-09). So `hithink-finance` is not `desk-improvement`'s single-file `POST /api/v1/skills {data}` (`openviking-continuity` §5.3) but the two-call path:
+
+```text
+POST /api/v1/resources/temp_upload   multipart, one `file` part: the directory as a stored ZIP
+                                     -> {temp_file_id}
+POST /api/v1/skills {temp_file_id}   unpacks it; the root SKILL.md is the skill and every other
+                                     file becomes an auxiliary file at its own relative path
+```
+
+The archive is built in memory: stored (uncompressed) entries with both the local headers and the central directory, so Python's `zipfile` — the reader the skill processor unpacks it with — reads it. The seed's bytes are compiled into the daemon as one `(path, text)` list, checked against the committed tree by `skill::seed_is_whole`. §5.2's projection then writes `SKILL.md` and every auxiliary file into `.agents/skills/hithink-finance/`, read-only, exactly as it already writes a multi-file skill.
+
+`ponytail:` the multipart body and the ZIP are both written by hand rather than through reqwest's `multipart` feature or a `zip` dependency — one fixed part and thirteen small text files. Upgrade path: those two crates, if MarketRig ever uploads something it did not author.
 
 The seeded constitution's *Surfaces* section becomes the block below — R4 §5.1's, as `openviking-continuity` §5.4 rewrote it, plus one paragraph naming the research command and the `CN` leg's provider, calendar, and null source time. Existing constitutions are never rewritten (per D20).
 
@@ -158,7 +169,7 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 - **H1 — provider.** `GET /research/hithink` is `UNCONFIGURED` at the seam's `base_url`; `PUT` with `bad` → `PROVIDER_REJECTED` carrying the upstream `2003`, nothing stored and no event; `PUT` with `good` → `AVAILABLE` on `HITHINK` with one `HITHINK_PROVIDER_CHANGED` and no `api_key` in the answer; the key is absent from `marketrig.db`, the log root, every event, the launch files, the workspaces, the daemons' stderr, and the CLI captures in the bundle (`openviking-continuity` §7.2's own grep, on this key); `DELETE` returns to `UNCONFIGURED` on `YAHOO`.
 - **H2 — the CN leg.** On a desk of its own, the only one this daemon starts a node for, so one node is one `CN` poll task. With the provider `UNCONFIGURED`, `600519.XSHG` reads `provider: "yahoo"` from the quote stand-in and the HiThink stand-in saw no snapshot request; configured, `a_share_feed` is `HITHINK` and one poll cycle produces exactly one snapshot request naming every `CN` catalog thscode, the observation reads `provider: "hithink"`, `source_time_ns: null`, `calendar: "HITHINK"`; the stand-in removes today from its calendar and the same key is removed and stored again, which is what clears the set the daemon already holds (§3 fetches it once a day) → the next read is `CLOSED` with `calendar: "HITHINK"`; `PATCH {a_share_feed: "YAHOO"}` → the next observation is `provider: "yahoo"`, `calendar: "WEEKDAY"`, with a higher sequence and no `TRADING_NODE_STARTED`; `PATCH` back → `hithink` again; a `CN` market round trip closes with realized P&L in `CNY` and the CN fee rate (the R1 G15 shape on the new feed).
 - **H3 — research.** `marketrig research hithink meta/tickers/search --param q=600519` prints the stand-in envelope verbatim; an unknown path → `RESEARCH_PATH_UNKNOWN`, exit 1; two scripted `4001` then success → one accepted answer; three → `RESEARCH_UNREACHABLE` naming 3 attempts, which is §2.2's whole bound; the 1 MiB body → written to a file whose path the command prints; with the provider removed → `RESEARCH_UNCONFIGURED`.
-- **H4 — the seed.** A desk created now lists exactly `desk-improvement` and `hithink-finance` in its projection, the second file matches the committed seed byte for byte, and no line of it contains `X-api-key`, `fuyao.aicubes.cn/mcp`, `hithink-finance auth`, `pip install`, or `npx`.
+- **H4 — the seed.** A desk created now lists exactly `desk-improvement` and `hithink-finance` in its projection, and `hithink-finance/` carries every file of the committed seed — `SKILL.md`, `LICENSE`, and the `references/` pages at their own relative paths — each byte for byte, with no line of any of them containing `X-api-key`, `fuyao.aicubes.cn/mcp`, `hithink-finance auth`, `pip install`, or `npx`. The stand-in answers §5.3's route pair, unpacking the archive the way the skill processor does.
 
 ### 6.3 Experiment scenario
 
@@ -185,6 +196,9 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 - `cli::research_spill` — 256 KiB boundary and `--out`.
 - `skill::rewritten_examples_route_through_marketrig` — the seed contains no forbidden strings (§6.2 H4) and reports how many curl blocks the pattern rewrote versus left.
 - `skill::seed_is_current` — `node scripts/hithink-skill.mjs --check` succeeds; skipped with a printed note where `node` is not on PATH, since CI runs the same check itself.
+- `skill::seed_is_whole` — the `(path, text)` list §5.3 uploads names exactly the files of the committed seed tree, with their bytes.
+- `openviking::the_seed_skills_are_uploaded_once` — extended: `desk-improvement` goes up on `{data}`, `hithink-finance` as one archive on `{temp_file_id}` carrying every seeded path and its bytes, and neither is uploaded twice.
+- `openviking::the_seed_archive_is_a_real_zip` — Python's `zipfile` lists and reads the archive back to the same files; skipped with a printed note where `python3` is not on PATH.
 - `store::migration_9_applies`.
 
 **Gate:** H1–H4 after O10 on the stand-in.

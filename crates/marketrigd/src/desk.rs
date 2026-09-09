@@ -30,6 +30,66 @@ pub(crate) const SEED_SKILL: &str = include_str!("../seed/desk-improvement.SKILL
 /// skill, byte for byte; it carries no `<name>`.
 pub(crate) const HITHINK_SKILL: &str = include_str!("../seed/skills/hithink-finance/SKILL.md");
 
+/// The whole committed `hithink-finance` seed directory — `SKILL.md` and the
+/// reference pages the skill tells the agent to read — as the archive §5.3
+/// uploads. `research_paths::skill::seed_is_whole` compares it to the tree on
+/// disk, so a page `scripts/hithink-skill.mjs` adds cannot be forgotten here.
+pub(crate) const HITHINK_SKILL_FILES: &[(&str, &str)] = &[
+    ("SKILL.md", HITHINK_SKILL),
+    (
+        "LICENSE",
+        include_str!("../seed/skills/hithink-finance/LICENSE"),
+    ),
+    (
+        "references/api.md",
+        include_str!("../seed/skills/hithink-finance/references/api.md"),
+    ),
+    (
+        "references/api/capability-map.md",
+        include_str!("../seed/skills/hithink-finance/references/api/capability-map.md"),
+    ),
+    (
+        "references/api/endpoints-auction.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-auction.md"),
+    ),
+    (
+        "references/api/endpoints-calendar.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-calendar.md"),
+    ),
+    (
+        "references/api/endpoints-financials.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-financials.md"),
+    ),
+    (
+        "references/api/endpoints-fund.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-fund.md"),
+    ),
+    (
+        "references/api/endpoints-index.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-index.md"),
+    ),
+    (
+        "references/api/endpoints-market-dumps.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-market-dumps.md"),
+    ),
+    (
+        "references/api/endpoints-meta.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-meta.md"),
+    ),
+    (
+        "references/api/endpoints-prices.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-prices.md"),
+    ),
+    (
+        "references/api/endpoints-special-data.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-special-data.md"),
+    ),
+    (
+        "references/api/endpoints-valuations.md",
+        include_str!("../seed/skills/hithink-finance/references/api/endpoints-valuations.md"),
+    ),
+];
+
 /// The one `failure_code` R0 records: every bootstrap step fails the same way.
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
 
