@@ -360,6 +360,7 @@ Portability is excluded per D13. Mechanics intentionally left unresolved are lis
 - multi-agent collaboration within one desk;
 - cross-desk capital, positions, or trigger fan-out;
 - OpenBB research integration (per D9), deferred on scope; HiThink covers A-share research in the MVP (per D84);
+- A directory form of `marketrig skill put` (a `SKILL.md` with reference pages, uploaded as one archive the way the daemon seeds `hithink-finance`, per `features/hithink-a-share/DECISIONS.md` HT-7): deferred on 2026-09-09 until an experiment cell shows an agent writing a skill of more than one file; an agent's lesson is one `SKILL.md`;
 - direct NautilusTrader or OpenBB APIs as product contracts;
 - automatic trigger execution or delivery retry;
 - pre-trusting seeded desk workspaces in the runtimes' own configuration at provision time, so a desk whose first-ever session is a dispatcher activation does not stall on a trust dialog and lose that firing's prompt;

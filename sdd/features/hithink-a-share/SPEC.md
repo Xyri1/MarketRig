@@ -124,15 +124,15 @@ At desk creation, after `desk-improvement`, the daemon uploads `hithink-finance`
 The whole seed directory goes up, `SKILL.md` and the `references/` pages it tells the agent to read, because OpenViking accepts auxiliary files only as an archive: its `AddSkillRequest` forbids extra keys, and a dict `data` is a skill dict, not a file map (`openviking/server/routers/resources.py`, `openviking/utils/skill_processor.py`, openviking 0.4.17.1, read 2026-09-09). So `hithink-finance` is not `desk-improvement`'s single-file `POST /api/v1/skills {data}` (`openviking-continuity` §5.3) but the two-call path:
 
 ```text
-POST /api/v1/resources/temp_upload   multipart, one `file` part: the directory as a stored ZIP
+POST /api/v1/resources/temp_upload   multipart, one `file` part: the directory as a ZIP
                                      -> {temp_file_id}
 POST /api/v1/skills {temp_file_id}   unpacks it; the root SKILL.md is the skill and every other
                                      file becomes an auxiliary file at its own relative path
 ```
 
-The archive is built in memory: stored (uncompressed) entries with both the local headers and the central directory, so Python's `zipfile` — the reader the skill processor unpacks it with — reads it. The seed's bytes are compiled into the daemon as one `(path, text)` list, checked against the committed tree by `skill::seed_is_whole`. §5.2's projection then writes `SKILL.md` and every auxiliary file into `.agents/skills/hithink-finance/`, read-only, exactly as it already writes a multi-file skill.
+The archive is built in memory by the `zip` crate (pinned per HT-7), deflated, entries in the order the seed list gives them and each carrying the DOS epoch rather than a clock, so one seed is one byte sequence from one build; Python's `zipfile` — the reader the skill processor unpacks it with — reads it. The seed's bytes are compiled into the daemon as one `(path, text)` list, checked against the committed tree by `skill::seed_is_whole`. §5.2's projection then writes `SKILL.md` and every auxiliary file into `.agents/skills/hithink-finance/`, read-only, exactly as it already writes a multi-file skill.
 
-`ponytail:` the multipart body and the ZIP are both written by hand rather than through reqwest's `multipart` feature or a `zip` dependency — one fixed part and thirteen small text files. Upgrade path: those two crates, if MarketRig ever uploads something it did not author.
+`ponytail:` the multipart body is written by hand rather than through reqwest's `multipart` feature — one fixed part with a known filename. Upgrade path: that feature, if a request here ever carries more than the one part.
 
 The seeded constitution's *Surfaces* section becomes the block below — R4 §5.1's, as `openviking-continuity` §5.4 rewrote it, plus one paragraph naming the research command and the `CN` leg's provider, calendar, and null source time. Existing constitutions are never rewritten (per D20).
 
@@ -198,7 +198,7 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 - `skill::seed_is_current` — `node scripts/hithink-skill.mjs --check` succeeds; skipped with a printed note where `node` is not on PATH, since CI runs the same check itself.
 - `skill::seed_is_whole` — the `(path, text)` list §5.3 uploads names exactly the files of the committed seed tree, with their bytes.
 - `openviking::the_seed_skills_are_uploaded_once` — extended: `desk-improvement` goes up on `{data}`, `hithink-finance` as one archive on `{temp_file_id}` carrying every seeded path and its bytes, and neither is uploaded twice.
-- `openviking::the_seed_archive_is_a_real_zip` — Python's `zipfile` lists and reads the archive back to the same files; skipped with a printed note where `python3` is not on PATH.
+- `openviking::the_seed_archive_is_a_real_zip` — the archive is byte-identical across two builds, and Python's `zipfile` lists and reads it back to the same files; skipped with a printed note where `python3` is not on PATH.
 - `store::migration_9_applies`.
 
 **Gate:** H1–H4 after O10 on the stand-in.

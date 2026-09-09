@@ -59,3 +59,11 @@ Local decisions for Milestone R6, prefixed `HT-<n>`. They settle the product dec
 **Rationale:** The user chose the stand-in. It is the shape R1 gave Yahoo and D83 gave OpenViking, and it is what lets H2 script a non-trading weekday and H3 script a rate-limit burst deterministically.
 
 **Contract:** root [SPEC §17](../../SPEC.md#17-verification-and-acceptance); this feature's [SPEC](SPEC.md) §6.
+
+### HT-7 — The skill archive is the `zip` crate, deflated, pinned at `=8.6.0`
+
+**Decision:** `zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }` is a workspace dependency of `marketrigd` and of `marketrig-acceptance` (verified on crates.io 2026-09-09: `8.6.0` is the newest stable line, `9.0.0-pre3` a prerelease). The daemon builds the seed upload with `zip::ZipWriter` over a `Cursor<Vec<u8>>`, `CompressionMethod::Deflated`, entries in the seed list's order and each stamped `DateTime::default()` — the DOS epoch — so one seed is one byte sequence from one build; `openviking-standin` reads the upload back with `zip::ZipArchive`, which accepts stored and deflated entries alike. `default-features = false` keeps `time` off, which is what makes the timestamp the epoch rather than the clock; `deflate` reuses the `flate2` already in the graph. The hand-written multipart body stays (see this feature's SPEC §5.3).
+
+**Rationale:** The hand-written stored-only writer and reader that landed with the seed upload were sized for thirteen small text files. `openviking-continuity` §5.5 already names the same archive path as how `marketrig skill put` will carry an agent-written skill directory, which is neither small nor authored here, so the ceiling would be hit by the next feature rather than by a hypothetical one. Taking the crate now costs three packages (`zip`, `zopfli`, `typed-path`) and removes a CRC-32, two header layouts, and a local-header parser from the repository.
+
+**Contract:** root [SPEC §16](../../SPEC.md#16-memory-and-skills); this feature's [SPEC](SPEC.md) §5.3; `openviking-continuity` [SPEC](../openviking-continuity/SPEC.md) §5.5, §7.1.

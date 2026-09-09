@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1617,13 +1617,12 @@ impl OpenViking {
         written
     }
 
-    /// One skill directory as a stored ZIP: `POST /api/v1/resources/temp_upload`
-    /// with a single `file` part, then `POST /api/v1/skills {temp_file_id}`.
+    /// One skill directory as a ZIP: `POST /api/v1/resources/temp_upload` with
+    /// a single `file` part, then `POST /api/v1/skills {temp_file_id}`.
     ///
-    /// ponytail: the multipart body and the archive are both written by hand —
-    /// one fixed part and thirteen small text files do not earn reqwest's
-    /// `multipart` feature or a `zip` dependency. Upgrade path: those two
-    /// crates, if MarketRig ever uploads something it did not author.
+    /// ponytail: the multipart body is written by hand — one fixed part with a
+    /// known filename does not earn reqwest's `multipart` feature. Upgrade path:
+    /// that feature, if a request here ever carries more than the one part.
     async fn upload_skill_archive(
         &self,
         port: u16,
@@ -1641,7 +1640,7 @@ impl OpenViking {
             )
             .as_bytes(),
         );
-        body.extend_from_slice(&zip_stored(files));
+        body.extend_from_slice(&zip_archive(files));
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
         let response = self
@@ -1668,67 +1667,27 @@ impl OpenViking {
     }
 }
 
-/// A stored (uncompressed) ZIP of `files`, each at its own relative path.
-/// Python's `zipfile` reads the central directory, so both halves are written;
-/// nothing else in MarketRig reads one back.
-fn zip_stored(files: &[(&str, &str)]) -> Vec<u8> {
-    // 1980-01-01, the DOS epoch: the archive is content, not a snapshot of a
-    // filesystem, so it carries no clock.
-    const DOS_EPOCH: u32 = 0x0021_0000;
-    let (mut out, mut central) = (Vec::new(), Vec::new());
+/// A deflated ZIP of `files`, each at its own relative path, in the order given.
+/// Byte-for-byte reproducible from one build: the archive is content, not a
+/// snapshot of a filesystem, so every entry carries the DOS epoch rather than a
+/// clock — which is what `zip` writes without its `time` feature.
+fn zip_archive(files: &[(&str, &str)]) -> Vec<u8> {
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default());
+    let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
     for (path, text) in files {
-        let (name, data) = (path.as_bytes(), text.as_bytes());
-        let offset = out.len() as u32;
-        let size = data.len() as u32;
-        // The 26 bytes a local header and a central header share: version
-        // needed, the UTF-8 name flag, stored, the date, the CRC, both sizes,
-        // and the two lengths.
-        let mut shared = Vec::new();
-        shared.extend_from_slice(&20u16.to_le_bytes());
-        shared.extend_from_slice(&0x0800u16.to_le_bytes());
-        shared.extend_from_slice(&0u16.to_le_bytes());
-        shared.extend_from_slice(&DOS_EPOCH.to_le_bytes());
-        shared.extend_from_slice(&crc32(data).to_le_bytes());
-        shared.extend_from_slice(&size.to_le_bytes());
-        shared.extend_from_slice(&size.to_le_bytes());
-        shared.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        shared.extend_from_slice(&0u16.to_le_bytes());
-
-        out.extend_from_slice(b"PK\x03\x04");
-        out.extend_from_slice(&shared);
-        out.extend_from_slice(name);
-        out.extend_from_slice(data);
-
-        central.extend_from_slice(b"PK\x01\x02");
-        central.extend_from_slice(&20u16.to_le_bytes());
-        central.extend_from_slice(&shared);
-        // Comment length, disk number, and both attribute fields: all zero.
-        central.extend_from_slice(&[0u8; 10]);
-        central.extend_from_slice(&offset.to_le_bytes());
-        central.extend_from_slice(name);
+        // In-memory writes, so the only failure is a name the format rejects —
+        // and every name here is a seed constant.
+        writer
+            .start_file(*path, options)
+            .and_then(|()| writer.write_all(text.as_bytes()).map_err(Into::into))
+            .expect("a seed skill file is writable into an archive");
     }
-    let (at, size) = (out.len() as u32, central.len() as u32);
-    out.extend_from_slice(&central);
-    out.extend_from_slice(b"PK\x05\x06");
-    out.extend_from_slice(&[0u8; 4]);
-    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(files.len() as u16).to_le_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(&at.to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
-    out
-}
-
-/// The ZIP checksum, bit by bit: one archive of small files per desk creation.
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in data {
-        crc ^= *byte as u32;
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
+    writer
+        .finish()
+        .expect("the archive's directory is writable")
+        .into_inner()
 }
 
 // ---------------------------------------------------------------------------
@@ -3170,13 +3129,11 @@ mod tests {
         delay_ms: u64,
         listings: usize,
         /// One entry per upload, in order: the `SKILL.md` a `{data}` create
-        /// carried, or the whole archive a `{temp_file_id}` create unpacked,
-        /// read as text — the entries are stored, so every path and every
-        /// file's bytes are in it verbatim.
+        /// carried, or every `path\n<bytes>` an archive create unpacked, joined.
         uploaded: Vec<String>,
-        /// The last archive `POST /api/v1/resources/temp_upload` took, waiting
-        /// for the `{temp_file_id}` create that consumes it.
-        archive: String,
+        /// The last archive `POST /api/v1/resources/temp_upload` took, unpacked
+        /// as upstream unpacks it, waiting for the create that consumes it.
+        archive: Vec<(String, String)>,
     }
 
     type Fake = Arc<Mutex<FakeSkills>>;
@@ -3218,25 +3175,29 @@ mod tests {
                 .post(
                     async |State(state): State<Fake>, axum::Json(body): axum::Json<Value>| {
                         let mut fake = lock(&state);
-                        let (data, name) = match body["data"].as_str() {
-                            // Upstream derives the name from the frontmatter (§5.5).
-                            Some(data) => (data.to_string(), frontmatter_name(data).to_string()),
-                            // The archive half: the fake never unpacks it, and
-                            // reads the name off the one `name:` line the
-                            // stored `SKILL.md` puts in it.
-                            None => {
-                                let archive = std::mem::take(&mut fake.archive);
-                                let name = archive
-                                    .lines()
-                                    .find_map(|line| line.strip_prefix("name: "))
-                                    .unwrap_or_default()
-                                    .trim()
-                                    .to_string();
-                                (archive, name)
-                            }
+                        // The archive half, as upstream's skill processor splits
+                        // it: the root `SKILL.md` is the skill, every other
+                        // entry an auxiliary file at its own path.
+                        let unpacked = match body["data"].as_str() {
+                            Some(data) => vec![("SKILL.md".to_string(), data.to_string())],
+                            None => std::mem::take(&mut fake.archive),
                         };
-                        fake.uploaded.push(data.clone());
-                        fake.items.insert(name, (data, Vec::new()));
+                        fake.uploaded.push(
+                            unpacked
+                                .iter()
+                                .map(|(path, text)| format!("{path}\n{text}"))
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        );
+                        let mut files = unpacked;
+                        let at = files
+                            .iter()
+                            .position(|(path, _)| path == "SKILL.md")
+                            .expect("the upload carries a SKILL.md");
+                        let data = files.remove(at).1;
+                        // Upstream derives the name from the frontmatter (§5.5).
+                        let name = frontmatter_name(&data).to_string();
+                        fake.items.insert(name, (data, files));
                         axum::Json(json!({"status": "ok", "result": {}}))
                     },
                 ),
@@ -3244,7 +3205,21 @@ mod tests {
             .route(
                 "/api/v1/resources/temp_upload",
                 axum::routing::post(async |State(state): State<Fake>, body: axum::body::Bytes| {
-                    lock(&state).archive = String::from_utf8_lossy(&body).into_owned();
+                    let at = body
+                        .windows(4)
+                        .position(|four| four == b"PK\x03\x04")
+                        .expect("the multipart body carries a ZIP");
+                    let mut zip = zip::ZipArchive::new(io::Cursor::new(&body[at..]))
+                        .expect("the upload is a readable archive");
+                    let mut files = Vec::new();
+                    for index in 0..zip.len() {
+                        let mut entry = zip.by_index(index).unwrap();
+                        let path = entry.name().to_string();
+                        let mut text = String::new();
+                        std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+                        files.push((path, text));
+                    }
+                    lock(&state).archive = files;
                     axum::Json(json!({"status": "ok", "result": {"temp_file_id": "seed"}}))
                 }),
             )
@@ -3597,7 +3572,10 @@ mod tests {
         assert_eq!(uploaded.len(), 2, "one upload per seeded skill");
         assert_eq!(
             uploaded[0],
-            crate::desk::SEED_SKILL.replace("<name>", "alpha")
+            format!(
+                "SKILL.md\n{}",
+                crate::desk::SEED_SKILL.replace("<name>", "alpha")
+            )
         );
 
         // The archive: every committed file at its own path, with its own
@@ -3628,14 +3606,21 @@ mod tests {
     }
 
     /// The same archive read by the library that will unpack it: Python's
-    /// `zipfile`, which is what OpenViking's skill processor uses. Skipped
-    /// where no `python3` is on PATH, like `research_paths::skill`'s own
-    /// script check.
+    /// `zipfile`, which is what OpenViking's skill processor uses — the one
+    /// check that the deflated entries `zip` writes are what that reader
+    /// accepts. Skipped where no `python3` is on PATH, like
+    /// `research_paths::skill`'s own script check.
     #[test]
     fn the_seed_archive_is_a_real_zip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hithink-finance.zip");
-        fs::write(&path, zip_stored(crate::desk::HITHINK_SKILL_FILES)).unwrap();
+        let archive = zip_archive(crate::desk::HITHINK_SKILL_FILES);
+        assert_eq!(
+            archive,
+            zip_archive(crate::desk::HITHINK_SKILL_FILES),
+            "the archive carries no clock"
+        );
+        fs::write(&path, &archive).unwrap();
         let read = std::process::Command::new("python3")
             .args([
                 "-c",

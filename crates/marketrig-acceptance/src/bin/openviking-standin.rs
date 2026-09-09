@@ -24,7 +24,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::HashMap;
-use std::io::Write as _;
+use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -543,7 +543,7 @@ async fn read_skill(
 
 /// `POST /api/v1/resources/temp_upload` — the multipart half of the multi-file
 /// seed upload (`hithink-a-share` §5.3). The daemon sends one `file` part
-/// holding a stored ZIP, so the archive is found by its own signature rather
+/// holding a ZIP, so the archive is found by its own signature rather
 /// than by parsing the envelope, unpacked, and kept under the id the create
 /// consumes.
 async fn temp_upload(
@@ -561,7 +561,7 @@ async fn temp_upload(
             "the upload carries no ZIP archive",
         );
     };
-    let files: Value = unzip_stored(&bytes[at..]).into_iter().collect();
+    let files: Value = unzip(&bytes[at..]).into_iter().collect();
     let id = format!(
         "temp-{:?}",
         SystemTime::now()
@@ -575,38 +575,23 @@ async fn temp_upload(
     ok(json!({"temp_file_id": id}))
 }
 
-/// A stored (uncompressed) ZIP, read back as `path -> text`: local headers in
-/// order, stopping at the first signature that is not one — the central
-/// directory, which this reader does not need.
-///
-/// ponytail: stored entries only, because the only writer is the daemon's own
-/// `zip_stored`. Upgrade path: the `zip` crate, if the stand-in ever has to read
-/// an archive it did not receive from MarketRig.
-fn unzip_stored(bytes: &[u8]) -> Vec<(String, Value)> {
-    let integer = |at: usize, width: usize| {
-        bytes[at..at + width]
-            .iter()
-            .rev()
-            .fold(0usize, |value, byte| (value << 8) | *byte as usize)
+/// A ZIP read back as `path -> text`, stored or deflated alike — the reader
+/// upstream's skill processor stands in for.
+fn unzip(bytes: &[u8]) -> Vec<(String, Value)> {
+    let mut archive = match zip::ZipArchive::new(io::Cursor::new(bytes)) {
+        Ok(archive) => archive,
+        Err(_) => return Vec::new(),
     };
     let mut files = Vec::new();
-    let mut at = 0;
-    while at + 30 <= bytes.len() && bytes[at..at + 4] == *b"PK\x03\x04" {
-        let (size, name_len, extra_len) = (
-            integer(at + 18, 4),
-            integer(at + 26, 2),
-            integer(at + 28, 2),
-        );
-        let name_at = at + 30;
-        let data_at = name_at + name_len + extra_len;
-        if data_at + size > bytes.len() {
-            break;
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        let name = entry.name().to_owned();
+        let mut text = String::new();
+        if entry.read_to_string(&mut text).is_ok() {
+            files.push((name, json!(text)));
         }
-        files.push((
-            String::from_utf8_lossy(&bytes[name_at..name_at + name_len]).into_owned(),
-            json!(String::from_utf8_lossy(&bytes[data_at..data_at + size])),
-        ));
-        at = data_at + size;
     }
     files
 }

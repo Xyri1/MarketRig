@@ -122,3 +122,8 @@ ureq = { version = "=3.4.0", features = ["json"] }
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }
 utoipa-axum = "=0.2.0"
 uuid = { version = "=1.26.0", features = ["v7"] }
+# The skill-archive ZIP the daemon uploads and the stand-in reads back
+# (`hithink-a-share` §5.3). Deflate only: `flate2` is already in the graph, and
+# the reader accepts stored entries whatever the writer chose. No `time`, so a
+# file's default timestamp is the DOS epoch and an archive is reproducible.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
