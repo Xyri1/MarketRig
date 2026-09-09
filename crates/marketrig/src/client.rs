@@ -11,6 +11,11 @@ use std::time::Duration;
 /// (`openviking-continuity` §5.5).
 const SKILL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// What one research read may wait for (`hithink-a-share` §4.2): 45 s, above the
+/// daemon's own 30 s upstream ceiling, so a slow HiThink comes back as the
+/// daemon's `RESEARCH_UNREACHABLE` rather than as this client's timeout.
+const RESEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// A failure with the exit code it maps to (feature SPEC §8).
 pub struct Fault {
     pub code: String,
@@ -153,6 +158,21 @@ impl Endpoint {
 
     fn patient<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
         request.config().timeout_global(Some(SKILL_TIMEOUT)).build()
+    }
+
+    /// The research passthrough (`hithink-a-share` §4.2): the upstream envelope
+    /// verbatim, under [`RESEARCH_TIMEOUT`] instead of §8's shared 10 s.
+    pub fn get_research(&self, path: &str) -> Result<String, Fault> {
+        finish(
+            self.authorize(
+                self.agent
+                    .get(self.uri(path))
+                    .config()
+                    .timeout_global(Some(RESEARCH_TIMEOUT))
+                    .build(),
+            )
+            .call(),
+        )
     }
 
     /// Posts an already-serialized JSON body unchanged — the hook ingress

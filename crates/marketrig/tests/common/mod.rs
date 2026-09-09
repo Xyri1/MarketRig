@@ -111,6 +111,17 @@ pub fn marketrig(root: &Path, args: &[&str]) -> Output {
         .expect("run marketrig")
 }
 
+/// The same run from a chosen working directory, for the one command that
+/// writes a file into it (`hithink-a-share` §4.2).
+pub fn marketrig_in(cwd: &Path, root: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_marketrig"))
+        .args(args)
+        .current_dir(cwd)
+        .env("MARKETRIG_TEST_DATA_ROOT", root)
+        .output()
+        .expect("run marketrig")
+}
+
 pub fn code(output: &Output) -> i32 {
     output.status.code().expect("exit code")
 }

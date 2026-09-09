@@ -1267,6 +1267,34 @@ export type HithinkPutResponses = {
 
 export type HithinkPutResponse = HithinkPutResponses[keyof HithinkPutResponses];
 
+export type HithinkResearchData = {
+    body?: never;
+    path: {
+        /**
+         * An allowlisted HiThink endpoint path, `/api/` stripped
+         */
+        '*path': string;
+    };
+    query?: never;
+    url: '/research/hithink/{*path}';
+};
+
+export type HithinkResearchErrors = {
+    401: Envelope;
+    404: Envelope;
+    409: Envelope;
+    502: Envelope;
+};
+
+export type HithinkResearchError = HithinkResearchErrors[keyof HithinkResearchErrors];
+
+export type HithinkResearchResponses = {
+    /**
+     * HiThink's own envelope, verbatim
+     */
+    200: unknown;
+};
+
 export type RuntimesData = {
     body?: never;
     path?: never;

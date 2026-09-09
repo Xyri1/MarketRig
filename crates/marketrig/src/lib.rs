@@ -61,12 +61,33 @@ enum Group {
         #[command(subcommand)]
         command: SkillCommand,
     },
+    /// Read-only research passthroughs (`hithink-a-share` §4.2).
+    Research {
+        #[command(subcommand)]
+        command: ResearchCommand,
+    },
     /// Session ingress the runtime itself invokes (R3 feature SPEC §5.2).
     // Never a session lifecycle control: those are REST and desktop actions
     // (root §13.2, per D69).
     Session {
         #[command(subcommand)]
         command: SessionCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResearchCommand {
+    /// One allowlisted HiThink endpoint. The answer is HiThink's own envelope,
+    /// printed verbatim; a large one is written to a file instead.
+    Hithink {
+        /// The endpoint path, `/api/` stripped — `meta/tickers/search`.
+        path: String,
+        /// One `key=value` query parameter; repeat for more.
+        #[arg(long = "param", value_name = "KEY=VALUE")]
+        param: Vec<String>,
+        /// Write the body here instead of to standard output.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 }
 
@@ -108,6 +129,77 @@ fn session_hook(desk: Option<&str>) -> i32 {
         let _ = endpoint.post_json_text(&format!("/desks/{desk}/session/hook"), body);
     }
     0
+}
+
+/// What a research answer prints rather than spills (`hithink-a-share` §4.2);
+/// anything larger, and anything with `--out`, becomes a file.
+const RESEARCH_INLINE: usize = 256 * 1024;
+
+/// `marketrig [--json] research hithink <path> [--param k=v]… [--out <file>]`
+/// (`hithink-a-share` §4.2): the daemon's answer is HiThink's own envelope, so
+/// plain and `--json` print the same bytes; only the spill note differs.
+fn research(json: bool, path: &str, params: &[String], out: Option<&Path>) -> Result<(), Fault> {
+    let query: Vec<String> = params
+        .iter()
+        .map(|param| {
+            let (key, value) = param
+                .split_once('=')
+                .unwrap_or_else(|| usage(format!("--param {param} is not key=value")));
+            format!("{}={}", encode(key), encode(value))
+        })
+        .collect();
+    // The path segments are encoded too, so a token the allowlist cannot hold
+    // comes back as the daemon's `RESEARCH_PATH_UNKNOWN` rather than as an
+    // unusable request line.
+    let route = path.split('/').map(encode).collect::<Vec<_>>().join("/");
+    let route = match query.is_empty() {
+        true => format!("/research/hithink/{route}"),
+        false => format!("/research/hithink/{route}?{}", query.join("&")),
+    };
+
+    let body = Endpoint::discover()?.get_research(&route)?;
+    if out.is_none() && body.len() <= RESEARCH_INLINE {
+        println!("{}", body.trim_end());
+        return Ok(());
+    }
+    let default = PathBuf::from(format!(
+        "hithink-{}-{}.json",
+        path.replace('/', "-"),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    ));
+    let file = out.unwrap_or(&default);
+    std::fs::write(file, &body).map_err(|e| {
+        Fault::reported("INTERNAL", format!("Cannot write {}: {e}.", file.display()))
+    })?;
+    let bytes = body.len();
+    if json {
+        println!(
+            "{}",
+            json!({ "path": file.display().to_string(), "bytes": bytes })
+        );
+    } else {
+        println!("wrote {} ({bytes} bytes)", file.display());
+    }
+    Ok(())
+}
+
+/// Percent-encode one query component (RFC 3986 §2.3's unreserved set rides,
+/// everything else becomes `%XX`). Ten lines rather than a URL crate the CLI
+/// would use nowhere else.
+fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 #[derive(Clone, ValueEnum)]
@@ -314,9 +406,20 @@ pub fn run() -> i32 {
     {
         return session_hook(cli.desk.as_deref());
     }
-    match dispatch(&cli.group) {
+    // The research group prints its own output — the body verbatim or the file
+    // it spilled to — so it answers `None` where every other group answers the
+    // resource `emit` renders (`hithink-a-share` §4.2).
+    let answer = match &cli.group {
+        Group::Research {
+            command: ResearchCommand::Hithink { path, param, out },
+        } => research(cli.json, path, param, out.as_deref()).map(|()| None),
+        group => dispatch(group).map(Some),
+    };
+    match answer {
         Ok(body) => {
-            emit(cli.json, &body);
+            if let Some(body) = body {
+                emit(cli.json, &body);
+            }
             0
         }
         Err(fault) => {
@@ -420,7 +523,9 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 }
             }
         }
-        Group::Session { .. } => unreachable!("handled before discovery"),
+        Group::Session { .. } | Group::Research { .. } => {
+            unreachable!("both groups print for themselves")
+        }
         Group::Prompt { command } => {
             let (PromptCommand::List { desk } | PromptCommand::Show { desk, .. }) = command;
             let desk = resolve(&endpoint, "/desks", "desk", desk)?;

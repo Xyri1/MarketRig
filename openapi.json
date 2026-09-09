@@ -2735,6 +2735,71 @@
         }
       }
     },
+    "/research/hithink/{*path}": {
+      "get": {
+        "summary": "The research passthrough (feature SPEC `hithink-a-share` §4.1). The one\n`path` parameter is a wildcard — `{*path}`, axum's whole-tail capture —\nbecause every allowlisted endpoint is several segments deep and a plain\n`{path}` would match none of them. The query string rides verbatim and the\nupstream body comes back byte for byte.",
+        "operationId": "hithink_research",
+        "parameters": [
+          {
+            "name": "*path",
+            "in": "path",
+            "description": "An allowlisted HiThink endpoint path, `/api/` stripped",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HiThink's own envelope, verbatim",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/runtimes": {
       "get": {
         "operationId": "runtimes",

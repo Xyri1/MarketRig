@@ -13,7 +13,7 @@ use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::DateTime;
 use chrono_tz::Tz;
@@ -51,6 +51,10 @@ const RETRYABLE_SERVER: std::ops::RangeInclusive<i64> = 5001..=5003;
 /// One upstream call's own bounds (§2.2, §4.1).
 const TIMEOUT: Duration = Duration::from_secs(30);
 pub const BODY_CAP: usize = 8 * 1024 * 1024;
+
+/// The passthrough's installation-wide rhythm (§4.1, per HT-4): one research
+/// call at a time, at least this long after the previous one.
+const SPACING: Duration = Duration::from_millis(200);
 
 /// The three paths the daemon itself calls (§1.2, §2.2, §3).
 const VALIDATE_PATH: &str = "meta/tickers/search";
@@ -286,6 +290,9 @@ pub struct Hithink {
     enabled: bool,
     http: reqwest::Client,
     state: Mutex<Live>,
+    /// The research gate (§4.1): held across the upstream call, carrying the
+    /// instant the previous one finished.
+    gate: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl fmt::Debug for Hithink {
@@ -349,6 +356,7 @@ impl Hithink {
                 calendar: None,
                 calendar_fetched_at_ns: 0,
             }),
+            gate: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -392,6 +400,27 @@ impl Hithink {
             self.key_rejected(&answer.message);
         }
         Ok(answer)
+    }
+
+    /// `GET /research/hithink/{path}` (§4.1, per HT-4): the two refusals, the
+    /// installation-wide spacing gate, then the upstream body verbatim whatever
+    /// its `code`. No event, no row — except the `2003` rule [`request`] owns.
+    ///
+    /// [`request`]: Self::request
+    pub async fn research(&self, path: &str, query: &str) -> Result<Vec<u8>, HithinkError> {
+        if !self.lock().available {
+            return Err(HithinkError::ResearchUnconfigured);
+        }
+        if !crate::research_paths::RESEARCH_PATHS.contains(&path) {
+            return Err(HithinkError::ResearchPathUnknown(path.to_string()));
+        }
+        let mut gate = self.gate.lock().await;
+        if let Some(wait) = gate.and_then(|last| SPACING.checked_sub(last.elapsed())) {
+            tokio::time::sleep(wait).await;
+        }
+        let answer = self.request(path, query).await;
+        *gate = Some(Instant::now());
+        Ok(answer.map_err(Failure::research)?.bytes)
     }
 
     /// The same call against a key that is not stored yet — validation's one
@@ -991,5 +1020,119 @@ pub(crate) mod provider {
             })
             .unwrap();
         assert!(!row.contains(KEY), "the row carries the key: {row}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// research::* (feature SPEC `hithink-a-share` §7)
+// ---------------------------------------------------------------------------
+
+/// The passthrough's own two checks (§4.1, per HT-4), on the same stand-in the
+/// provider checks use: what each refusal answers, and the spacing gate.
+#[cfg(test)]
+mod research {
+    use super::provider::{envelope, scratch};
+    use super::*;
+
+    const KEY: &str = "hithink-fake-0123456789abcdef";
+    const PATH: &str = "meta/tickers/search";
+
+    /// A provider that has validated, so the passthrough is past §4.1's first
+    /// refusal: reply 0 is the one bounded validation request.
+    async fn available(replies: Vec<(u16, String)>) -> (tempfile::TempDir, Arc<Hithink>, Seen) {
+        let mut script = vec![(200, envelope(0, "null"))];
+        script.extend(replies);
+        let (base, _hits, seen) = feed::scripted_server(script);
+        let (dir, hithink) = scratch(&base);
+        hithink.put(KEY).await.unwrap();
+        (dir, hithink, seen)
+    }
+
+    type Seen = std::sync::Arc<Mutex<Vec<String>>>;
+
+    fn requests(seen: &Seen) -> Vec<String> {
+        seen.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    #[tokio::test]
+    async fn codes() {
+        // 1. No key: the refusal comes before any allowlist lookup or request.
+        let (base, _hits, seen) = feed::scripted_server(vec![(200, envelope(0, "null"))]);
+        let (_dir, hithink) = scratch(&base);
+        let error = hithink.research(PATH, "q=600519").await.unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_UNCONFIGURED");
+        assert!(requests(&seen).is_empty(), "nothing reaches HiThink");
+
+        // 2. A path the capability map does not document, with the key stored:
+        // refused here, never forwarded.
+        let (_dir, hithink, seen) = available(vec![(200, envelope(0, "null"))]).await;
+        let error = hithink
+            .research("meta/tickers/invent", "")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_PATH_UNKNOWN");
+        assert!(error.to_string().contains("meta/tickers/invent"), "{error}");
+        assert_eq!(
+            requests(&seen).len(),
+            1,
+            "only the validation request was issued"
+        );
+
+        // 3. `4001` every time: three attempts, then the exhaustion refusal
+        // naming the count (§2.2's bound, reused by §4.1).
+        let (_dir, hithink, seen) = available(vec![(200, envelope(4001, "null"))]).await;
+        let error = hithink.research(PATH, "q=600519").await.unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_UNREACHABLE");
+        assert!(error.to_string().contains("3 attempts"), "{error}");
+        assert_eq!(
+            requests(&seen).len() - 1,
+            ATTEMPTS as usize,
+            "the retry bound is {ATTEMPTS} attempts"
+        );
+
+        // 4. One byte past the ceiling: refused on the declared length, before
+        // the body is read.
+        let huge = envelope(0, &format!("\"{}\"", "x".repeat(BODY_CAP)));
+        assert!(huge.len() > BODY_CAP);
+        let (_dir, hithink, _seen) = available(vec![(200, huge)]).await;
+        let error = hithink.research(PATH, "q=600519").await.unwrap_err();
+        assert_eq!(error.code(), "RESEARCH_TOO_LARGE");
+        assert!(error.to_string().contains(&BODY_CAP.to_string()), "{error}");
+
+        // 5. An upstream envelope with a nonzero `code` is HiThink's answer, not
+        // MarketRig's failure: the bytes come back verbatim for the route to
+        // hand on as `200`, and nothing about the row moves.
+        let refused = envelope(1001, r#"{"item":[]}"#);
+        let (_dir, hithink, _seen) = available(vec![(200, refused.clone())]).await;
+        let body = hithink.research(PATH, "q=600519").await.unwrap();
+        assert_eq!(String::from_utf8(body).unwrap(), refused);
+        assert_eq!(hithink.provider().unwrap().state, "AVAILABLE");
+        assert_eq!(
+            super::provider::events(hithink.store()).len(),
+            1,
+            "the passthrough appends no event of its own"
+        );
+    }
+
+    /// Back-to-back reads are spaced installation-wide, whatever the caller
+    /// (§4.1): the gate holds the second one until 200 ms after the first
+    /// upstream call finished.
+    #[tokio::test]
+    async fn spacing() {
+        let (_dir, hithink, seen) = available(vec![(200, envelope(0, "null"))]).await;
+        hithink.research(PATH, "q=600519").await.unwrap();
+        let after_first = Instant::now();
+        hithink.research(PATH, "q=600520").await.unwrap();
+        assert!(
+            after_first.elapsed() >= SPACING,
+            "the second read reached HiThink {:?} after the first, under the {SPACING:?} gate",
+            after_first.elapsed()
+        );
+        assert_eq!(
+            requests(&seen).len(),
+            3,
+            "one validation and two research requests"
+        );
+        assert_eq!(SPACING, Duration::from_millis(200));
     }
 }

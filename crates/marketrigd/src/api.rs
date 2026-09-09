@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Path, Query, RawQuery, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -102,6 +102,7 @@ const HTTP_PATHS: &[&str] = &[
     "/memory/provider",
     "/memory/provider/models",
     "/research/hithink",
+    "/research/hithink/{*path}",
     "/openviking",
     "/openviking/candidates",
     "/openviking/setup",
@@ -166,6 +167,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
         hithink_patch,
         hithink_delete
     ))
+    .routes(routes!(hithink_research))
     .routes(routes!(openviking))
     .routes(routes!(openviking_candidates))
     .routes(routes!(openviking_setup))
@@ -1496,6 +1498,39 @@ async fn hithink_delete(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<hithink::Provider>, HithinkError> {
     Ok(Json(state.hithink.delete()?))
+}
+
+/// The research passthrough (feature SPEC `hithink-a-share` §4.1). The one
+/// `path` parameter is a wildcard — `{*path}`, axum's whole-tail capture —
+/// because every allowlisted endpoint is several segments deep and a plain
+/// `{path}` would match none of them. The query string rides verbatim and the
+/// upstream body comes back byte for byte.
+#[utoipa::path(
+    get,
+    path = "/research/hithink/{*path}",
+    params(("*path" = String, Path, description = "An allowlisted HiThink endpoint path, `/api/` stripped")),
+    responses(
+        (status = 200, description = "HiThink's own envelope, verbatim", content_type = "application/json"),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+        (status = 409, body = Envelope),
+        (status = 502, body = Envelope),
+    )
+)]
+async fn hithink_research(
+    State(state): State<Arc<ApiState>>,
+    Path(path): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, HithinkError> {
+    let body = state
+        .hithink
+        .research(&path, query.as_deref().unwrap_or_default())
+        .await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        axum::body::Bytes::from(body),
+    )
+        .into_response())
 }
 
 // The OpenViking installation routes (feature SPEC `openviking-continuity`
@@ -4639,6 +4674,15 @@ async fn hithink_routes() {
         call_put(url.clone(), ok, r#"{"api_key":"whatever"}"#),
         502,
         "PROVIDER_UNREACHABLE",
+    );
+
+    // The passthrough's own path is the whole tail, several segments deep, and
+    // a keyless installation refuses it with the envelope rather than a bare
+    // router 404 (§4.1).
+    expect_envelope(
+        call_get(format!("{url}/meta/tickers/search?q=600519"), ok),
+        409,
+        "RESEARCH_UNCONFIGURED",
     );
 
     // `DELETE` is idempotent and answers the resource.
