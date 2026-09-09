@@ -1,6 +1,6 @@
 # A-share engine feasibility check — handoff for Claude
 
-**Status:** DONE — logged 2026-09-09, run 2026-09-09 (macOS arm64); see Result  
+**Status:** Initial spike DONE; follow-up NOT STARTED — see Follow-up handoff below. Initial run 2026-09-09 (macOS arm64).  
 **Owner:** Claude, when the user starts this work  
 **Scope:** bounded evidence spike; no product implementation slice opened  
 **Blocks:** declaring the revised feature design complete and starting implementation
@@ -122,3 +122,62 @@ F7 live reads: GET-only against the real HiThink service with the key from the o
 ### Recommendation
 
 **Revise this design** along the eight points, then proceed. No named blocker stops the feature: every restriction has a proven supported mechanism on the pinned sandbox. Two items need one more check each before the SPEC can rely on them: the `balances_locked` re-seed after restore, and an intraday HiThink sample for the dated bar and `auction/snapshot` `data_status`. Evidence and runnable spikes stay on `codex/a-share-feasibility` in `.worktrees/a-share-feasibility/` for review.
+
+## Follow-up handoff — cash recovery and intraday provider evidence
+
+**Status:** NOT STARTED — requested 2026-09-09; prepared for Claude, not dispatched.  
+**Scope:** Run the two bounded follow-ups below on the existing feasibility branch/worktree. Do not implement the full feature or open an implementation slice.
+
+### Review correction and intended outcome
+
+The initial Result above is preserved as recorded evidence. Its “no named blocker” recommendation is superseded by this follow-up: restored cash release remains a correctness blocker, and F7 has not established intraday readiness or a source-delay guarantee. After-hours matching prices corroborate a date; they do not uniquely date a snapshot. Increasing volume may be delayed. A response timestamp does not certify the freshness of the underlying calendar list. Do not upgrade those inferences to proof.
+
+The user has requested these tests/experiments. Reuse the original isolation rules and the existing `codex/a-share-feasibility` worktree. Check its current state before editing; preserve unrelated work. If documents differ between the source checkout and worktree, bring this handoff into the worktree without overwriting newer results. No real trading; provider calls are read-only, using already configured credentials without printing or copying secrets into artifacts.
+
+### R1 — restored reservations release correctly
+
+Extend the existing F3 real-node tests. First retain a failing reproduction of stranded cash. Evaluate only supported native account/risk restoration APIs, including the proposed `calculate_balance_locked` / `update_balance_locked` route after verifying their intended use and all relevant callers. Let NautilusTrader compute the reservation and balance; do not set guessed balances, edit fills, patch crates, or introduce an alternate accounting engine.
+
+Required scenarios:
+
+1. Rest an unfilled buy and capture native total/locked/free balances and order ID. Restart, cancel the restored order, and observe its native terminal event. The associated cash becomes free; cancellation does not alter total cash. Restart again and verify the state remains correct.
+2. Partially fill a buy, persist, restart, and cancel its remainder. Release only the unfilled reservation. Retain the position, executed cost, and fees exactly as produced. Compare total cash immediately before and after cancellation, not against the pre-fill total.
+3. Keep a second resting buy in the same account while cancelling the first. Release only the cancelled order's reservation. Repeating cancellation or restarting must not release the other order's cash or duplicate a terminal event.
+4. Exercise the actual session-end cancellation/recovery ordering from F2/F3: no new quote required, and no crossing quote may fill the expired order during restoration.
+
+PASS requires native event, balance, reservation, and repeat-restart assertions on the actual sandbox. A source signature or manual balance correction is not PASS. If no supported fix exists, mark BLOCKED and name the required upstream change; do not change the dependency pin in this task.
+
+Keep the smallest runnable regression tests and any narrowly scoped experimental fix on the isolated branch. Record exact commands, exits, commit, platform, and evidence paths. Run focused tests and relevant existing checks; broaden only if the change warrants it.
+
+### R2 — intraday readiness, with source delay explicitly unknown
+
+Collect small paired samples during real confirmed exchange trading sessions, including morning opening and lunch reopening. Record the actual window sampled; if it is currently closed, prepare a bounded capture script and list the next required windows. Do not substitute after-hours samples, long blocking sleeps, or fabricated data. Do not claim the experiment completed until the session samples exist.
+
+Use a small set of already supported CN instruments and respect rate limits. For each sample record local request start/end, HTTP status, provider envelope code, and redacted response fields. Read batched snapshot, unadjusted dated daily bars, and calendar; inspect auction `data_status` only to test its documented meaning, not to assume it is a continuous-session freshness/halt guarantee. Repeat over a short interval to show behavior; capture rate-limit HTTP status if encountered and stop rather than hammering the service.
+
+Answer separately:
+
+- Does today's daily bar exist at opening and lunch reopening? Does it update intraday? If snapshot and bar differ because requests race, retain the discrepancy instead of forcing equality.
+- What actually attributes the reference and observation to a date? Distinguish direct provider assertions from price/volume correlation.
+- Is `prev_price` documented to be the exchange-adjusted reference? Seek official documentation or an independent published reference for a sampled ex-dividend case, especially the prior one-cent discrepancy. Two HiThink endpoints are not independent exchange verification. Mark unavailable evidence honestly; do not send a support message without user authorization.
+- Does any trustworthy source-observation timestamp or documented maximum delay exist? If not, record that there is no source-delay guarantee. One intraday sample or increasing volume cannot create one.
+- Can calendar readiness be re-established conservatively after startup? Consider starting unavailable and revalidating before proposing persisted reference state. Do not add storage merely to make a read look proven.
+
+The proposed product ceiling to bring back for review is: confirmed trading day and adequately supported current-day reference; execution pauses on feed failure or missing reference; receipt age is visible; source delay remains unknown. Volume changes are supporting evidence, not a freshness certificate. This is a weaker snapshot-simulation promise than a maximum-delay guarantee. Present the precise remaining assumptions for user acceptance; do not silently declare the stronger existing SPEC satisfied.
+
+### Follow-up deliverable
+
+Append a new dated result here and update F7-EVIDENCE with the additional samples. Preserve the initial report and distinguish corrections from new observations. Include:
+
+- R1 and R2 status independently: PASS / FAIL / BLOCKED / NOT RUN;
+- reproducible branch/commit, test commands, exit codes, native events/balances, and redacted sample paths;
+- sampled market windows and missing windows;
+- confirmed provider facts versus assumptions and unknown delay;
+- smallest proposed design corrections, including conservative limit policy stated against the observed market condition rather than an absolute ban on boundary-priced fills;
+- a recommendation on whether the blockers are closed under the proposed weaker data contract.
+
+No automatic product implementation, root decision changes, merge, or declaration of design completion. Return the evidence and explicit data-quality tradeoff for review.
+
+### Follow-up result
+
+NOT STARTED. This section is a handoff, not execution evidence.
