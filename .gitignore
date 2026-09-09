@@ -28,3 +28,5 @@ logs/
 
 # OpenViking wheel sets (scripts/openviking-wheels.mjs); the lockfiles are committed
 /openviking-wheels/*/
+
+.env
