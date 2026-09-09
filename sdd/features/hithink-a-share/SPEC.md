@@ -96,7 +96,7 @@ No event, no row, no attribution headers read. The route is `GET` only; there is
 `marketrig [--json] research hithink <path> [--param key=value]… [--out <file>]`:
 
 - `--param` repeats and is URL-encoded into the query; a `key=value` without `=` is a usage error (exit 2);
-- the request's ceiling is 45 s (above the daemon's 30 s);
+- the request's ceiling is 100 s — the daemon's whole passthrough (§2.2's 3 attempts at §4.1's 30 s each, plus the 500 ms + 1 s backoff, is 91.5 s) rounded up, so an exhausted upstream surfaces as the daemon's `RESEARCH_UNREACHABLE` rather than as a CLI timeout;
 - success: body ≤ 256 KiB → standard output verbatim (plain and `--json` identical, since the body is the machine form); larger, or `--out` given → written to `--out` or `hithink-<path with / as ->-<unix seconds>.json` in the working directory, and the command prints `wrote <path> (<n> bytes)` (or `{"path": …, "bytes": …}` under `--json`), exit 0;
 - a MarketRig envelope error → the CLI's standard `error: <CODE>: <message>` and exit 1; an upstream envelope with nonzero `code` is a success at the daemon and exits 0 — the agent reads `code` and `message` from the body, as the seeded skill tells it to.
 

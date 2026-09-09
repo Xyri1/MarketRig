@@ -11,10 +11,11 @@ use std::time::Duration;
 /// (`openviking-continuity` §5.5).
 const SKILL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// What one research read may wait for (`hithink-a-share` §4.2): 45 s, above the
-/// daemon's own 30 s upstream ceiling, so a slow HiThink comes back as the
-/// daemon's `RESEARCH_UNREACHABLE` rather than as this client's timeout.
-const RESEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+/// What one research read may wait for (`hithink-a-share` §4.2): the daemon's
+/// whole passthrough — 3 attempts × 30 s plus 500 ms + 1 s of backoff = 91.5 s,
+/// rounded up — so a slow HiThink comes back as the daemon's
+/// `RESEARCH_UNREACHABLE` rather than as this client's timeout.
+const RESEARCH_TIMEOUT: Duration = Duration::from_secs(100);
 
 /// A failure with the exit code it maps to (feature SPEC §8).
 pub struct Fault {
