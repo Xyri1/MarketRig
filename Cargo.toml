@@ -45,6 +45,9 @@ nautilus-execution = { version = "=0.62.0", default-features = false }
 # nautilus-common carries the data-event sender. Neither touches precision.
 nautilus-live = { version = "=0.62.0", default-features = false, features = ["node"] }
 nautilus-model = { version = "=0.62.0", default-features = false }
+# Already in the graph through `nautilus-live`; named directly only so the
+# daemon can reach `Portfolio::initialize_orders` after restoration.
+nautilus-portfolio = { version = "=0.62.0", default-features = false }
 nautilus-sandbox = { version = "=0.62.0", default-features = false }
 # The terminal manager terminates a `portable-pty` child's tree by pid on Unix
 # (`killpg` on the session `portable-pty`'s `setsid` created) and by Job Object

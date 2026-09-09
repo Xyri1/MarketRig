@@ -18,6 +18,7 @@ nautilus-data.workspace = true
 nautilus-execution.workspace = true
 nautilus-live.workspace = true
 nautilus-model.workspace = true
+nautilus-portfolio.workspace = true
 nautilus-sandbox.workspace = true
 portable-pty.workspace = true
 process-wrap.workspace = true

@@ -1735,6 +1735,22 @@ fn apply(context: &NodeContext, snapshot: BookSnapshot) -> Result<(), String> {
     for order in snapshot.orders {
         hand_to_node(context, order, false);
     }
+    // The reservation the restored orders hold has to be rebuilt by
+    // NautilusTrader, because `CashAccount::balances_locked` — the
+    // per-(instrument, currency) map every release recomputes from — is
+    // `#[serde(skip, default)]` ("transient, not persisted",
+    // `nautilus-model-0.62.0/src/accounts/cash.rs:66-71`). The snapshot carries
+    // the derived `AccountBalance.locked` but not that map, so a restored order
+    // that later cancels leaves its cash stranded: `AccountsManager` calls
+    // `clear_balance_locked` on an empty map and recalculates nothing.
+    //
+    // `Portfolio::initialize_orders` is the component's own answer for exactly
+    // this state — it recomputes each account's locks from the cached open
+    // orders through `AccountsManager::update_orders` and writes the account
+    // back. NautilusTrader's own live node calls it after startup
+    // reconciliation (`nautilus-live-0.62.0/src/node/mod.rs:863`); MarketRig
+    // restores from its own snapshot instead (per D64), so it calls it here.
+    context.portfolio.borrow_mut().initialize_orders();
     Ok(())
 }
 

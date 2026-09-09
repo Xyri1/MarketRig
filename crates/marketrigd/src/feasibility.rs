@@ -8,3 +8,4 @@ pub mod f2;
 pub mod f3;
 pub mod f4;
 pub mod f6;
+pub mod r1;

@@ -36,6 +36,7 @@ use nautilus_model::identifiers::{AccountId, ClientId, InstrumentId, TraderId, V
 use nautilus_model::instruments::{Equity, InstrumentAny};
 use nautilus_model::types::fixed::{HIGH_PRECISION_MODE, PRECISION_BYTES};
 use nautilus_model::types::{Currency, Money, Price, Quantity};
+use nautilus_portfolio::portfolio::Portfolio;
 use nautilus_sandbox::{SandboxExecutionClientConfig, SandboxExecutionClientFactory};
 use rust_decimal::Decimal;
 use serde_json::json;
@@ -109,6 +110,11 @@ pub struct NodeContext {
     pub cache: Rc<RefCell<Cache>>,
     /// The node's clock, which every order NautilusTrader builds is stamped by.
     pub clock: Rc<RefCell<dyn Clock>>,
+    /// The node's portfolio — the component that owns account reservations.
+    /// Restoration needs it because `CashAccount::balances_locked` is
+    /// `#[serde(skip)]`, so a snapshot cannot carry the per-instrument lock map
+    /// and only NautilusTrader can rebuild it (`crate::trade::apply`).
+    pub portfolio: Rc<RefCell<Portfolio>>,
     pub trader_id: TraderId,
 }
 
@@ -341,6 +347,7 @@ fn node_thread(
         let context = NodeContext {
             cache: node.kernel().cache(),
             clock: node.kernel().clock(),
+            portfolio: Rc::clone(&node.kernel().portfolio),
             trader_id: node.trader_id(),
         };
         // The message bus is thread-local, so durable capture is subscribed here,
