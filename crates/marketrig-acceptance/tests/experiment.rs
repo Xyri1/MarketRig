@@ -1,17 +1,21 @@
-//! The acceptance experiment: E1 … E4 and E6, the attended scenarios.
+//! The acceptance experiment: E1 … E4, E6 and E7, the attended scenarios.
 //!
 //! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3,
 //! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3,
-//! `sdd/features/openviking-continuity/SPEC.md` §7.3, and root `sdd/SPEC.md`
+//! `sdd/features/openviking-continuity/SPEC.md` §7.3,
+//! `sdd/features/hithink-a-share/SPEC.md` §6.3, and root `sdd/SPEC.md`
 //! §17, per D75. One operator-attended run per platform-and-runtime cell, on
-//! real Yahoo and a real runtime CLI, with MCP registration performed by hand
-//! (R1 keeps it operator-performed, feature SPEC §8).
+//! real Yahoo, the real HiThink service, and a real runtime CLI, with MCP
+//! registration performed by hand (R1 keeps it operator-performed, feature SPEC
+//! §8).
 //!
 //! **Operator variable:** `MARKETRIG_EXPERIMENT` selects the cell — `codex` runs
-//! E1, E3, E4, and E6; `claude` runs E2 and the same three. Unset or anything
+//! E1, E3, E4, E6, and E7; `claude` runs E2 and the same four. Unset or anything
 //! else skips them all cleanly, which is what CI and every unattended `cargo
 //! test` do; E6 additionally skips with evidence unless the operator's
-//! prerequisites and provider are named. A cell's scenarios run one after the
+//! prerequisites and provider are named, and E7 unless
+//! `MARKETRIG_EXPERIMENT_HITHINK_API_KEY` carries a real HiThink key. A cell's
+//! scenarios run one after the
 //! other on their own daemons, desks, and bundles: they share the operator's
 //! terminal, so the harness serializes them. The instructions are printed, so
 //! run the selected cell with output:
@@ -25,8 +29,9 @@
 //! the cell. The legs that wait on the agent to act end **inconclusive**, with
 //! their evidence in the bundle, and the operator decides whether to rerun. The
 //! session's two quote reads leave no durable trace at all (observations are
-//! never persisted, feature SPEC §2.3), so that aspect is inconclusive by
-//! construction and is recorded as such.
+//! never persisted, feature SPEC §2.3), and neither do E7's research reads (the
+//! passthrough writes no row and no event), so those aspects are inconclusive by
+//! construction and are recorded as such.
 
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
@@ -1477,6 +1482,359 @@ fn continuity(scenario: &str, cell: &str, runtime: &str, other: &str) {
     );
     console.detach();
     finish(&mut g, scenario, daemon, &desk_id);
+}
+
+// ---------------------------------------------------------------------------
+// E7 — the A-share plane on the real HiThink service, attended
+// (`sdd/features/hithink-a-share/SPEC.md` §6.3)
+// ---------------------------------------------------------------------------
+
+/// The operator's own HiThink key (`hithink-a-share` §1.2). It is read here,
+/// sent once in a `PUT` body the bundle keeps redacted, and never printed: the
+/// cell's last steps remove it and grep the whole bundle for it.
+const HITHINK_KEY: &str = "MARKETRIG_EXPERIMENT_HITHINK_API_KEY";
+
+/// The A-share the cell reads and trades (`hithink-a-share` §2.1): Kweichow
+/// Moutai, `600519.SH` to HiThink, 100 shares to a lot.
+const A_SHARE: &str = "600519.XSHG";
+
+#[test]
+fn e7_codex_cli() {
+    a_share("E7", "codex", "Codex CLI");
+}
+
+#[test]
+fn e7_claude_code() {
+    a_share("E7", "claude", "Claude Code");
+}
+
+/// **E7 — A-share data on the real service** (`hithink-a-share` §6.3). The
+/// harness saves the operator's real key the way Settings does, then MarketRig
+/// launches the runtime itself as in E4 and E6 and this console becomes the
+/// desk's terminal.
+///
+/// Mechanical and asserted: the provider row, the `CN` observation's provider,
+/// calendar, and null source time, the closed cycle's queued evaluation, and
+/// the key's absence from every file of the bundle. What the session read
+/// through `marketrig research hithink` leaves no durable trace at all — the
+/// passthrough writes no row and no event (§4.1) — so that aspect is
+/// inconclusive by construction, as E1's two quote reads are.
+fn a_share(scenario: &str, cell: &str, runtime: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e7-{cell}"));
+    let key = std::env::var(HITHINK_KEY)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if key.is_empty() {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: unset — {HITHINK_KEY}. E7 needs a real HiThink key, \
+             the one the operator would type into Settings; see \
+             crates/marketrig-acceptance/EXPERIMENT.md §1."
+        );
+        g.inconclusive(
+            scenario,
+            "the cell's HiThink key is unset, so E7 did not run",
+            json!({ "missing": [HITHINK_KEY] }),
+        );
+        return;
+    }
+
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    let (status, row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{cell}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["state"], "AVAILABLE",
+        "the cell's runtime must be installed and discoverable: {row}"
+    );
+
+    // The provider, through REST, exactly as the Settings block does (§1.4).
+    // The save is one bounded request against the real service (§1.2), so a
+    // rejected key fails the cell here, before the operator is asked anything.
+    let (status, provider) = g.api_redacted(
+        scenario,
+        &endpoint,
+        "PUT",
+        "/research/hithink",
+        &json!({ "api_key": key }).to_string(),
+    );
+    assert_eq!(
+        status, 200,
+        "the real service must accept the key: {provider}"
+    );
+    assert_eq!(provider["state"], "AVAILABLE", "{provider}");
+    assert_eq!(provider["a_share_feed"], "HITHINK", "{provider}");
+    assert_eq!(provider["api_key_present"], true, "{provider}");
+    assert!(
+        provider.get("api_key").is_none(),
+        "the key never comes back (§1.2): {provider}"
+    );
+    let base = provider["base_url"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        base.starts_with("https://"),
+        "E7 is the real service: leave MARKETRIG_TEST_HITHINK_URL unset ({provider})"
+    );
+    assert!(
+        g.event_kinds()
+            .iter()
+            .any(|kind| kind == "HITHINK_PROVIDER_CHANGED"),
+        "a save appends HITHINK_PROVIDER_CHANGED (§1.2)"
+    );
+
+    // The desk is created after the save, so its node starts on the HiThink
+    // leg and its first poll is HiThink's (§2.2).
+    let desk = format!("{cell}-e7-{}", marketrig_acceptance::now_secs());
+    let (status, created) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/desks",
+        Some(&json!({ "name": desk, "runtime": cell }).to_string()),
+    );
+    assert_eq!(status, 201, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+
+    // Mechanical: the CN leg reads from HiThink whatever the Shanghai phase —
+    // the node polls once at subscription (R1 feature SPEC §2.1).
+    let quotes = format!("/desks/{desk_id}/market/quotes");
+    let cn = |g: &Harness| -> serde_json::Value {
+        g.call(&endpoint, "GET", &quotes, None).1["quotes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|quote| quote["instrument_id"] == A_SHARE)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert!(
+        waited(SETTLES, "the A-share observation from HiThink", || {
+            cn(&g)["provider"] == "hithink"
+        }),
+        "the real HiThink feed never produced a CN observation: {}",
+        cn(&g)
+    );
+    let observation = cn(&g);
+    assert_eq!(
+        observation.get("source_time_ns"),
+        Some(&serde_json::Value::Null),
+        "a HiThink observation carries a null source time (§2.3): {observation}"
+    );
+    assert!(
+        matches!(
+            observation["calendar"].as_str(),
+            Some("HITHINK" | "WEEKDAY")
+        ),
+        "every observation names the calendar rule that labeled its phase (§3): {observation}"
+    );
+    g.note(
+        scenario,
+        "the desk's CN leg reads the real HiThink service, with the calendar rule and the null source time §2.3 requires",
+        json!({ "observation": observation, "base_url": base }),
+    );
+
+    // The two reads the session is asked for, as the operator will paste them:
+    // the CLI needs the daemon's data root, and the terminal relays every
+    // MARKETRIG_* variable to the launched runtime (R3 §4.2).
+    let income = format!(
+        "{cli} research hithink a-share/financials/income-statements \
+         --param thscode=600519.SH --param period=annual --param limit=1",
+        cli = g.cli.display()
+    );
+    let valuation = format!(
+        "{cli} research hithink a-share/valuations/snapshot --param thscodes=600519.SH",
+        cli = g.cli.display()
+    );
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — A-share data on real HiThink (feature SPEC §6.3)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:       {desk}\n\
+         Runtime:    {runtime} {version} at {path}\n\
+         Provider:   {base} — AVAILABLE, a_share_feed HITHINK\n\
+         Instrument: {instrument} — HiThink 600519.SH, 100 shares to a lot\n\
+         CLI:        {cli}\n\
+         Data root:  {root}\n\
+         Evidence:   {root}\n\
+         \n\
+         MarketRig already holds your HiThink key — the harness saved it the way\n\
+         the Settings block does — and this desk's CN leg is reading the real\n\
+         service. Nothing to register and nothing to start, as in E4 and E6:\n\
+         MarketRig launches the runtime itself and this console becomes the desk's\n\
+         terminal. The session inherits MARKETRIG_TEST_DATA_ROOT, so the command\n\
+         above reaches this daemon with no environment of its own.\n\
+         \n\
+         1. Answer whatever {runtime} asks on first launch, as in E4, and nothing\n\
+         \x20  more.\n\
+         \n\
+         2. Ask the session to read {instrument}'s latest annual income statement\n\
+         \x20  and its current valuation through MarketRig:\n\
+         \n\
+         \x20      {income}\n\
+         \x20      {valuation}\n\
+         \n\
+         \x20  Success is `code == 0` in HiThink's own envelope. The passthrough\n\
+         \x20  writes no row and no event, so the harness records this aspect\n\
+         \x20  INCONCLUSIVE by construction — only you can judge what came back.\n\
+         \n\
+         3. Ask the session to buy one lot — 100 shares — of {instrument} through\n\
+         \x20  `submit_order`, and then to sell that same lot. That closes one\n\
+         \x20  position cycle and MarketRig queues its EVALUATION prompt. Inside\n\
+         \x20  the Shanghai session (09:30-11:30, 13:00-15:00 Asia/Shanghai) the\n\
+         \x20  leg keeps polling and the round trip fills against a fresh price.\n\
+         \n\
+         4. Nothing else. The harness then removes the key from the credential\n\
+         \x20  store and greps the whole bundle for it, so a later research read\n\
+         \x20  answers RESEARCH_UNCONFIGURED: that is the cell ending, not a fault.\n\
+         \n\
+         The harness waits up to {patience} minutes per step. While this console is\n\
+         \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
+         \x20  terminal with `pkill -f deps/experiment-`, then `stty sane` here.\n\
+         ===========================================================================\n",
+        version = row["version"].as_str().unwrap_or_default(),
+        path = row["executable_path"].as_str().unwrap_or_default(),
+        instrument = A_SHARE,
+        cli = g.cli.display(),
+        root = g.out.display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e7.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; the provider is saved and the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "instrument": A_SHARE, "runtime": row }),
+    );
+
+    let console = console::attach(&endpoint, &desk_id);
+
+    let (status, activated) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/desks/{desk_id}/session/activate"),
+        Some(r#"{"mode":"NEW"}"#),
+    );
+    assert_eq!(status, 202, "the runtime must be activatable: {activated}");
+
+    // --- The agent's own half (root §17) ------------------------------------
+    if !waited(PATIENCE, "the session to become ready", || {
+        !kinds(&g, &desk_id, "SESSION_READY").is_empty()
+    }) {
+        g.inconclusive(
+            scenario,
+            "the launch never reached readiness — the operator may not have answered its first-launch questions",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+    } else if !waited(PATIENCE, "the session to close one position cycle", || {
+        g.scalar::<i64>(
+            "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+            &[&desk_id],
+        ) >= 1
+    }) {
+        g.inconclusive(
+            scenario,
+            "no position cycle was closed within the cell's patience",
+            json!({ "prompts": prompt_states(&g, &desk_id) }),
+        );
+    } else {
+        // The cycle exists, so the rest is the daemon's own: its evaluation is
+        // queued in the same unit (root §13.2).
+        let cycle: String = g.scalar(
+            "SELECT id FROM position_cycles WHERE desk_id = ?1 ORDER BY closed_at_ns LIMIT 1",
+            &[&desk_id],
+        );
+        assert!(
+            waited(SETTLES, "the cycle's evaluation prompt", || {
+                g.scalar::<i64>(
+                    "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION'",
+                    &[&desk_id],
+                ) >= 1
+            }),
+            "a closed cycle queues its EVALUATION prompt (root §13.2)"
+        );
+        g.note(
+            scenario,
+            "the session's round trip on the A-share closed a cycle and MarketRig queued its evaluation",
+            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+        );
+    }
+
+    g.inconclusive(
+        scenario,
+        "what the session read through `marketrig research hithink` is the operator's to judge: \
+         the passthrough writes no row and no event (§4.1)",
+        json!({ "commands": [income, valuation] }),
+    );
+
+    // The key leaves the credential store before the bundle is kept, so the
+    // evidence carries no secret at all (§1.2's DELETE, root §16).
+    let (status, removed) = g.api(scenario, &endpoint, "DELETE", "/research/hithink", None);
+    assert_eq!(status, 200, "{removed}");
+    assert_eq!(removed["state"], "UNCONFIGURED", "{removed}");
+    assert_eq!(removed["api_key_present"], false, "{removed}");
+
+    console.detach();
+    finish(&mut g, scenario, daemon, &desk_id);
+
+    // Everything the run wrote is on disk now, the daemon included.
+    let leaked = carrying(&g.out, &key);
+    assert!(
+        leaked.is_empty(),
+        "the operator's key appears in the bundle, which nothing may carry (§1.2): {leaked:?}"
+    );
+    g.note(
+        scenario,
+        "the key is in no file of the bundle",
+        json!({ "scanned": g.out.display().to_string() }),
+    );
+}
+
+/// Every file under `root` whose bytes contain `needle`, named relative to it.
+/// ponytail: a naive scan of a bundle of a few megabytes; a real search tool if
+/// a bundle ever grows the way E6's provisioned one does.
+fn carrying(root: &std::path::Path, needle: &str) -> Vec<String> {
+    let needle = needle.as_bytes();
+    let mut found = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if std::fs::read(&path)
+                .unwrap_or_default()
+                .windows(needle.len())
+                .any(|window| window == needle)
+            {
+                found.push(
+                    path.strip_prefix(root)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    found
 }
 
 /// The projected skill tree by skill name (§5.2): per file its path inside the
