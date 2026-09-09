@@ -4483,20 +4483,21 @@ fn gate() {
     };
     let capture = codex_hooks["hooks"]["Stop"][0]["hooks"][0].clone();
     let command = capture[field].as_str().unwrap_or_default();
-    let home_prefix = if cfg!(windows) {
-        format!("set \"OPENVIKING_HOME={}\" && ", plugin_home.display())
+    let capture_script = codex_plugin.join("scripts").join("auto-capture.mjs");
+    let (home_prefix, tail) = if cfg!(windows) {
+        (
+            format!("$env:OPENVIKING_HOME='{}'; ", plugin_home.display()),
+            format!("& '{node}' '{}'", capture_script.display()),
+        )
     } else {
-        format!("OPENVIKING_HOME=\"{}\" ", plugin_home.display())
+        (
+            format!("OPENVIKING_HOME=\"{}\" ", plugin_home.display()),
+            format!("\"{node}\" \"{}\"", capture_script.display()),
+        )
     };
     assert!(
         command.contains(&home_prefix)
-            && command.ends_with(&format!(
-                "\"{node}\" \"{}\"",
-                codex_plugin
-                    .join("scripts")
-                    .join("auto-capture.mjs")
-                    .display()
-            ))
+            && command.ends_with(&tail)
             && !command.contains("OPENVIKING_API_KEY"),
         "the path set prefixed onto one quoted string under the per-platform field (§4.3): {codex_hooks}"
     );
