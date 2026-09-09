@@ -125,7 +125,7 @@ F7 live reads: GET-only against the real HiThink service with the key from the o
 
 ## Follow-up handoff — cash recovery and intraday provider evidence
 
-**Status:** NOT STARTED — requested 2026-09-09; prepared for Claude, not dispatched.  
+**Status:** R1 DONE (PASS), R2 preparation DONE with session samples scheduled for 2026-09-10 — see Follow-up result below. Requested 2026-09-09.  
 **Scope:** Run the two bounded follow-ups below on the existing feasibility branch/worktree. Do not implement the full feature or open an implementation slice.
 
 ### Review correction and intended outcome
