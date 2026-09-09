@@ -7,6 +7,7 @@ pub mod desk;
 pub mod dispatch;
 pub mod events;
 pub mod exec;
+mod feasibility;
 pub mod feed;
 pub mod hithink;
 pub mod log;
