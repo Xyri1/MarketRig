@@ -1,0 +1,8 @@
+{
+ "note": "GET /api/dump/market-dumps/adjustment-factors/download-url; presigned_url redacted",
+ "code": 0,
+ "data": {
+  "presigned_url": "<redacted>",
+  "expires_in_seconds": 300
+ }
+}

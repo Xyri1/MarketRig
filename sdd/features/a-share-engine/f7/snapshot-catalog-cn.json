@@ -1,0 +1,76 @@
+{
+ "code": 0,
+ "message": "success",
+ "request_id": "3af1022eba45415e9929724fe57c9395",
+ "data": {
+  "timestamp": 1788945142000,
+  "total": 5,
+  "item": [
+   {
+    "thscode": "600519.SH",
+    "ticker": "600519",
+    "volume": 3222611,
+    "turnover": 4168500500,
+    "last_price": 1290.88,
+    "price_change": -18.42,
+    "price_change_ratio_pct": -1.406859,
+    "open_price": 1305.01,
+    "high_price": 1309.3,
+    "low_price": 1286.68,
+    "prev_price": 1309.3
+   },
+   {
+    "thscode": "601318.SH",
+    "ticker": "601318",
+    "volume": 52422242,
+    "turnover": 2944586000,
+    "last_price": 56.26,
+    "price_change": 0.56,
+    "price_change_ratio_pct": 1.005386,
+    "open_price": 55.7,
+    "high_price": 56.57,
+    "low_price": 55.57,
+    "prev_price": 55.7
+   },
+   {
+    "thscode": "000001.SZ",
+    "ticker": "000001",
+    "volume": 58230598,
+    "turnover": 682946780,
+    "last_price": 11.7,
+    "price_change": -0.08,
+    "price_change_ratio_pct": -0.679117,
+    "open_price": 11.76,
+    "high_price": 11.79,
+    "low_price": 11.69,
+    "prev_price": 11.78
+   },
+   {
+    "thscode": "000858.SZ",
+    "ticker": "000858",
+    "volume": 17867684,
+    "turnover": 1270641220,
+    "last_price": 71.16,
+    "price_change": -0.49,
+    "price_change_ratio_pct": -0.68388,
+    "open_price": 71.64,
+    "high_price": 71.64,
+    "low_price": 70.95,
+    "prev_price": 71.65
+   },
+   {
+    "thscode": "300750.SZ",
+    "ticker": "300750",
+    "volume": 39024000,
+    "turnover": 12957469600,
+    "last_price": 336.84,
+    "price_change": 1.35,
+    "price_change_ratio_pct": 0.402396,
+    "open_price": 332.48,
+    "high_price": 337.66,
+    "low_price": 327.1,
+    "prev_price": 335.49
+   }
+  ]
+ }
+}

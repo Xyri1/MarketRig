@@ -1,0 +1,47 @@
+{
+ "code": 0,
+ "message": "success",
+ "request_id": "0c7bbc42e4e64898b04a92aaf606f039",
+ "data": {
+  "timestamp": 1788945606583,
+  "auction_phase": "closed",
+  "data_status": "final",
+  "total": 2,
+  "item": [
+   {
+    "thscode": "600519.SH",
+    "ticker": "600519",
+    "name": "贵州茅台",
+    "auction_price": 1305.01,
+    "auction_pct": -0.3277,
+    "auction_volume": 256.0,
+    "auction_amount": 33408256,
+    "auction_unmatched": -9.02,
+    "auction_turnover_pct": 0.002,
+    "auction_yesterday_ratio_pct": 1.46,
+    "auction_volume_ratio": 2.5347,
+    "pre_close_price": 1309.3,
+    "open_price": 1305.01,
+    "last_price": 1290.88,
+    "float_market_cap": 1613705337098.8801
+   },
+   {
+    "thscode": "002322.SZ",
+    "ticker": "002322",
+    "name": "理工能科",
+    "auction_price": 12.37,
+    "auction_pct": -0.0808,
+    "auction_volume": 411.0,
+    "auction_amount": 508407.0,
+    "auction_unmatched": -72.0,
+    "auction_turnover_pct": 0.0117,
+    "auction_yesterday_ratio_pct": 0.8177,
+    "auction_volume_ratio": 1.8267,
+    "pre_close_price": 12.38,
+    "open_price": 12.37,
+    "last_price": 12.27,
+    "float_market_cap": 4311443998.83
+   }
+  ]
+ }
+}

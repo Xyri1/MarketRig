@@ -1,0 +1,165 @@
+{
+ "note": "rows with ex_date_ms == 2026-09-09 00:00 Asia/Shanghai, from GET /api/dump/market-dumps/adjustment-factors/download-url (parquet, 5.2e4 rows); presigned URL not recorded",
+ "item": [
+  {
+   "thscode": "001400.SZ",
+   "ticker": "001400",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.5,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002073.SZ",
+   "ticker": "002073",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.02,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002315.SZ",
+   "ticker": "002315",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.5,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002322.SZ",
+   "ticker": "002322",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.34,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002441.SZ",
+   "ticker": "002441",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.2,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002833.SZ",
+   "ticker": "002833",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.3,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "002841.SZ",
+   "ticker": "002841",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.5,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "300196.SZ",
+   "ticker": "300196",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.2,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "300622.SZ",
+   "ticker": "300622",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.16,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "301151.SZ",
+   "ticker": "301151",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.2,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "600114.SH",
+   "ticker": "600114",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.1,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "603992.SH",
+   "ticker": "603992",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.28,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "603993.SH",
+   "ticker": "603993",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.095,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "605377.SH",
+   "ticker": "605377",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.2,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "688128.SH",
+   "ticker": "688128",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.25,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  },
+  {
+   "thscode": "688271.SH",
+   "ticker": "688271",
+   "ex_date_ms": 1788883200000,
+   "dividend_per_share": 0.13,
+   "per_share_bonus": 0.0,
+   "allotment_ratio": 0.0,
+   "allotment_price": 0.0,
+   "currency": "CNY"
+  }
+ ]
+}

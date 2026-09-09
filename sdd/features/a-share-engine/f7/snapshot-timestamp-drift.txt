@@ -1,0 +1,5 @@
+GET /api/a-share/prices/snapshot?thscodes=600519.SH, two identical calls 13 s apart, 2026-09-09 after the close:
+  17:12:42+08:00  data.timestamp=1788945162000 -> 2026-09-09T17:12:42+08:00  last_price=1290.88  prev_price=1309.3
+  17:12:55+08:00  data.timestamp=1788945175000 -> 2026-09-09T17:12:55+08:00  last_price=1290.88  prev_price=1309.3
+data.timestamp advanced with the wall clock while the prices did not: it is response-assembly time, not a data time.
+It is also not null, which the pinned doc says it is in thscodes batch mode.
