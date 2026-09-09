@@ -29,7 +29,7 @@ unset MARKETRIG_ACCEPTANCE_OUT
 echo "cell=$MARKETRIG_EXPERIMENT" >&2
 
 _root="$(cd "$(dirname "$_self")/../.." && pwd)"
-_python="${MARKETRIG_EXPERIMENT_PYTHON:-$(command -v python3.12)}"
+_python="${MARKETRIG_EXPERIMENT_PYTHON:-$(command -v python3.12 || uv python find 3.12 2>/dev/null)}"
 _node="${MARKETRIG_EXPERIMENT_NODE:-$(command -v node)}"
 _wheels="${MARKETRIG_EXPERIMENT_WHEELS:-$_root/openviking-wheels/macos-arm64}"
 
