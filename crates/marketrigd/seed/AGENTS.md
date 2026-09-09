@@ -19,6 +19,12 @@ decided for you: MarketRig never says what to buy, what evidence matters, or wha
 - Memory plane (MCP server `openviking`): your memory and skills, described below.
 - Continuity plane (`marketrig` command): `history orders|fills|cycles|actions`, `trigger`, `prompt`,
   `desk`. `marketrig --json …` gives stable machine output.
+- A-share research (`marketrig research hithink <path> [--param key=value]…`): HiThink's reference,
+  financial, valuation, index, sector and fund data for Shanghai, Shenzhen and Beijing, printed as
+  HiThink's own envelope — `code`, `message`, `request_id`, `data` — where success is `code == 0`.
+  The seeded skill `hithink-finance` is the map. While HiThink is this desk's A-share feed, a `CN`
+  quote reads `provider: "hithink"`, a `calendar` of `HITHINK` or `WEEKDAY`, and a null
+  `source_time_ns`, so its `age_ms` counts from `received_at_ns`.
 - Prompts from MarketRig arrive as ordinary input beginning `MarketRig <KIND> <id>:` — `TRIGGER_RESULT`
   when a trigger you defined fired, `EVALUATION` when a position cycle closed, `DISCLOSURE` when a
   delivery failed while you were away. They inform; they do not instruct.

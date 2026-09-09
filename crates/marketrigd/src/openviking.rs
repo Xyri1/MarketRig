@@ -1559,9 +1559,20 @@ impl OpenViking {
         Ok(())
     }
 
-    /// §5.3's seed upload: `GET /api/v1/skills/desk-improvement` missing means
-    /// `POST /api/v1/skills` with the seed's `SKILL.md` under the desk's key,
-    /// the desk name substituted and nothing else changed.
+    /// §5.3's seed uploads, in order: for each seeded skill, `GET
+    /// /api/v1/skills/<skill>` missing means `POST /api/v1/skills` with the
+    /// seed's `SKILL.md` under the desk's key, the desk name substituted into
+    /// `desk-improvement` and nothing else changed. `hithink-finance` is
+    /// `hithink-a-share` §5.3's, uploaded verbatim. Answers whether anything
+    /// was written, so the projection runs only then.
+    ///
+    /// ponytail: `SKILL.md` alone, so `hithink-finance`'s `references/` do not
+    /// reach the projection. OpenViking takes auxiliary files only as an
+    /// archive through `POST /api/v1/resources/temp_upload` then `POST
+    /// /api/v1/skills {temp_file_id}` — its request model forbids extra keys
+    /// and a dict `data` is a skill dict, not a file map. Upgrade path: that
+    /// two-step upload, here and on the acceptance stand-in, once a desk needs
+    /// the reference pages in the workspace (`hithink-a-share` §5.3).
     async fn upload_seed_skill(&self, desk_id: &str, key: &str) -> bool {
         let Some(port) = self.port() else {
             return false;
@@ -1573,25 +1584,36 @@ impl OpenViking {
                 return false;
             }
         };
-        let seeded = match self
-            .user_get(port, key, "skills/desk-improvement", &[])
-            .await
-        {
-            // Already there: the seed is written once and never rewritten.
-            Ok(Some(_)) => return false,
-            Ok(None) => {
-                let body = json!({ "data": crate::desk::SEED_SKILL.replace("<name>", &name) });
-                self.user_post(port, key, "skills", body).await
-            }
-            Err(e) => Err(e),
-        };
-        match seeded {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::warn!(desk = desk_id, error = %e, "seeding desk-improvement failed");
-                false
+        let mut written = false;
+        // `hithink-finance` goes up verbatim: its own `<name>` is the
+        // placeholder of a `meta/tickers/search` example, not the desk.
+        for (skill, seed) in [
+            (
+                "desk-improvement",
+                crate::desk::SEED_SKILL.replace("<name>", &name),
+            ),
+            ("hithink-finance", crate::desk::HITHINK_SKILL.to_string()),
+        ] {
+            let seeded = match self
+                .user_get(port, key, &format!("skills/{skill}"), &[])
+                .await
+            {
+                // Already there: a seed is written once and never rewritten.
+                Ok(Some(_)) => continue,
+                Ok(None) => {
+                    let body = json!({ "data": seed });
+                    self.user_post(port, key, "skills", body).await
+                }
+                Err(e) => Err(e),
+            };
+            match seeded {
+                Ok(_) => written = true,
+                Err(e) => {
+                    tracing::warn!(desk = desk_id, skill, error = %e, "seeding a skill failed");
+                }
             }
         }
+        written
     }
 }
 
@@ -3415,10 +3437,12 @@ mod tests {
         assert_eq!(fake.lock().unwrap().listings, 2, "one ran, one was queued");
     }
 
-    /// Check 5's seed upload and check 8's byte-for-byte seed: the desk name is
-    /// the only substitution, and a skill that is already there is left alone.
+    /// Check 5's seed uploads and check 8's byte-for-byte seeds: both seeded
+    /// skills go up, in order, with the desk name the only substitution, and a
+    /// skill that is already there is left alone. `hithink-finance` carries the
+    /// committed seed and none of `hithink-a-share` §6.2 H4's forbidden strings.
     #[tokio::test]
-    async fn the_seed_skill_is_uploaded_once() {
+    async fn the_seed_skills_are_uploaded_once() {
         let (_dir, ov) = scratch();
         let fake: Fake = Arc::new(Mutex::new(FakeSkills::default()));
         let port = fake_skills(fake.clone()).await;
@@ -3427,12 +3451,25 @@ mod tests {
         ov.upload_seed_skill(DESK_A, "desk-key").await;
         assert_eq!(
             fake.lock().unwrap().uploaded,
-            vec![crate::desk::SEED_SKILL.replace("<name>", "alpha")]
+            vec![
+                crate::desk::SEED_SKILL.replace("<name>", "alpha"),
+                crate::desk::HITHINK_SKILL.to_string(),
+            ]
         );
+        let hithink = fake.lock().unwrap().uploaded[1].clone();
+        for forbidden in [
+            "X-api-key",
+            "fuyao.aicubes.cn/mcp",
+            "hithink-finance auth",
+            "pip install",
+            "npx",
+        ] {
+            assert!(!hithink.contains(forbidden), "{forbidden} reached the desk");
+        }
 
         // Present now, so a second provisioning uploads nothing.
         ov.upload_seed_skill(DESK_A, "desk-key").await;
-        assert_eq!(fake.lock().unwrap().uploaded.len(), 1);
+        assert_eq!(fake.lock().unwrap().uploaded.len(), 2);
     }
 
     /// Check 11: §5.5's write path — the `GET` decides between the create and

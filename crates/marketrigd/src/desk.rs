@@ -25,6 +25,11 @@ const SEED_AGENTS: &str = include_str!("../seed/AGENTS.md");
 /// `<name>` is the desk name.
 pub(crate) const SEED_SKILL: &str = include_str!("../seed/desk-improvement.SKILL.md");
 
+/// The seeded HiThink research skill, uploaded beside `desk-improvement`
+/// (`hithink-a-share` §5.3). The committed rewrite of the vendored upstream
+/// skill, byte for byte; it carries no `<name>`.
+pub(crate) const HITHINK_SKILL: &str = include_str!("../seed/skills/hithink-finance/SKILL.md");
+
 /// The one `failure_code` R0 records: every bootstrap step fails the same way.
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
 
@@ -768,8 +773,9 @@ fn sections(text: &str) -> std::collections::BTreeMap<String, String> {
 }
 
 /// Check 8: the constitution is the R4 §5.1 block with the three sections
-/// `openviking-continuity` §5.4 rewrites, and the improvement skill is the seed
-/// file itself — creation and the upload use it unchanged apart from `<name>`.
+/// `openviking-continuity` §5.4 rewrites and the one `hithink-a-share` §5.3
+/// rewrites over that, and the seeded skills are the seed files themselves —
+/// creation and the uploads use them unchanged apart from `<name>`.
 #[cfg(test)]
 #[test]
 fn seeds_are_the_spec_blocks() {
@@ -782,13 +788,16 @@ fn seeds_are_the_spec_blocks() {
         "openviking-continuity/SPEC.md",
         "### 5.4 The constitution",
     ));
+    let research = sections(&spec_block("hithink-a-share/SPEC.md", "### 5.3 Seeding"));
     assert_eq!(rewritten.len(), 3, "§5.4 rewrites exactly three sections");
+    assert_eq!(research.len(), 1, "§5.3 rewrites Surfaces alone");
     assert_eq!(seed.len(), r4.len(), "no section is added or dropped");
     for (heading, body) in &seed {
-        let expected = rewritten
+        let expected = research
             .get(heading)
+            .or_else(|| rewritten.get(heading))
             .or_else(|| r4.get(heading))
-            .unwrap_or_else(|| panic!("{heading} is in neither SPEC block"));
+            .unwrap_or_else(|| panic!("{heading} is in no SPEC block"));
         assert_eq!(body, expected, "the {heading} section");
     }
     // The preamble, above the first `## `, is R4's.
@@ -808,6 +817,8 @@ fn seeds_are_the_spec_blocks() {
     assert!(agents_seed("alpha").contains("viking://~/skills/<skill>/SKILL.md"));
     assert!(SEED_SKILL.starts_with("---\nname: desk-improvement\n"));
     assert!(!SEED_SKILL.replace("<name>", "alpha").contains("<name>"));
+    assert!(HITHINK_SKILL.starts_with("---\nname: hithink-finance\n"));
+    assert!(agents_seed("alpha").contains("marketrig research hithink"));
 }
 
 #[cfg(test)]
