@@ -15,7 +15,7 @@
 //!    `ask_size` is zero propagates all the way to the matching core. The
 //!    ladder path is `OrderBook::update_quote_tick` →`update_book_ask` →
 //!    `BookLadder::add` → `handle_l1_add`
-//!    (`nautilus-model-0.62.0/src/orderbook/ladder.rs:227-233`), which clears
+//!    (`nautilus-model-0.62.0/src/orderbook/ladder.rs:238-244`), which clears
 //!    the whole L1 side on a non-positive size instead of adding; the core
 //!    reads it back at the end of `OrderMatchingEngine::iterate`
 //!    (`nautilus-execution-0.62.0/src/matching_engine/mod.rs:3821-3822`), so
@@ -489,7 +489,7 @@ fn market_remainder_at_the_limit_price_leaves_the_band() {
 /// F4 3, third case: the slip is MARKET-only. A LIMIT BUY larger than the
 /// displayed lot fills what is there and rests with the remainder — the L1
 /// remainder branch lists only `Market | MarketIfTouched | StopMarket |
-/// TrailingStopMarket` (`mod.rs:4779-4787`).
+/// TrailingStopMarket` (`mod.rs:4779-4789`).
 #[test]
 fn limit_remainder_rests_instead_of_slipping() {
     let (_dir, store) = crate::store::open_temp();
