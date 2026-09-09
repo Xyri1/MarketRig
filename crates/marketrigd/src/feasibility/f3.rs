@@ -17,7 +17,8 @@
 //!    issued after restoration and before any quote is published, produces one
 //!    `OrderCanceled` under the original id and leaves the later crossing quote
 //!    inert. Run for a next-day restart and for a same-day post-14:57 restart.
-//!    It does **not** release the venue reservation, and
+//!    In the initial spike it did **not** release the venue reservation (repaired
+//!    by R1, `r1.rs`, via `Portfolio::initialize_orders` after restore), and
 //!    [`a_fresh_order_on_a_restarted_node_still_releases`] shows why: the pinned
 //!    `CashAccount::balances_locked` map is `#[serde(skip, default)]`, so
 //!    `book_snapshots` cannot carry it and `clear_balance_locked` has nothing to
@@ -529,8 +530,8 @@ fn restored_order_fills_against_a_crossing_quote() {
 /// original id, and the crossing quote that follows does nothing. Run for the
 /// next-day restart and for a same-day restart past the 14:57 deadline.
 ///
-/// **The reservation is not released**, and that is a pinned-crate defect, not a
-/// property of the cancel: `CashAccount::balances_locked` — the per-instrument
+/// **Initial finding (superseded by R1): the reservation was not released**, a
+/// pinned-crate limitation rather than a property of the cancel: `CashAccount::balances_locked` — the per-instrument
 /// lock map every release recomputes from — is
 /// `#[serde(skip, default)]`, "transient, not persisted"
 /// (`nautilus-model-0.62.0/src/accounts/cash.rs:69-71`). `book_snapshots`
@@ -542,7 +543,9 @@ fn restored_order_fills_against_a_crossing_quote() {
 /// empty map (`nautilus-model-0.62.0/src/accounts/base.rs:425-443`) and
 /// therefore recalculates nothing. The stranded lock survives every terminal
 /// outcome; [`a_fresh_order_on_a_restarted_node_still_releases`] shows the same
-/// node releases a lock it took itself.
+/// node releases a lock it took itself. R1 (`r1.rs`) repairs it through the
+/// public `Portfolio::initialize_orders` after `trade::apply`, so this test now
+/// asserts the release.
 #[test]
 fn restart_cancel_before_data_terminates_once() {
     for (name, restart_ns) in [("f3-nextday", NEXT_0935), ("f3-1530", CN_1530)] {
@@ -589,11 +592,15 @@ fn restart_cancel_before_data_terminates_once() {
             trade::open_orders(&node).unwrap().is_empty(),
             "nothing is open"
         );
+        // Initial spike (2026-09-09): this read `500000.00|160000.00|340000.00` —
+        // the restored reservation was stranded because the snapshot cannot carry
+        // `CashAccount::balances_locked`. R1 repaired it by calling
+        // `Portfolio::initialize_orders` after `apply` (`r1.rs` keeps the failing
+        // reproduction); the expectation below is the repaired behaviour.
         assert_eq!(
             balance_cny(&node, &desk_id),
-            "500000.00 CNY|160000.00 CNY|340000.00 CNY",
-            "{name}: the terminal event did NOT release the restored reservation — \
-             the pinned crate lost the per-instrument lock map in the snapshot"
+            "500000.00 CNY|0.00 CNY|500000.00 CNY",
+            "{name}: the terminal event releases the restored reservation (R1)"
         );
 
         // The crossing quote the restart was racing.
