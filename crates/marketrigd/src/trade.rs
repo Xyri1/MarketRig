@@ -900,6 +900,33 @@ fn place(context: &NodeContext, form: Form, client_order_id: ClientOrderId) {
     hand_to_node(context, order, true);
 }
 
+/// Test-only seam for the A-share feasibility spike's F6
+/// (`sdd/features/a-share-engine/FEASIBILITY.md`): [`place`] and its private
+/// [`Form`], reachable from a spike test so a check-and-place prototype runs the
+/// **production** order construction inside one node job, and so an odd-lot
+/// quantity `validate` refuses can still be handed to the sandbox. It adds no
+/// behaviour: it is `place` with the form built by the caller.
+#[cfg(test)]
+pub(crate) fn place_form(
+    context: &NodeContext,
+    entry: &'static Entry,
+    side: OrderSide,
+    quantity: Quantity,
+    price: Option<Price>,
+    client_order_id: ClientOrderId,
+) {
+    place(
+        context,
+        Form {
+            entry,
+            side,
+            quantity,
+            price,
+        },
+        client_order_id,
+    );
+}
+
 /// The shared tail of [`place`] and restoration: cache the order, optionally
 /// announce it, and send the submit command.
 ///
