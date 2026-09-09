@@ -460,6 +460,10 @@ pub struct Harness {
     /// The stand-in feed seam (R1 feature SPEC §10.1), honored only alongside the
     /// data root; `None` on the attended experiment, which polls real Yahoo.
     quote_url: Option<String>,
+    /// The stand-in HiThink seam (`hithink-a-share` feature SPEC §1.3), honored
+    /// only alongside the data root; `None` on the attended experiment, which
+    /// reads the real service with the operator's own key.
+    hithink_url: Option<String>,
     /// Keeps the daemon off the public feed (root SPEC §17). Set in the gate,
     /// cleared by [`Harness::real_feed`].
     no_trading: bool,
@@ -512,6 +516,7 @@ impl Harness {
                     .build(),
             ),
             quote_url: None,
+            hithink_url: None,
             no_trading: true,
             standin_script: None,
         }
@@ -531,6 +536,14 @@ impl Harness {
     /// §10.1). `MARKETRIG_TEST_NO_TRADING` stays set and a stand-in outranks it.
     pub fn standin_feed(&mut self, base: &str) {
         self.quote_url = Some(base.to_owned());
+    }
+
+    /// Points the next daemon at the gate's stand-in HiThink service
+    /// (`hithink-a-share` feature SPEC §1.3). Like the quote seam it is honored
+    /// only alongside the data root, and it outranks
+    /// `MARKETRIG_TEST_NO_TRADING`, which stays set.
+    pub fn standin_hithink(&mut self, base: &str) {
+        self.hithink_url = Some(base.to_owned());
     }
 
     /// The attended experiment's feed: real Yahoo, so neither seam is set — only
@@ -595,6 +608,10 @@ impl Harness {
             Some(url) => command.env("MARKETRIG_TEST_QUOTE_URL", url),
             None => command.env_remove("MARKETRIG_TEST_QUOTE_URL"),
         };
+        match &self.hithink_url {
+            Some(url) => command.env("MARKETRIG_TEST_HITHINK_URL", url),
+            None => command.env_remove("MARKETRIG_TEST_HITHINK_URL"),
+        };
         match &self.standin_script {
             Some(path) => command.env("MARKETRIG_STANDIN_SCRIPT", path),
             None => command.env_remove("MARKETRIG_STANDIN_SCRIPT"),
@@ -630,6 +647,7 @@ impl Harness {
             _ => {
                 let request = match method {
                     "PUT" => self.agent.put(url.as_str()),
+                    "PATCH" => self.agent.patch(url.as_str()),
                     _ => self.agent.post(url.as_str()),
                 }
                 .header("Authorization", bearer);
@@ -780,6 +798,7 @@ impl Harness {
                 "port": endpoint.port,
                 "pid": endpoint.pid,
                 "quote_url": self.quote_url,
+                "hithink_url": self.hithink_url,
                 "no_trading": self.no_trading,
             }),
         );

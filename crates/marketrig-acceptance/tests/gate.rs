@@ -1,4 +1,4 @@
-//! The acceptance gate: scenarios G1–O10, in order, in one test.
+//! The acceptance gate: scenarios G1–O10, then H1–H4, in order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
@@ -9,7 +9,9 @@
 //! `openviking-standin` binary and O1–O6) and
 //! `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1 (the approval
 //! policies, the events tail, and O7–O10, renumbered from G33–G37's slot by
-//! `openviking-continuity` §7.2), per D75, R0-7, R1-9, R2-8, R3-8, R5-8, OV-7.
+//! `openviking-continuity` §7.2) and `sdd/features/hithink-a-share/SPEC.md` §6
+//! (the stand-in's HiThink half and H1–H4), per D75, D84, R0-7, R1-9, R2-8,
+//! R3-8, R5-8, OV-7, HT-6.
 //! The harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
@@ -49,6 +51,16 @@ fn agents_seed(name: &str) -> String {
 /// only through the projection (`openviking-continuity` §5.2, §5.3), which is
 /// what O3 reads back.
 const SEED_SKILL: &str = include_str!("../../marketrigd/seed/desk-improvement.SKILL.md");
+
+/// The seeded HiThink skill (`hithink-a-share` §5.2, §5.3), which goes up
+/// verbatim — its own `<name>` is a `meta/tickers/search` placeholder, not the
+/// desk's — and which H4 reads back out of the projection byte for byte.
+const SEED_HITHINK: &str = include_str!("../../marketrigd/seed/skills/hithink-finance/SKILL.md");
+
+/// What every desk's user, and every desk's projection, lists after
+/// provisioning (`openviking-continuity` §5.3 as `hithink-a-share` §5.3 extends
+/// it), sorted as [`skill_names`] and [`projected_names`] answer.
+const SEEDED_SKILLS: [&str; 2] = ["desk-improvement", "hithink-finance"];
 
 /// The MarketRig-owned Claude Code shim (R0 feature SPEC §7.2), exactly.
 const SHIM: &str = "@AGENTS.md\n";
@@ -4080,8 +4092,8 @@ fn gate() {
             "one OpenViking user per desk (§3.1): {store}"
         );
     }
-    assert_eq!(skill_names(&g, &alpha_key), ["desk-improvement"]);
-    assert_eq!(skill_names(&g, &beta_key), ["desk-improvement"]);
+    assert_eq!(skill_names(&g, &alpha_key), SEEDED_SKILLS);
+    assert_eq!(skill_names(&g, &beta_key), SEEDED_SKILLS);
     let (status, seeded) = ov(
         &g,
         "GET",
@@ -4109,11 +4121,11 @@ fn gate() {
     assert_eq!(status, 200, "{made}");
     assert_eq!(
         skill_names(&g, &beta_key),
-        ["beta-only", "desk-improvement"]
+        ["beta-only", "desk-improvement", "hithink-finance"]
     );
     assert_eq!(
         skill_names(&g, &alpha_key),
-        ["desk-improvement"],
+        SEEDED_SKILLS,
         "A's key lists nothing of B's (§3.2)"
     );
     let find = json!({ "query": "Manifestly beta" }).to_string();
@@ -4128,7 +4140,7 @@ fn gate() {
     );
     g.note(
         "O2",
-        "both desks were provisioned under distinct users — the stand-in's store maps each key to its own desk-<hex> — each listing exactly desk-improvement, and a skill written under B's key was neither listed nor findable under A's",
+        "both desks were provisioned under distinct users — the stand-in's store maps each key to its own desk-<hex> — each listing exactly desk-improvement and hithink-finance, and a skill written under B's key was neither listed nor findable under A's",
         json!({ "alpha_user": desk_user(&ids[0]), "beta_user": desk_user(&ids[1]) }),
     );
 
@@ -4143,16 +4155,16 @@ fn gate() {
     let kappa_key = desk_key(&seed, &kappa_id);
     within(
         Duration::from_secs(30),
-        "the new desk's OpenViking user, its key, and its seeded skill",
-        || key_issued(&g, &kappa_key) && skill_names(&g, &kappa_key) == ["desk-improvement"],
+        "the new desk's OpenViking user, its key, and its seeded skills",
+        || key_issued(&g, &kappa_key) && skill_names(&g, &kappa_key) == SEEDED_SKILLS,
     );
     // The seed upload runs behind creation and projects itself when it
     // lands (§3.2, §5.3), so the file follows the row without an activation.
     let skills_dir = g.workspace(&kappa).join(".agents").join("skills");
     within(
         Duration::from_secs(30),
-        "the seeded skill's own projection after creation",
-        || projected_names(&skills_dir) == ["desk-improvement"],
+        "the seeded skills' own projection after creation",
+        || projected_names(&skills_dir) == SEEDED_SKILLS,
     );
 
     // Activation on Codex projects again before the runtime starts (§5.2).
@@ -4201,7 +4213,7 @@ fn gate() {
             .expect("the Claude session")["runtime"],
         "claude"
     );
-    assert_eq!(projected_names(&skills_dir), ["desk-improvement"]);
+    assert_eq!(projected_names(&skills_dir), SEEDED_SKILLS);
 
     let second = "---\nname: gate-second\ndescription: The second skill\n---\n\nWritten in O3.\n";
     let (status, wrote) = ov(
@@ -4216,7 +4228,7 @@ fn gate() {
     within(
         Duration::from_secs(60),
         "the second skill to reach the workspace",
-        || projected_names(&skills_dir) == ["desk-improvement", "gate-second"],
+        || projected_names(&skills_dir) == ["desk-improvement", "gate-second", "hithink-finance"],
     );
     assert_eq!(
         fs::read_to_string(skills_dir.join("gate-second").join("SKILL.md"))
@@ -4251,7 +4263,7 @@ fn gate() {
     within(
         Duration::from_secs(60),
         "the second skill to leave the workspace",
-        || projected_names(&skills_dir) == ["desk-improvement"],
+        || projected_names(&skills_dir) == SEEDED_SKILLS,
     );
     assert!(
         fs::OpenOptions::new().write(true).open(&seed_file).is_err(),
@@ -4288,7 +4300,7 @@ fn gate() {
     );
     let (exit, removed) = g.cli_json("O3", &["--json", "skill", "delete", &kappa, "gate-cli"]);
     assert_eq!(exit, 0, "{removed}");
-    assert_eq!(projected_names(&skills_dir), ["desk-improvement"]);
+    assert_eq!(projected_names(&skills_dir), SEEDED_SKILLS);
 
     g.note(
         "O3",
@@ -4696,7 +4708,7 @@ fn gate() {
     );
     assert_eq!(
         skill_names(&g, &beta_key),
-        ["beta-only", "desk-improvement"]
+        ["beta-only", "desk-improvement", "hithink-finance"]
     );
     g.stop("O6", daemon17);
     g.note(
@@ -5872,6 +5884,450 @@ fn gate() {
         }),
     );
 
+    // ======================================================================
+    // HiThink (feature SPEC `hithink-a-share` §6.2, per HT-6). The chain
+    // continues on the same root, on a fresh daemon that also carries the
+    // stand-in feed's HiThink half in `MARKETRIG_TEST_HITHINK_URL` (§1.3): the
+    // provider row and its key, the `CN` leg on both feeds, the research
+    // passthrough through the real `marketrig research hithink`, and the
+    // seeded skill in a new desk's projection.
+    // ======================================================================
+    g.standin_hithink(&feed.hithink_base());
+    let mu = format!("mu-{stamp}");
+    let daemon20 = g.spawn("H1");
+    endpoint = daemon20.endpoint.clone();
+    let provider = "/research/hithink";
+    let store_key = json!({ "api_key": standin::HITHINK_KEY }).to_string();
+
+    // --- H1 — provider ------------------------------------------------------
+    let (status, unconfigured) = g.api("H1", &endpoint, "GET", provider, None);
+    assert_eq!(status, 200, "{unconfigured}");
+    assert_eq!(unconfigured["state"], "UNCONFIGURED");
+    assert_eq!(unconfigured["a_share_feed"], "YAHOO");
+    assert_eq!(unconfigured["api_key_present"], false);
+    assert_eq!(
+        unconfigured["base_url"],
+        feed.hithink_base().as_str(),
+        "the seam's base URL, never operator-set (§1.2)"
+    );
+    let changed = global(&g, "HITHINK_PROVIDER_CHANGED").len();
+
+    // §6.1's `bad` role: the search endpoint refuses every other key `2003`, so
+    // the route answers PROVIDER_REJECTED carrying HiThink's own code and
+    // stores nothing (§1.2).
+    let (status, refused) = g.api_redacted(
+        "H1",
+        &endpoint,
+        "PUT",
+        provider,
+        &json!({ "api_key": "hithink-gate-key-refused" }).to_string(),
+    );
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["code"], "PROVIDER_REJECTED");
+    assert!(
+        refused["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("2003")),
+        "the upstream code and message come back (§1.2): {refused}"
+    );
+    let (_, still) = g.api("H1", &endpoint, "GET", provider, None);
+    assert_eq!(still["state"], "UNCONFIGURED");
+    assert_eq!(still["api_key_present"], false);
+    assert_eq!(
+        global(&g, "HITHINK_PROVIDER_CHANGED").len(),
+        changed,
+        "a refusal writes neither the key, the row, nor an event"
+    );
+
+    let (status, available) = g.api_redacted("H1", &endpoint, "PUT", provider, &store_key);
+    assert_eq!(status, 200, "{available}");
+    assert_eq!(available["state"], "AVAILABLE");
+    assert_eq!(available["a_share_feed"], "HITHINK");
+    assert_eq!(available["api_key_present"], true);
+    assert!(
+        available.get("api_key").is_none(),
+        "the key never comes back: {available}"
+    );
+    assert!(available["validated_at_ns"].is_i64(), "{available}");
+    assert_eq!(
+        global(&g, "HITHINK_PROVIDER_CHANGED")[changed..].to_vec(),
+        vec![json!({ "state": "AVAILABLE", "a_share_feed": "HITHINK" })]
+    );
+    nowhere(&g, "the HiThink key", standin::HITHINK_KEY);
+
+    let (status, removed) = g.api("H1", &endpoint, "DELETE", provider, None);
+    assert_eq!(status, 200, "{removed}");
+    assert_eq!(removed["state"], "UNCONFIGURED");
+    assert_eq!(removed["a_share_feed"], "YAHOO");
+    assert_eq!(removed["api_key_present"], false);
+    g.note(
+        "H1",
+        "the row started UNCONFIGURED at the seam's base URL, a key HiThink refused answered PROVIDER_REJECTED with its own 2003 and wrote nothing, the accepted key made the row AVAILABLE on HITHINK with one event and never came back in an answer, the key reached neither the database, the log root, an event, a launch file, a workspace, a daemon's stderr, nor the bundle, and DELETE returned the row to UNCONFIGURED on YAHOO",
+        json!({ "unconfigured": unconfigured, "refused": refused, "available": available, "removed": removed }),
+    );
+
+    // --- H2 — the CN leg ----------------------------------------------------
+    // A desk of this milestone's own: H2 trades its `CN` leg and H4 reads its
+    // projection. It is also the only desk this daemon starts a node for, and
+    // one node is one `CN` poll task (§2.2), which is what makes "one snapshot
+    // request a cycle" an exact claim.
+    within(
+        Duration::from_secs(120),
+        "this daemon's OpenViking child",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+    let (exit, created) = g.cli_json("H2", &["--json", "desk", "create", &mu]);
+    assert_eq!(exit, 0, "{created}");
+    let mu_id = created["id"].as_str().expect("id").to_owned();
+    let mu_quotes = format!("/desks/{mu_id}/market/quotes");
+    let mu_orders = format!("/desks/{mu_id}/orders");
+    let moutai = "600519.XSHG";
+    let requests = |path: &str| -> Vec<(String, String, String)> {
+        feed.hithink_requests()
+            .into_iter()
+            .filter(|(seen, _, _)| seen == path)
+            .collect()
+    };
+
+    // Unconfigured, the leg is R1's: Yahoo through the chart stand-in, the
+    // weekday rule, and not one snapshot request.
+    within(
+        Duration::from_secs(60),
+        "600519.XSHG's Yahoo observation",
+        || quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["health"] == "LIVE",
+    );
+    let (_, quotes) = g.api("H2", &endpoint, "GET", &mu_quotes, None);
+    let yahoo = quote_of(&quotes, moutai);
+    assert_eq!(yahoo["provider"], "yahoo");
+    assert_eq!(yahoo["calendar"], "WEEKDAY");
+    assert_eq!(yahoo["last"], feed.price("600519.SS").as_str());
+    assert!(
+        yahoo["source_time_ns"].is_i64(),
+        "a Yahoo observation carries the feed's own instant: {yahoo}"
+    );
+    assert!(
+        requests("a-share/prices/snapshot").is_empty(),
+        "the HiThink stand-in saw no request while the provider was unconfigured"
+    );
+
+    // Configured, the leg is HiThink's: one batched request a cycle naming
+    // every `CN` thscode, and an observation with no source time at all.
+    let (status, configured) = g.api_redacted("H2", &endpoint, "PUT", provider, &store_key);
+    assert_eq!(status, 200, "{configured}");
+    assert_eq!(configured["a_share_feed"], "HITHINK");
+    within(
+        Duration::from_secs(60),
+        "the first batched HiThink snapshot",
+        || !requests("a-share/prices/snapshot").is_empty(),
+    );
+    let batched = requests("a-share/prices/snapshot");
+    assert_eq!(
+        batched.len(),
+        1,
+        "one request for the whole CN leg, not one an instrument (§2.2)"
+    );
+    assert_eq!(
+        batched[0].1,
+        format!("thscodes={}", standin::CN_THSCODES.join(",")),
+        "naming every CN catalog thscode"
+    );
+    assert!(
+        batched[0].2 == standin::HITHINK_KEY,
+        "the stored key rode on HiThink's own header"
+    );
+    within(
+        Duration::from_secs(60),
+        "600519.XSHG's HiThink observation",
+        || quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["provider"] == "hithink",
+    );
+    let (_, quotes) = g.api("H2", &endpoint, "GET", &mu_quotes, None);
+    let observed = quote_of(&quotes, moutai);
+    assert_eq!(observed["calendar"], "HITHINK");
+    assert_eq!(observed["currency"], "CNY");
+    assert_eq!(observed["last"], feed.hithink_price("600519.SH").as_str());
+    assert_eq!(
+        observed["source_time_ns"],
+        Value::Null,
+        "the batched reply documents none, so age counts from receipt (§2.3): {observed}"
+    );
+
+    // Today out of the stand-in's list closes the market. The list is read once
+    // under a provider (§3), so the removal is paired with a re-store of the
+    // same key, which is what clears the set the daemon already holds.
+    let today = standin::shanghai_today();
+    feed.hithink_trading_day(&today, false);
+    let fetched = requests("a-share/calendar/trading-days").len();
+    let (status, cleared) = g.api("H2", &endpoint, "DELETE", provider, None);
+    assert_eq!(status, 200, "{cleared}");
+    let (status, restored) = g.api_redacted("H2", &endpoint, "PUT", provider, &store_key);
+    assert_eq!(status, 200, "{restored}");
+    within(
+        Duration::from_secs(60),
+        "the refetched trading-day list to close the CN leg",
+        || {
+            let quote = quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai);
+            quote["calendar"] == "HITHINK" && quote["market_phase"] == "CLOSED"
+        },
+    );
+    assert!(
+        requests("a-share/calendar/trading-days").len() > fetched,
+        "the list was read again on the first cycle under the restored provider (§3)"
+    );
+    let (_, quotes) = g.api("H2", &endpoint, "GET", &mu_quotes, None);
+    let closed = quote_of(&quotes, moutai);
+    assert_eq!(
+        closed["market_phase"], "CLOSED",
+        "today absent from the list closes the CN leg (§3): {closed}"
+    );
+    assert_eq!(closed["calendar"], "HITHINK");
+
+    // The toggle moves the leg between providers without touching the node.
+    let nodes = payloads(&g, &mu_id, "TRADING_NODE_STARTED").len();
+    let sequence = closed["sequence"].as_i64().unwrap_or_default();
+    let (status, to_yahoo) = g.api(
+        "H2",
+        &endpoint,
+        "PATCH",
+        provider,
+        Some(r#"{"a_share_feed":"YAHOO"}"#),
+    );
+    assert_eq!(status, 200, "{to_yahoo}");
+    assert_eq!(to_yahoo["a_share_feed"], "YAHOO");
+    within(Duration::from_secs(60), "the CN leg back on Yahoo", || {
+        quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["provider"] == "yahoo"
+    });
+    let (_, quotes) = g.api("H2", &endpoint, "GET", &mu_quotes, None);
+    let switched = quote_of(&quotes, moutai);
+    assert_eq!(switched["calendar"], "WEEKDAY");
+    assert!(
+        switched["sequence"].as_i64().unwrap_or_default() > sequence,
+        "a switch advances the sequence rather than resetting it (§2.2): {switched}"
+    );
+    assert_eq!(
+        payloads(&g, &mu_id, "TRADING_NODE_STARTED").len(),
+        nodes,
+        "and restarts no node (§2.2)"
+    );
+    let (status, to_hithink) = g.api(
+        "H2",
+        &endpoint,
+        "PATCH",
+        provider,
+        Some(r#"{"a_share_feed":"HITHINK"}"#),
+    );
+    assert_eq!(status, 200, "{to_hithink}");
+    within(
+        Duration::from_secs(60),
+        "the CN leg on HiThink again",
+        || quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["provider"] == "hithink",
+    );
+
+    // R1's G15 shape on the new feed: one CN round trip, settled in CNY at the
+    // 3 bp A-share rate. O10 left both policies gating, so orders go back on
+    // Always allow first.
+    let (status, ungated) = g.api(
+        "H2",
+        &endpoint,
+        "PUT",
+        "/settings/policies",
+        Some(r#"{"paper_order_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated}");
+    let (status, bought) = g.api(
+        "H2",
+        &endpoint,
+        "POST",
+        &mu_orders,
+        Some(&order("h2-buy-moutai", moutai, "BUY", "MARKET", "100")),
+    );
+    assert_eq!(status, 201, "{bought}");
+    assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
+    let cn_buy = bought["outcome"]["average_price"]
+        .as_str()
+        .expect("average price")
+        .to_owned();
+
+    let cn_tick = feed.hithink_tick("600519.SH");
+    within(
+        Duration::from_secs(60),
+        "the ticked HiThink price to reach the book",
+        || {
+            quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["last"]
+                == cn_tick.as_str()
+        },
+    );
+    let (status, sold) = g.api(
+        "H2",
+        &endpoint,
+        "POST",
+        &mu_orders,
+        Some(&order("h2-sell-moutai", moutai, "SELL", "MARKET", "100")),
+    );
+    assert_eq!(status, 201, "{sold}");
+    assert_eq!(sold["outcome"]["status"], "FILLED", "{sold}");
+    let cn_sell = sold["outcome"]["average_price"]
+        .as_str()
+        .expect("average price")
+        .to_owned();
+
+    let cn_fills = g.column(
+        "SELECT price || ' ' || commission || ' ' || currency FROM fills \
+         WHERE desk_id = ?1 AND instrument_id = '600519.XSHG' ORDER BY occurred_at_ns, id",
+        &[&mu_id],
+    );
+    assert_eq!(cn_fills.len(), 2, "one fill a side: {cn_fills:?}");
+    let mut fees = 0.0;
+    for fill in &cn_fills {
+        let fields: Vec<&str> = fill.split(' ').collect();
+        let (price, commission, currency) = (fields[0], fields[1], fields[2]);
+        assert_eq!(currency, "CNY", "the fill settles in the venue's currency");
+        assert!(amount(commission) > 0.0, "a nonzero commission: {fill}");
+        let rate = amount(commission) / (amount(price) * 100.0);
+        assert!(
+            (rate - 0.0003).abs() < 1e-6,
+            "the CN rate is 3 bp a side, got {rate} from {fill}"
+        );
+        fees += amount(commission);
+    }
+    let (realized, currency): (String, String) = g
+        .db()
+        .query_row(
+            "SELECT realized_pnl, currency FROM position_cycles \
+             WHERE desk_id = ?1 AND instrument_id = '600519.XSHG'",
+            [&mu_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the CNY cycle row");
+    assert_eq!(currency, "CNY");
+    assert_eq!(
+        realized,
+        format!("{:.2}", (amount(&cn_sell) - amount(&cn_buy)) * 100.0 - fees),
+        "net of both sides' fees (root §12.4)"
+    );
+    g.note(
+        "H2",
+        "an unconfigured provider left the CN leg on Yahoo with the weekday rule and HiThink unasked, the stored key moved it to one batched snapshot a cycle naming every CN thscode with a null source time and the HITHINK calendar, today out of the stand-in's list closed it, the toggle moved the leg to Yahoo and back with a higher sequence and no node restart, and a CN round trip closed with realized P&L in CNY at 3 bp on both fills",
+        json!({
+            "yahoo": yahoo, "hithink": observed, "closed": closed, "switched": switched,
+            "snapshot_query": batched[0].1, "buy": cn_buy, "sell": cn_sell,
+            "fees": fees, "realized_pnl": realized,
+        }),
+    );
+
+    // --- H3 — research ------------------------------------------------------
+    // The real CLI over the passthrough, against the same stand-in.
+    let (exit, stdout, stderr) = g.cli(&[
+        "research",
+        "hithink",
+        "meta/tickers/search",
+        "--param",
+        "q=600519",
+    ]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        standin::SEARCH_ENVELOPE,
+        "the upstream envelope, printed verbatim (§4.2)"
+    );
+    g.note(
+        "H3",
+        "marketrig research hithink",
+        json!({ "exit": exit, "stdout": stdout, "stderr": stderr }),
+    );
+
+    let (exit, stdout, stderr) = g.cli(&["research", "hithink", "meta/tickers/invent"]);
+    assert_eq!(exit, 1, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("RESEARCH_PATH_UNKNOWN"),
+        "a path the capability map does not document is refused here (§4.1): {stderr}"
+    );
+
+    // The retry bound is three attempts (§2.2), so two scripted `4001` still
+    // yield one accepted answer and three exhaust it.
+    let income = "a-share/financials/income-statements";
+    feed.hithink_rate_limited(2);
+    let (exit, stdout, stderr) = g.cli(&["research", "hithink", income]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(stdout.trim_end(), standin::INCOME_ENVELOPE);
+    feed.hithink_rate_limited(3);
+    let (exit, stdout, stderr) = g.cli(&["research", "hithink", income]);
+    assert_eq!(exit, 1, "{stdout}");
+    assert!(
+        stderr.contains("RESEARCH_UNREACHABLE") && stderr.contains("3 attempts"),
+        "the exhaustion names the attempt count (§4.1): {stderr}"
+    );
+
+    // A body above the CLI's 256 KiB inline ceiling becomes a file, and the
+    // command prints the path it wrote (§4.2).
+    let spill = g.out.join("h3-income.json");
+    feed.hithink_big_once();
+    let (exit, spilled) = g.cli_json(
+        "H3",
+        &[
+            "--json",
+            "research",
+            "hithink",
+            income,
+            "--out",
+            spill.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_eq!(exit, 0, "{spilled}");
+    assert_eq!(spilled["path"], json!(spill.display().to_string()));
+    let written = fs::read_to_string(&spill).expect("the spilled body");
+    assert_eq!(spilled["bytes"], json!(written.len()));
+    assert!(
+        written.len() > 1024 * 1024,
+        "the 1 MiB body reached the file whole: {} bytes",
+        written.len()
+    );
+
+    let (status, unconfigured) = g.api("H3", &endpoint, "DELETE", provider, None);
+    assert_eq!(status, 200, "{unconfigured}");
+    let (exit, stdout, stderr) = g.cli(&["research", "hithink", "meta/tickers/search"]);
+    assert_eq!(exit, 1, "{stdout}");
+    assert!(
+        stderr.contains("RESEARCH_UNCONFIGURED"),
+        "the passthrough needs a stored key (§4.1): {stderr}"
+    );
+    g.note(
+        "H3",
+        "the CLI printed the stand-in envelope verbatim, an undocumented path was refused RESEARCH_PATH_UNKNOWN, two scripted 4001 still produced one accepted answer and three exhausted the three-attempt bound, a 1 MiB body was written to the file the command named, and the removed provider refused the next read RESEARCH_UNCONFIGURED",
+        json!({ "spilled": spilled, "bytes": written.len() }),
+    );
+
+    // --- H4 — the seed ------------------------------------------------------
+    let mu_skills = g.workspace(&mu).join(".agents").join("skills");
+    within(
+        Duration::from_secs(120),
+        "both seeded skills in the new desk's projection",
+        || projected_names(&mu_skills) == SEEDED_SKILLS,
+    );
+    let seeded = fs::read_to_string(mu_skills.join("hithink-finance").join("SKILL.md"))
+        .expect("the projected HiThink skill");
+    assert_eq!(
+        seeded, SEED_HITHINK,
+        "the committed seed, byte for byte (§5.3)"
+    );
+    for forbidden in [
+        "X-api-key",
+        "fuyao.aicubes.cn/mcp",
+        "hithink-finance auth",
+        "pip install",
+        "npx",
+    ] {
+        assert!(
+            !seeded.contains(forbidden),
+            "{forbidden} reached the desk's projection (§6.2 H4)"
+        );
+    }
+    g.stop("H4", daemon20);
+    g.note(
+        "H4",
+        "a desk created on this daemon listed desk-improvement and hithink-finance in its projection, the HiThink skill matched the committed seed byte for byte, and no line of it named a surface the desk cannot reach",
+        json!({ "desk": mu_id, "projected": projected_names(&mu_skills) }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-O10 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-H4 complete", json!({ "evidence": evidence }));
 }

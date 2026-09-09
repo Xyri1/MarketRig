@@ -757,3 +757,124 @@ fn openviking_exits_after_readiness_as_scripted() {
     let status = ov.child.0.wait().expect("the scripted exit");
     assert_eq!(status.code(), Some(7));
 }
+
+/// The HiThink half's four endpoints and its three script controls
+/// (`hithink-a-share` §6.1): the smaller thing that fails first when this
+/// stand-in drifts from what `marketrigd` sends and reads.
+#[test]
+fn hithink_answers_the_four_endpoints_and_its_controls() {
+    use marketrig_acceptance::standin::{self, Feed};
+
+    let feed = Feed::start();
+    let base = feed.hithink_base();
+    let get = |path: &str, key: &str| -> (u16, String) {
+        let mut response = ureq::get(&format!("{base}/api/{path}"))
+            .header("X-api-key", key)
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .expect("the stand-in answered");
+        (
+            response.status().as_u16(),
+            response.body_mut().read_to_string().expect("a body"),
+        )
+    };
+
+    // The key decides the search envelope, and nothing else judges the key.
+    assert_eq!(
+        get("meta/tickers/search?q=600519&limit=1", standin::HITHINK_KEY),
+        (200, standin::SEARCH_ENVELOPE.to_owned())
+    );
+    let (status, refused) = get("meta/tickers/search?q=600519&limit=1", "not-the-key");
+    assert_eq!(status, 200);
+    assert!(refused.contains(r#""code":2003"#), "{refused}");
+
+    // The batched snapshot: one item per requested thscode, in catalog order,
+    // with the documented null timestamp; a tick moves one of them.
+    let codes = standin::CN_THSCODES.join(",");
+    let (status, snapshot) = get(
+        &format!("a-share/prices/snapshot?thscodes={codes}"),
+        standin::HITHINK_KEY,
+    );
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_str(&snapshot).expect("a JSON envelope");
+    assert_eq!(body["code"], 0);
+    assert_eq!(body["data"]["timestamp"], Value::Null);
+    let items = body["data"]["item"].as_array().expect("items");
+    assert_eq!(items.len(), standin::CN_THSCODES.len());
+    for (item, code) in items.iter().zip(standin::CN_THSCODES) {
+        assert_eq!(item["thscode"], code);
+    }
+    let ticked = feed.hithink_tick("600519.SH");
+    assert_eq!(ticked, feed.hithink_price("600519.SH"));
+    let (_, snapshot) = get(
+        "a-share/prices/snapshot?thscodes=600519.SH",
+        standin::HITHINK_KEY,
+    );
+    let body: Value = serde_json::from_str(&snapshot).expect("a JSON envelope");
+    assert_eq!(body["data"]["item"].as_array().map(Vec::len), Some(1));
+    assert!(
+        snapshot.contains(&format!(r#""last_price":{ticked},"#)),
+        "the ticked price is the one served, as the decimal text the daemon \
+         parses at the instrument's precision: {snapshot}"
+    );
+
+    // The calendar carries today until it is taken out.
+    let today = standin::shanghai_today();
+    let days = |body: &str| -> Vec<String> {
+        let body: Value = serde_json::from_str(body).expect("a JSON envelope");
+        body["data"]["item"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|item| item["date"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let (_, calendar) = get("a-share/calendar/trading-days", standin::HITHINK_KEY);
+    assert!(days(&calendar).contains(&today), "{calendar}");
+    feed.hithink_trading_day(&today, false);
+    let (_, calendar) = get("a-share/calendar/trading-days", standin::HITHINK_KEY);
+    assert!(!days(&calendar).contains(&today), "{calendar}");
+
+    // The three controls, on a scriptable path.
+    let income = "a-share/financials/income-statements";
+    assert_eq!(
+        get(income, standin::HITHINK_KEY),
+        (200, standin::INCOME_ENVELOPE.to_owned())
+    );
+    feed.hithink_rate_limited(2);
+    for _ in 0..2 {
+        let (_, limited) = get(income, standin::HITHINK_KEY);
+        assert!(limited.contains(r#""code":4001"#), "{limited}");
+    }
+    assert_eq!(
+        get(income, standin::HITHINK_KEY),
+        (200, standin::INCOME_ENVELOPE.to_owned()),
+        "the budget is spent"
+    );
+    feed.hithink_dark(1);
+    assert_eq!(get(income, standin::HITHINK_KEY).0, 503);
+    feed.hithink_big_once();
+    let (status, big) = get(income, standin::HITHINK_KEY);
+    assert_eq!(status, 200);
+    assert!(big.len() > 1024 * 1024, "a 1 MiB body: {} bytes", big.len());
+    assert_eq!(
+        get(income, standin::HITHINK_KEY),
+        (200, standin::INCOME_ENVELOPE.to_owned()),
+        "and only once"
+    );
+
+    // And every request was recorded, with its path, query, and key.
+    let seen = feed.hithink_requests();
+    assert_eq!(seen[0].0, "meta/tickers/search");
+    assert_eq!(seen[0].1, "q=600519&limit=1");
+    assert_eq!(seen[0].2, standin::HITHINK_KEY);
+    assert_eq!(seen[1].2, "not-the-key");
+    assert!(
+        seen.iter()
+            .any(|(path, query, _)| path == "a-share/prices/snapshot"
+                && query == &format!("thscodes={codes}")),
+        "{seen:?}"
+    );
+}
