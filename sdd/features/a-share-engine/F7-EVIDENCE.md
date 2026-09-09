@@ -341,3 +341,431 @@ declare rights-issue ex-dates a blocked instrument-day.
 - The `code: 429` rate-limit envelope (§3) was observed once without its HTTP status.
 - `f7/` holds the redacted responses these findings were computed from. The parquet dump
   and the presigned URL are not committed.
+
+---
+
+# R2 — intraday readiness (2026-09-09 preparation)
+
+Run 2026-09-09 18:10–18:30 Asia/Shanghai, macOS arm64, worktree
+`.worktrees/a-share-feasibility`, branch `codex/a-share-feasibility` at `6c18e74` plus
+this commit. The exchange was **CLOSED** for the whole of this session, so **no session
+sample was taken and none was substituted**. Live reads were the same read-only GETs as
+the initial run, key from the operator's `.env` in an environment variable, passed only as
+`X-api-key`. No key appears in this file, in `f7/`, or in `f7/intraday/`.
+
+## R2 status
+
+| Part | Status |
+| --- | --- |
+| Session samples (open, lunch reopen, afternoon, close) | **NOT RUN** — windows pending, listed in §R2.3 |
+| Bounded capture script, dry-run proven end to end | **DONE** — `f7/capture-intraday.sh`, §R2.2 |
+| Is `prev_price` documented as the ex-rights/ex-dividend reference? | **ANSWERED — not documented** (§R2.4) |
+| Documented source-observation timestamp or maximum delay? | **ANSWERED — none exists** (§R2.5) |
+| Independent exchange reference for the 002322.SZ 2026-09-09 ex-date | **OBTAINED — and it corrects §4.4** (§R2.6) |
+| Conservative calendar re-establishment after startup | **PROPOSED, text only** (§R2.7) |
+
+Nothing here upgrades an inference to proof. The intraday questions the handoff asks —
+does today's bar exist and move during the session, what `auction/snapshot`'s
+`data_status` says during continuous trading and the lunch break, whether the snapshot's
+`data.timestamp` tracks anything upstream while the market moves — remain open until the
+§R2.3 windows are captured.
+
+## R2.1 What the initial run could not settle, restated
+
+Every §1–§6 sample was taken at 17:1x, after the 15:00 close. After the close the
+`(last_price, volume, turnover)` triple is frozen, so a match between the snapshot and the
+day's last bar corroborates a date and cannot uniquely date the observation. That is why
+§4.1 is "PASS with one extra request" and not "PASS": the extra request was verified only
+in a state where nothing could move.
+
+## R2.2 Capture script and its after-hours dry run
+
+`sdd/features/a-share-engine/f7/capture-intraday.sh <label>` — bash, curl and jq, with a
+`python3 -c` fallback used only for JSON parsing when jq is absent. It reads the key from
+`/Users/xyril/Projects/MarketRig/.env` (override with `MARKETRIG_ENV_FILE`) into
+`HITHINK_API_KEY`, sends it only as `X-api-key` against `https://fuyao.aicubes.cn`, exactly
+as `crates/marketrigd/src/hithink.rs:35` and `:464` build the request.
+
+One invocation is one sample set, at most **14 requests**:
+
+| Order | Request | Count |
+| --- | --- | ---: |
+| 1, 5, 9 | `GET /api/a-share/prices/snapshot?thscodes=600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ` (the five `CN` catalog entries, `catalog.rs:106-110`) | 3 |
+| 2–4, 6–8, 10–12 | `GET /api/a-share/prices/historical?thscode=<code>&interval=1d&start=<now−10d>&end=<now>&adjust=none` for `600519.SH`, `000001.SZ`, `300750.SZ` | 9 |
+| 13 | `GET /api/a-share/calendar/trading-days` | 1 |
+| 14 | `GET /api/a-share/auction/snapshot?thscodes=<the five>&stage=final` | 1 |
+
+The snapshot + three-bar pair repeats three times ~20 s apart inside the one invocation,
+so a run takes ~42 s and shows whether anything moved. Recorded per request: local
+`started_at` / `ended_at` (ISO, `+0800`, `TZ=Asia/Shanghai` forced), `http_status`,
+envelope `code`, and only the redacted fields the handoff names. The run stops at the
+first `http_status: 429` **or** envelope `code: 429`, records it in `stopped_early`, and
+still writes the file. Output is `f7/intraday/<label>-<YYYYMMDDTHHMMSS+0800>.json`, one
+file per invocation, so it is idempotent and safe under cron. Before the file is kept the
+script itself greps it for the key and deletes the file and exits 4 if it is present.
+
+**Dry run, after hours** — `./sdd/features/a-share-engine/f7/capture-intraday.sh
+dryrun-afterhours` at 18:15:32, exit 0, 42.2 s wall,
+`f7/intraday/dryrun-afterhours-20260909T181532+0800.json`, labelled in the file itself
+`"note": "after-hours dry run — NOT a session sample"`.
+
+- 14/14 requests `http_status: 200`, envelope `code: 0`, `stopped_early: null`. No rate
+  limit was reached at this volume.
+- Key check: `grep -c "$HITHINK_API_KEY" sdd/features/a-share-engine/f7/intraday/*` → `0`.
+
+New observations from the dry run, all after hours and none a session sample:
+
+- The snapshot's `data.timestamp` is **second-granular and never later than the request**:
+  request starts 18:15:32 / 18:15:53 / 18:16:13 returned `…932000` / `…950000` /
+  `…973000` = 18:15:32 / 18:15:50 / 18:16:13, i.e. 0 s, −3 s, 0 s. The calendar's and the
+  auction's timestamps carry milliseconds (`…974620`, `…974837`) and are plainly
+  response-assembly clocks. So §3's "the snapshot's timestamp is the response clock" is
+  right that it tracks the wall clock and wrong to imply it is the same clock the calendar
+  stamps; it may be a coarse cache-fill time. Either way it is **not a per-datum time**:
+  all three reads returned identical prices and volumes four hours after the close.
+  Whether it tracks anything upstream while the market moves is exactly what the session
+  samples must show.
+- `auction/snapshot` at 18:15 returned `auction_phase: "closed"`, `data_status: "final"`
+  for all five — the same pair as 17:12, six hours after the auction ended. One
+  after-hours value still says nothing about the lunch break or a halt.
+- `prev_price` (snapshot) == `pre_close_price` (auction) 5/5: 1309.30, 55.70, 11.78,
+  71.65, 335.49. Two surfaces, one reference.
+- Today's bar exists on all three bar codes with `date 2026-09-09`, `close_price` equal to
+  the snapshot's `last_price` and `volume` equal to the snapshot's `volume`
+  (1290.88/3222611, 11.70/58230598, 336.84/39024000), and `data.timestamp` =
+  `1788883200000` = 2026-09-09 00:00 +0800 on all three. This reproduces §4.1 after hours
+  and adds nothing to it.
+
+## R2.3 The windows still required
+
+All times Asia/Shanghai. **2026-09-10 is a Thursday and is expected to be a trading day,
+which is not yet provable**: `calendar/trading-days` returns `[today − 1 year, today]`, so
+tomorrow cannot appear in a list fetched today. The 09:31 run's own calendar request is
+the confirmation — if its `max_date` is not `20260910`, that day is a holiday, every
+sample from it is void, and the windows move to the next day whose `max_date` matches.
+
+| # | Window (start) | Session state it must catch | Command |
+| --- | --- | --- | --- |
+| 1 | 2026-09-10 09:31:00 | continuous trading, one minute after the open | `./sdd/features/a-share-engine/f7/capture-intraday.sh open-0931` |
+| 2 | 2026-09-10 09:45:00 | continuous trading, settled | `./sdd/features/a-share-engine/f7/capture-intraday.sh open-0945` |
+| 3 | 2026-09-10 12:59:00 | lunch break, one minute before reopen — expected closed/paused | `./sdd/features/a-share-engine/f7/capture-intraday.sh lunch-1259` |
+| 4 | 2026-09-10 13:01:00 | continuous trading, one minute after reopen | `./sdd/features/a-share-engine/f7/capture-intraday.sh lunch-1301` |
+| 5 | 2026-09-10 14:30:00 | continuous trading, afternoon | `./sdd/features/a-share-engine/f7/capture-intraday.sh pm-1430` |
+| 6 | 2026-09-10 14:57:00 | last minutes before the 15:00 close | `./sdd/features/a-share-engine/f7/capture-intraday.sh close-1457` |
+
+Run each from the worktree root:
+
+```bash
+cd /Users/xyril/Projects/MarketRig/.worktrees/a-share-feasibility
+./sdd/features/a-share-engine/f7/capture-intraday.sh open-0931     # 09:31:00
+./sdd/features/a-share-engine/f7/capture-intraday.sh open-0945     # 09:45:00
+./sdd/features/a-share-engine/f7/capture-intraday.sh lunch-1259    # 12:59:00
+./sdd/features/a-share-engine/f7/capture-intraday.sh lunch-1301    # 13:01:00
+./sdd/features/a-share-engine/f7/capture-intraday.sh pm-1430       # 14:30:00
+./sdd/features/a-share-engine/f7/capture-intraday.sh close-1457    # 14:57:00
+```
+
+or, unattended, as six cron lines (each run finishes ~42 s after it starts, so the 12:59
+run stays inside the lunch break and the 14:57 run inside the session):
+
+```cron
+CAP=/Users/xyril/Projects/MarketRig/.worktrees/a-share-feasibility/sdd/features/a-share-engine/f7/capture-intraday.sh
+31 9  * * 1-5 $CAP open-0931  >> /tmp/f7-capture.log 2>&1
+45 9  * * 1-5 $CAP open-0945  >> /tmp/f7-capture.log 2>&1
+59 12 * * 1-5 $CAP lunch-1259 >> /tmp/f7-capture.log 2>&1
+1  13 * * 1-5 $CAP lunch-1301 >> /tmp/f7-capture.log 2>&1
+30 14 * * 1-5 $CAP pm-1430    >> /tmp/f7-capture.log 2>&1
+57 14 * * 1-5 $CAP close-1457 >> /tmp/f7-capture.log 2>&1
+```
+
+Six windows × 14 requests = 84 requests across a trading day, which is below the volume
+that produced the single `code: 429` in §3. If any run reports `stopped_early`, stop for
+the day and record it; do not retry the window.
+
+What the six files must be read for, and what none of them can prove: whether the
+current-day bar exists at 09:31 and again at 13:01; whether its `close_price` tracks the
+snapshot's `last_price` intraday or lags it; whether the two ever disagree because the
+requests race, which is to be **kept**, not smoothed; what `auction_phase` and
+`data_status` say during continuous trading and during the lunch break; whether the
+snapshot's `data.timestamp` stops tracking the wall clock when the market is paused. None
+of that establishes a source delay (§R2.5).
+
+## R2.4 Is `prev_price` documented as the exchange ex-rights/ex-dividend reference? — **No**
+
+Searched the **whole** `HiThink-Tech/Financial-API` repository, not only the vendored
+skill subtree: `docs/` (20 files), `README.md`, `CHANGELOG.md`, `AGENTS.md`, `examples/`,
+`python/`, `hithink-finance-cli/`, `skills/`. At the pinned commit
+`44b7aa34dd504675f3ddaa15b3d478ea16f97884` and at HEAD — which are **the same commit**:
+`GET https://api.github.com/repos/HiThink-Tech/Financial-API/commits/main` returned
+`44b7aa34dd504675f3ddaa15b3d478ea16f97884`, committed `2026-09-08T12:12:16Z`, and
+`diff -rq` between the two downloaded trees reports no difference. There is no separate
+HEAD text to quote.
+
+Every occurrence of `prev_price` or 前收盘 in the repository:
+
+- `docs/api/endpoints-prices.md:57` and `:52`, verbatim:
+
+  ```
+  | `prev_price` | number | 前收盘价。 |
+  | `price_change` | number | 相对前收盘价的涨跌额。 |
+  ```
+
+- `docs/api/endpoints-fund.md:170` — `prev_price` named in a field list, no definition.
+- `skills/hithink-finance/references/api/…` — byte-identical copies of the two lines above.
+- `examples/inspirations/05-watchlist-anomalies/example.html:106,110` — sample data and
+  the label 开盘 / 昨收.
+- `hithink-finance-cli/src/infrastructure/duckdb/factors.ts:14` — a comment in the local
+  DuckDB adjustment-factor builder, verbatim:
+
+  ```
+   * 3. event_ratio — 基于前收盘价计算除权日的复权比率
+  ```
+
+  It describes the CLI computing its own factors from the daily bar's previous close; it
+  says nothing about the snapshot's `prev_price`.
+
+**Not documented.** The whole documented contract for `prev_price` is the three characters
+前收盘价, "previous close", with no statement about ex-rights, ex-dividend or any exchange
+adjustment. §4.4's finding stands as an *observation* of behaviour, now confirmed against
+the exchange (§R2.6), and it remains undocumented behaviour the provider has never
+promised.
+
+## R2.5 Documented source-observation timestamp or maximum delay? — **None**
+
+No delay, latency or freshness guarantee exists anywhere in the repository. The complete
+set of statements that touch data time:
+
+- `docs/api/endpoints-prices.md:41` (snapshot), verbatim:
+
+  ```
+  | `timestamp` | long \| null | 数据就绪时间（毫秒）。按 `thscodes` 显式取数时为 `null`；分页模式下为序列中最新有效时间。 |
+  ```
+
+  The live service contradicts this (§3, §R2.2): in `thscodes` mode it is not null.
+
+- `docs/api/endpoints-prices.md:107` (historical), verbatim:
+
+  ```
+  | `timestamp` | long | 数据就绪时间（毫秒），为序列中最新一根 K 线的上游有效时间。 |
+  ```
+
+  The only "upstream valid time" in the contract, and it is a **daily** bar time.
+
+- `docs/api/endpoints-auction.md:23`, verbatim:
+
+  ```
+  `timestamp` 始终是接口响应组装时间，在 `live`、`final`、`suspended` 和 `not_ready` 场景都会返回；上游行情时间仅用于判断数据新鲜度，不表示响应时间。`data_status` 用于区分数据尚未就绪、竞价完成或停牌等状态。
+  ```
+
+  It names an 上游行情时间 as the thing that would judge freshness — and does not return it.
+
+- `docs/mcp/hithink-finance-a-share.md:40` states the same rule as an anti-pattern,
+  verbatim:
+
+  ```
+  把 `timestamp` 当上游竞价发生时间，或省略标的拉全市场
+  ```
+- `docs/api/endpoints-calendar.md:30`, `endpoints-index.md:47,93`,
+  `endpoints-special-data.md:43,98,173,260,442` — 数据就绪时间（毫秒）, unqualified.
+- `README.md:511` (调用频率与限流), verbatim:
+
+  ```
+  服务可能根据实际运行情况动态调整限流策略。如触发限流，请主动降低请求频率和并发度，并在适当延迟后重试。
+  ```
+
+  A throttling statement, not a data-delay statement.
+- `README.md` 当前公开能力边界 lists 「A股最新行情快照」 as a capability and 分钟 K and
+  tick 数据 as 当前暂不公开提供, with no freshness qualifier on the snapshot.
+
+The word 延迟 appears twice in the docs and never as a bound: once in the throttling
+paragraph above, once at `docs/api/endpoints-special-data.md:277` about a ranking list —
+> `把榜单排名当作无延迟交易信号：榜单数据有延迟，不构成交易信号。`
+
+**No source-delay guarantee documented.** There is no per-item observation time, no
+upstream quote time, no stated maximum age, and no SLA. This cannot be fixed by sampling:
+the §R2.3 windows can show that a number *changed*, never how old the number was.
+
+## R2.6 Independent exchange reference for 002322.SZ, 2026-09-09 — obtained, and it corrects §4.4
+
+Source: the Shenzhen Stock Exchange's own disclosure service, not a data vendor.
+
+1. `POST https://www.szse.cn/api/disc/announcement/annList` (JSON body
+   `{"seDate":["2026-08-01","2026-09-09"],"stock":["002322"],"channelCode":["listedNotice_disc"],"pageSize":30,"pageNum":1}`)
+   → **HTTP 200**, 14 announcements, including
+   `理工能科：2026年半年度权益分派实施公告`, published 2026-09-03,
+   `attachPath: /disc/disk03/finalpage/2026-09-03/ab1bff83-2295-4a4b-b40e-1663d1b0678e.PDF`.
+2. `GET https://disc.static.szse.cn/download/disc/disk03/finalpage/2026-09-03/ab1bff83-2295-4a4b-b40e-1663d1b0678e.PDF`
+   → **HTTP 200**, `application/pdf`, 124,738 bytes, 4 pages, 公告编号 2026-045,
+   宁波理工环境能源科技股份有限公司.
+3. `POST http://www.cninfo.com.cn/new/hisAnnouncement/query` (retried with a
+   `searchkey=权益分派` form) → **HTTP 200** with `"totalAnnouncement":0` again, as in §4.5.
+   cninfo's query API returned nothing for this issuer on either attempt; SZSE's own
+   service did.
+
+**Correction: this is the 2026 半年度 (interim) distribution, not a 2025 annual one.** The
+2026-09-09 ex-date comes from the interim distribution approved on 2026-08-31. Verbatim,
+from the PDF:
+
+> 向全体股东每 10 股派送现金红利 3.4 元（含税），以自有资金共计派送 118,835,293.8 元。
+> 公司 2026 年半年度不以资本公积金转增股本，不送红股。
+
+> 三、股权登记日与除权除息日
+> 本次权益分派股权登记日为：2026 年 9 月 8 日；
+> 除权除息日为：2026 年 9 月 9 日。
+
+> 六、相关参数调整情况
+> 本次权益分派实施后除权除息价格计算时，每 10 股现金红利=实际现金分红总金额/股权登记日的
+> 总股本*10 股=118,835,293.8÷365,527,970 股×10 股=3.251058 元（不四舍五入）。（每股现金
+> 红利=实际现金分红总额/股权登记日的总股本=118,835,293.8÷365,527,970 股=0.3251058 元。）
+> 本次权益分派实施后除权除息价格=股权登记日收盘价-0.3251058 元/股。
+
+The declared dividend is 3.4 元 per 10 shares on a base of 349,515,570 shares, which
+**excludes 16,012,400 shares held in the buy-back account** (回购专用证券账户所持有的本公司
+股份不参与本次权益分派). The ex-dividend **reference price** is computed on the full
+365,527,970 shares outstanding at the record date, so the per-share cash that comes off
+the reference is 0.3251058, not 0.34.
+
+Applying the issuer's own published formula to the record-date close from
+`prices/historical?adjust=none` (`f7/exdate-comparison.json`, 2026-09-08 close 12.71):
+
+```
+12.71 − 0.3251058 = 12.3848942  →  12.38 at a 0.01 tick
+```
+
+which is HiThink's `prev_price` **exactly**.
+
+Consequences for §4.4, stated as corrections:
+
+- The count is **16/16 exact**, not 15/16 with one tick of error. `prev_price` reproduced
+  the exchange's published ex-dividend reference on every one of the 16 names.
+- §4.4's explanation of the cent — "`dividend_per_share` is rounded to 2 dp, a true 0.335
+  would give 12.38" — is **wrong and is withdrawn**. The true figure is 0.3251058 and the
+  cause is the buy-back exclusion, not rounding.
+- §5 step 3's cross-check is the part that must change. `corporate-actions/adjustment-factors`
+  returns the **declared** `dividend_per_share` (0.34); the exchange reference uses the
+  **effective** per-share cash after the buy-back dilution (0.3251058). The endpoint
+  carries no total-share-capital or buy-back column, so the effective figure is not
+  derivable from it. A locally derived reference is therefore wrong by an unbounded, not
+  ±0.01, amount whenever an issuer excludes treasury shares — here 0.0149, and it would be
+  larger for a bigger buy-back. **Do not gate on `|derived − prev_price| ≤ one tick`**; it
+  would have blocked 002322.SZ on a day the provider was correct. Use `prev_price` as the
+  reference, and keep the derivation only as a logged, non-blocking sanity note.
+- What still stands unproven: 16 pure-cash events on one day are not the 送股 or 配股 arms
+  of the formula, and this is one exchange (SZSE) confirmation for one name.
+
+## R2.7 Conservative calendar re-establishment after startup (proposal, text only)
+
+`hithink.rs:678` `cn_phase` reads `(live.feed, live.calendar)`: only the
+`(Hithink, Some(days))` arm consults the trading-day set; every other case — including
+`Hithink` with **no set fetched yet** — falls through to `(session, Calendar::Weekday)`,
+which reports `OPEN` on a holiday and after a restart until the next refresh lands.
+`hithink.rs:694` `refresh_calendar_if_due` fires on the first `CN` cycle and again on the
+first cycle past Shanghai midnight, keeps the set in memory only, and on failure keeps
+whatever it holds — including nothing — while reporting `WEEKDAY`.
+
+Proposed rule, in order:
+
+1. **Start UNAVAILABLE.** With no calendar response yet under the HiThink feed, CN
+   execution is `UNAVAILABLE` with reason `NO_CALENDAR`. Never `WEEKDAY`, never `OPEN`.
+   The weekday rule may still label the *display* phase; it must not gate execution.
+2. **Become available only on a positive calendar response**: `code == 0` and
+   `max(item[].date) == shanghai_date(now)`. That is one request, and it is the provider
+   asserting its own most recent trading day at or before its own today (§4.2).
+3. **Distinguish holiday from staleness on the negative case**, using the same response:
+   if `shanghai_date(data.timestamp) == shanghai_date(now)` and `max(date) < that date`,
+   today is a **holiday** — reason `MARKET_CLOSED_HOLIDAY`, and that is a settled, quiet
+   state, not a fault. Otherwise the list is stale or refused: reason `NO_CALENDAR`, retry
+   next cycle, stay unavailable.
+4. **Revalidate on day rollover.** The existing `shanghai_date(fetched_at) != shanghai_date(now)`
+   trigger is right; what must change is the failure behaviour — on rollover the held set
+   becomes **not applicable to today** immediately, so execution returns to `UNAVAILABLE`
+   until step 2 succeeds for the new date, instead of continuing on yesterday's set.
+5. **Also revalidate after any provider outage** that made the feed unavailable
+   (`KEY_REJECTED`, repeated `Unreachable`), for the same reason: the set is evidence
+   about a day, and the day may have turned while the feed was down.
+
+**Storage: none is needed.** The rule above re-derives everything from one request per
+day, and the conservative default in the absence of that request is already the safe one.
+Holding the set in memory and starting `UNAVAILABLE` is strictly safer than persisting it,
+because a persisted set is exactly the artefact that can outlive its day and re-enable
+execution without a fresh read. This contradicts §5's closing line ("what must be
+persisted … the proven trading date"): for the **calendar** nothing must be persisted.
+Any persistence question that remains belongs to the per-instrument reference (`prev_price`
+and the date it was proven for), and per the handoff it is not added merely to make a read
+look proven — the same "start unavailable, prove it again" rule covers a restart at no
+storage cost, at the price of N + 1 requests after every restart.
+
+## R2.8 Confirmed provider facts versus assumptions
+
+| # | Statement | Standing | Basis |
+| --- | --- | --- | --- |
+| 1 | `prev_price` equals the exchange's published ex-dividend reference | **Confirmed**, 16/16, one of them against SZSE's own announcement | §4.4, §R2.6 |
+| 2 | `prev_price` is *documented* to be that reference | **False** — documented only as 前收盘价 | §R2.4 |
+| 3 | `prev_price` == auction `pre_close_price` | **Confirmed** on 21 observations (16 ex-date names + 5 catalog names) | §4.4, §R2.2 |
+| 4 | `historical?adjust=none` last bar's `date_ms` is a provider-asserted trading date | **Confirmed** | §4.1 |
+| 5 | That bar's `close_price` equals the snapshot's `last_price` | **Confirmed after the close only** (19 observations, all after 17:00) — assumption intraday | §4.1, §R2.2 |
+| 6 | `calendar/trading-days` `max(date) == today` proves today is a trading day | **Confirmed** | §4.2 |
+| 7 | The calendar's `data.timestamp` is the server clock and separates holiday from stale list | **Confirmed** | §3, §4.2 |
+| 8 | The snapshot's `data.timestamp` is a data time | **False** — tracks the wall clock, second-granular, 0–3 s before the request, while prices were frozen for 4 h | §3, §R2.2 |
+| 9 | The snapshot's `data.timestamp` is exactly the response-assembly clock | **Unproven** — plausibly a coarse cache-fill time; the calendar and auction stamps carry ms, the snapshot's do not | §R2.2 |
+| 10 | `auction_phase` / `data_status` distinguish the lunch break, continuous trading and a halt | **Assumption** — two after-hours samples, both `closed` / `final` | §4.3, §R2.2 |
+| 11 | Monotonic `volume` proves the observation is of the current session | **Assumption** — increase may itself be delayed; unfalsifiable without a source time | §4.3 |
+| 12 | A locally derived reference agrees with `prev_price` within one tick | **False** — 002322.SZ diverges by 0.0149 because the buy-back account is excluded from the distribution but not from the reference base | §R2.6 |
+| 13 | Rights issues (配股) are reconstructible from the per-thscode endpoints | **False** — no `allotment_*` fields outside the parquet dump | §2.3 |
+| 14 | Any documented maximum source delay exists | **False — none documented anywhere** | §R2.5 |
+| 15 | Today's bar exists and moves during the session | **NOT RUN** — the §R2.3 windows | — |
+| 16 | Rate limiting answers `code: 429`; its HTTP status | **Envelope code confirmed once; HTTP status still uncaptured.** The dry run's 14 requests did not trigger it | §3, §R2.2 |
+
+## R2.9 Source delay is unknown
+
+**MarketRig cannot state, bound, or measure how old a HiThink `CN` snapshot datum is.**
+The provider publishes no per-item observation time, no upstream quote time, no maximum
+delay, and no SLA (§R2.5). The three quantities that exist are the response envelope's own
+clock (§R2.2 — not a datum time), MarketRig's `received_at_ns` (its own clock), and the
+change in `(last_price, volume, turnover)` between two reads (evidence of movement, of
+unknown lag). The §R2.3 session samples will not change this: a value that changes proves
+the datum is not older than the previous read *by the provider's own clock*, which is not
+the exchange's. Any `age_ms` MarketRig shows is age **since receipt** and must be labelled
+so wherever it appears.
+
+## R2.10 The proposed weaker product ceiling, for user acceptance
+
+Restated from the handoff, precisely, and not yet earned — §R2.3 must pass first:
+
+> Confirmed trading day and adequately supported current-day reference; execution pauses
+> on feed failure or missing reference; receipt age is visible; source delay remains
+> unknown. Volume changes are supporting evidence, not a freshness certificate.
+
+Mechanically, that is: CN execution is enabled only while (a) the day is confirmed by one
+`calendar/trading-days` response whose `max(date)` is today (§R2.7), (b) each instrument's
+current-day bar `date_ms` is today and its `close_price` agrees with the snapshot's
+`last_price` (§4.1), and (c) `prev_price` is present, and it — not a derived value — is the
+band basis (§R2.6). It pauses on feed failure, on a missing or unproven reference, and on
+day rollover until (a) is re-established. The UI and the agent surface show age since
+receipt, named as such.
+
+This is **weaker than the current feature SPEC**, which promises a snapshot simulation
+whose data is fresh within a bound. There is no bound to promise. Accepting this ceiling
+means accepting these assumptions, each of which the product would rely on without proof:
+
+1. **Unknown source delay.** A `CN` fill may be simulated against a price that is an
+   unknown number of seconds old. Nothing in the product can detect or bound it.
+2. **Movement, not freshness.** A changing `volume` is the only liveness signal, and its
+   own lag is unknown. A name that is halted, and a name that simply did not trade, are
+   indistinguishable to MarketRig unless assumption 3 holds.
+3. **`auction/snapshot`'s `data_status` reports halts** (停牌) usefully during continuous
+   trading. Currently an assumption on two after-hours samples (§R2.8 #10); the §R2.3
+   windows test it, and if it fails, halts are invisible and the ceiling drops further.
+4. **`prev_price` remains the exchange reference.** Confirmed 16/16 for pure-cash events
+   (§R2.6) and undocumented (§R2.4), so the provider may change it without notice, and the
+   送股 / 配股 arms are untested. There is no local cross-check that can catch a regression
+   without false positives (§R2.8 #12).
+5. **The current-day bar tracks the running last price intraday.** Confirmed only after the
+   close (§R2.8 #5). If it lags intraday, the date attribution in (b) will disagree with a
+   moving snapshot and the rule needs a tolerance the samples must define.
+
+The recommendation on whether the blockers close under this ceiling is deliberately
+withheld until the §R2.3 samples exist. What is already decided by evidence: `prev_price`
+is the reference and a derived cross-check must not gate (§R2.6), no source-delay
+guarantee can be offered (§R2.9), and the calendar needs no storage to be re-established
+conservatively (§R2.7).
