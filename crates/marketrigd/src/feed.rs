@@ -331,7 +331,31 @@ pub struct Observation {
     pub calendar: crate::hithink::Calendar,
     pub health: Health,
     pub book_synthesized: bool,
+    /// The `CN` HiThink fields (`a-share-engine` SPEC §2.3, per AE-3, AE-8):
+    /// the provider reference, the band derived from it, the Shanghai date the
+    /// band is *inferred* to belong to (receipt, never a source timestamp), and
+    /// the price condition at a boundary. A Yahoo observation — CN included —
+    /// omits every one of them, and so do US and HK.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_close: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_up: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_down: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band_date: Option<String>,
+    /// `AT_UPPER_LIMIT` or `AT_LOWER_LIMIT` — a price condition, never a claim
+    /// about counterparties (§2.3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_condition: Option<&'static str>,
+    /// The snapshot's cumulative volume, decimal text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
 }
+
+/// The two §2.3 price conditions.
+pub const AT_UPPER_LIMIT: &str = "AT_UPPER_LIMIT";
+pub const AT_LOWER_LIMIT: &str = "AT_LOWER_LIMIT";
 
 /// One instrument's synthesized top of book (§4.1, per D76): the observation it
 /// is derived from, plus both sides equal to its last price at the instrument's
@@ -381,6 +405,13 @@ struct Accepted {
     /// text of `volume` and `turnover`, empty on a Yahoo observation.
     volume: String,
     turnover: String,
+    /// The §2.3 CN fields, computed at acceptance from the snapshot's own
+    /// `prev_price` and the entry's board; `None` on every Yahoo observation.
+    prev_close: Option<String>,
+    limit_up: Option<String>,
+    limit_down: Option<String>,
+    band_date: Option<String>,
+    price_condition: Option<&'static str>,
     received_at_ns: i64,
     sequence: u64,
 }
@@ -449,6 +480,11 @@ impl MarketState {
                 source_time_ns: Some(quote.source_time_ns),
                 volume: String::new(),
                 turnover: String::new(),
+                prev_close: None,
+                limit_up: None,
+                limit_down: None,
+                band_date: None,
+                price_condition: None,
                 received_at_ns,
                 sequence,
             });
@@ -465,11 +501,13 @@ impl MarketState {
         &self,
         entry: &Entry,
         price: Decimal,
+        prev_close: Option<Decimal>,
         volume: &str,
         turnover: &str,
         received_at_ns: i64,
     ) -> Option<String> {
         let last = at_precision(price, entry.price_increment);
+        let band = cn_band(entry, prev_close);
         let mut slots = self.lock();
         let slot = slots.entry(entry.instrument_id).or_default();
         slot.degraded = false;
@@ -489,6 +527,13 @@ impl MarketState {
             source_time_ns: None,
             volume: volume.to_owned(),
             turnover: turnover.to_owned(),
+            prev_close: band.as_ref().map(|b| b.prev.clone()),
+            limit_up: band.as_ref().map(|b| b.up.clone()),
+            limit_down: band.as_ref().map(|b| b.down.clone()),
+            band_date: band
+                .is_some()
+                .then(|| crate::hithink::shanghai_date(received_at_ns)),
+            price_condition: band.and_then(|b| b.condition(&last)),
             received_at_ns,
             sequence,
         });
@@ -528,6 +573,14 @@ impl MarketState {
                 (Some(_), false) => Health::Live,
             },
             book_synthesized: true,
+            prev_close: observed.and_then(|o| o.prev_close.clone()),
+            limit_up: observed.and_then(|o| o.limit_up.clone()),
+            limit_down: observed.and_then(|o| o.limit_down.clone()),
+            band_date: observed.and_then(|o| o.band_date.clone()),
+            price_condition: observed.and_then(|o| o.price_condition),
+            volume: observed
+                .filter(|o| !o.volume.is_empty())
+                .map(|o| o.volume.clone()),
         }
     }
 
@@ -565,6 +618,44 @@ impl MarketState {
     }
 }
 
+/// One CN observation's band, as the text §2.3 serializes.
+struct Band {
+    prev: String,
+    up: String,
+    down: String,
+}
+
+impl Band {
+    /// The §2.3 price condition: the accepted last price *at* a boundary. Both
+    /// sides are the instrument's own precision text, so this is exact.
+    fn condition(&self, last: &str) -> Option<&'static str> {
+        match last {
+            _ if last == self.up => Some(AT_UPPER_LIMIT),
+            _ if last == self.down => Some(AT_LOWER_LIMIT),
+            _ => None,
+        }
+    }
+}
+
+/// The band around a CN reference, as §2.2 derives it — `None` unless the entry
+/// names a board and the provider gave a positive reference.
+fn cn_band(entry: &Entry, prev_close: Option<Decimal>) -> Option<Band> {
+    let (board, prev) = (entry.board?, prev_close?);
+    if prev <= Decimal::ZERO {
+        return None;
+    }
+    let tick: Decimal = entry
+        .price_increment
+        .parse()
+        .expect("catalog tick is decimal text (catalog::entries_valid)");
+    let (up, down) = crate::catalog::band(prev, tick, board);
+    Some(Band {
+        prev: at_precision(prev, entry.price_increment),
+        up: at_precision(up, entry.price_increment),
+        down: at_precision(down, entry.price_increment),
+    })
+}
+
 /// The venue half of a `SYMBOL.VENUE` instrument identifier (§2.3).
 fn venue_of(instrument_id: &'static str) -> &'static str {
     instrument_id
@@ -593,16 +684,37 @@ pub fn cn_entries() -> impl Iterator<Item = &'static Entry> {
         .filter(|e| e.market == Market::Cn)
 }
 
+/// One item of a HiThink snapshot as the execution plane reads it
+/// (`a-share-engine` SPEC §2.1, per AE-8): the raw snapshot fields parsed
+/// exactly, plus this poll's verdict on them. `ok` is a *data* verdict — session,
+/// calendar, bar and per-node state are the caller's, and another desk's
+/// observation never validates this desk's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observed {
+    pub entry: &'static Entry,
+    pub last: Decimal,
+    pub prev_close: Decimal,
+    pub volume: Decimal,
+    pub ok: Result<(), crate::hithink::Reason>,
+    /// The accepted price text when this item advanced the observation — what
+    /// the poller publishes — and `None` when the triple was unchanged.
+    pub accepted: Option<String>,
+    pub received_at_ns: i64,
+}
+
 /// One HiThink poll cycle for the whole `CN` leg (feature SPEC
-/// `hithink-a-share` §2.2, per HT-2): one batched snapshot naming every `CN`
-/// thscode, then one accept per item. Returns the instruments whose observation
-/// advanced, with their accepted price text and receipt instant, so the caller
-/// can publish their ticks; an instrument missing from the reply, and every
-/// instrument on a failure, is `DEGRADED` with its last observation standing.
-pub async fn poll_hithink(
+/// `hithink-a-share` §2.2, per HT-2; `a-share-engine` SPEC §2.1): one batched
+/// snapshot naming every `CN` thscode, then one accept per item for awareness
+/// and one [`Observed`] per catalog entry for execution. An instrument missing
+/// from the reply, and every instrument on a failure, is `DEGRADED` with its
+/// last observation standing; the whole poll failing is one `Err` for the leg,
+/// never a substituted price.
+pub async fn poll_hithink_observed(
     hithink: &crate::hithink::Hithink,
     market: &MarketState,
-) -> Vec<(&'static Entry, String, i64)> {
+) -> Result<Vec<Observed>, crate::hithink::Reason> {
+    use crate::hithink::Reason;
+
     let entries: Vec<&'static Entry> = cn_entries().collect();
     let codes = entries
         .iter()
@@ -622,21 +734,24 @@ pub async fn poll_hithink(
         Ok(answer) => {
             tracing::warn!(code = answer.code, "the HiThink snapshot was refused");
             degrade_all();
-            return Vec::new();
+            return Err(crate::hithink::rate_limited_or(
+                answer.code,
+                Reason::FeedLost,
+            ));
         }
         Err(e) => {
             tracing::warn!("the HiThink snapshot did not arrive: {e}");
             degrade_all();
-            return Vec::new();
+            return Err(crate::hithink::failure_reason(&e));
         }
     };
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(&answer.bytes) else {
         degrade_all();
-        return Vec::new();
+        return Err(Reason::FeedLost);
     };
     let items = body["data"]["item"].as_array().cloned().unwrap_or_default();
     let received_at_ns = crate::store::now_ns();
-    let mut accepted = Vec::new();
+    let mut observed = Vec::new();
     for entry in entries {
         let item = items
             .iter()
@@ -650,24 +765,85 @@ pub async fn poll_hithink(
             let price: Decimal = text(item, "last_price")?.parse().ok()?;
             Some((price, text(item, "volume")?, text(item, "turnover")?))
         });
-        match parsed {
-            Some((price, volume, turnover)) => {
-                if let Some(last) =
-                    market.accept_hithink(entry, price, &volume, &turnover, received_at_ns)
-                {
-                    accepted.push((entry, last, received_at_ns));
-                }
-            }
-            None => {
-                tracing::warn!(
-                    instrument_id = entry.instrument_id,
-                    "the HiThink snapshot carried no usable item"
-                );
-                market.mark_degraded(entry.instrument_id);
-            }
-        }
+        let Some((price, volume, turnover)) = parsed else {
+            tracing::warn!(
+                instrument_id = entry.instrument_id,
+                "the HiThink snapshot carried no usable item"
+            );
+            market.mark_degraded(entry.instrument_id);
+            observed.push(Observed {
+                entry,
+                last: Decimal::ZERO,
+                prev_close: Decimal::ZERO,
+                volume: Decimal::ZERO,
+                ok: Err(Reason::FeedLost),
+                accepted: None,
+                received_at_ns,
+            });
+            continue;
+        };
+        let prev_close: Option<Decimal> = item
+            .and_then(|item| text(item, "prev_price"))
+            .and_then(|t| t.parse().ok());
+        let accepted =
+            market.accept_hithink(entry, price, prev_close, &volume, &turnover, received_at_ns);
+        let volume: Decimal = volume.parse().unwrap_or(Decimal::NEGATIVE_ONE);
+        observed.push(Observed {
+            entry,
+            last: price,
+            prev_close: prev_close.unwrap_or(Decimal::ZERO),
+            volume,
+            ok: verdict(entry, price, prev_close, volume),
+            accepted,
+            received_at_ns,
+        });
     }
-    accepted
+    Ok(observed)
+}
+
+/// §2.1's data verdict for one item: a positive reference, a positive last
+/// price inside the derived band, and a nonnegative cumulative volume.
+fn verdict(
+    entry: &'static Entry,
+    last: Decimal,
+    prev_close: Option<Decimal>,
+    volume: Decimal,
+) -> Result<(), crate::hithink::Reason> {
+    use crate::hithink::Reason;
+
+    let Some(prev) = prev_close.filter(|p| *p > Decimal::ZERO) else {
+        return Err(Reason::NoReference);
+    };
+    if volume < Decimal::ZERO {
+        return Err(Reason::FeedLost);
+    }
+    let Some(board) = entry.board else {
+        return Err(Reason::NoReference);
+    };
+    let tick: Decimal = entry
+        .price_increment
+        .parse()
+        .expect("catalog tick is decimal text (catalog::entries_valid)");
+    let (up, down) = crate::catalog::band(prev, tick, board);
+    if last <= Decimal::ZERO || last > up || last < down {
+        return Err(Reason::PriceOutOfBand);
+    }
+    Ok(())
+}
+
+/// The awareness half of [`poll_hithink_observed`]: the instruments whose
+/// observation advanced, with their accepted price text and receipt instant, so
+/// the poller can publish their ticks.
+pub async fn poll_hithink(
+    hithink: &crate::hithink::Hithink,
+    market: &MarketState,
+) -> Vec<(&'static Entry, String, i64)> {
+    poll_hithink_observed(hithink, market)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|o| Some((o.entry, o.accepted?, o.received_at_ns)))
+        .collect()
 }
 
 /// The instant of a wall-clock time in one of the calendar zones.
@@ -1005,7 +1181,7 @@ fn observation_provenance() {
     // attached the calendar is still R1's weekday rule.
     let cn = crate::catalog::find("600519.XSHG").unwrap();
     let received = at(Tz::Asia__Shanghai, 2026, 3, 4, 10, 0, 0);
-    state.accept_hithink(cn, "1688.5".parse().unwrap(), "12", "34", received);
+    state.accept_hithink(cn, "1688.5".parse().unwrap(), None, "12", "34", received);
     let value = serde_json::to_value(state.read(cn, received + 2_000_000_000)).unwrap();
     assert_eq!(
         value,
@@ -1016,6 +1192,9 @@ fn observation_provenance() {
             "received_at_ns": received, "read_at_ns": received + 2_000_000_000,
             "age_ms": 2_000, "sequence": 1, "market_phase": "OPEN",
             "calendar": "WEEKDAY", "health": "LIVE", "book_synthesized": true,
+            // The snapshot's own cumulative volume; with no `prev_price` there
+            // is no reference and so no band (`a-share-engine` SPEC §2.3).
+            "volume": "12",
         })
     );
 }
@@ -1028,13 +1207,13 @@ fn observation_provenance() {
 /// The snapshot body shape, trimmed to what [`poll_hithink`] reads: `timestamp`
 /// is documented `null` in thscodes mode (feature SPEC `hithink-a-share` §2.2).
 #[cfg(test)]
-fn snapshot_body(items: &[(&str, &str, &str, &str)]) -> String {
+fn snapshot_body(items: &[(&str, &str, &str, &str, &str)]) -> String {
     let item = items
         .iter()
-        .map(|(thscode, last, volume, turnover)| {
+        .map(|(thscode, last, volume, turnover, prev)| {
             format!(
                 r#"{{"thscode":"{thscode}","ticker":"{thscode}","last_price":{last},
-                 "volume":{volume},"turnover":{turnover}}}"#
+                 "volume":{volume},"turnover":{turnover},"prev_price":{prev}}}"#
             )
         })
         .collect::<Vec<_>>()
@@ -1051,8 +1230,8 @@ fn snapshot_body(items: &[(&str, &str, &str, &str)]) -> String {
 /// The whole `CN` leg's snapshot, at one price each.
 #[cfg(test)]
 fn every_cn(last: &str) -> String {
-    let items: Vec<(&str, &str, &str, &str)> = cn_entries()
-        .map(|e| (e.hithink_symbol.unwrap(), last, "1200", "3400"))
+    let items: Vec<(&str, &str, &str, &str, &str)> = cn_entries()
+        .map(|e| (e.hithink_symbol.unwrap(), last, "1200", "3400", "1688.0"))
         .collect();
     snapshot_body(&items)
 }
@@ -1083,14 +1262,14 @@ fn hithink_change_detection() {
 
     // The first item is an observation; the same triple again is health alone.
     assert_eq!(
-        state.accept_hithink(entry, price, "1200", "3400", 1_000),
+        state.accept_hithink(entry, price, None, "1200", "3400", 1_000),
         Some("1688.50".to_string())
     );
     assert_eq!(state.read(entry, 1_000).sequence, 1);
     state.mark_degraded(entry.instrument_id);
     assert_eq!(state.read(entry, 1_000).health, Health::Degraded);
     assert_eq!(
-        state.accept_hithink(entry, price, "1200", "3400", 2_000),
+        state.accept_hithink(entry, price, None, "1200", "3400", 2_000),
         None,
         "an unchanged triple replaces nothing"
     );
@@ -1102,20 +1281,27 @@ fn hithink_change_detection() {
     // Any leg of the triple moving is a new observation.
     assert!(
         state
-            .accept_hithink(entry, price, "1300", "3400", 3_000)
+            .accept_hithink(entry, price, None, "1300", "3400", 3_000)
             .is_some(),
         "volume moved"
     );
     assert_eq!(state.read(entry, 3_000).sequence, 2);
     assert!(
         state
-            .accept_hithink(entry, price, "1300", "3500", 4_000)
+            .accept_hithink(entry, price, None, "1300", "3500", 4_000)
             .is_some(),
         "turnover moved"
     );
     assert!(
         state
-            .accept_hithink(entry, "1689.0".parse().unwrap(), "1300", "3500", 5_000)
+            .accept_hithink(
+                entry,
+                "1689.0".parse().unwrap(),
+                None,
+                "1300",
+                "3500",
+                5_000
+            )
             .is_some(),
         "the price moved"
     );
@@ -1218,16 +1404,17 @@ async fn hithink_retry_bound() {
 
     // `4001`: three attempts, and then the leg is degraded rather than fed a
     // substituted price (§2.2).
-    let started = std::time::Instant::now();
     assert!(poll_hithink(&hithink, &market).await.is_empty());
     assert_eq!(
         seen.lock().unwrap().len(),
         1 + crate::hithink::ATTEMPTS as usize,
         "validation plus the bounded retry"
     );
-    assert!(
-        started.elapsed() >= Duration::from_millis(1_500),
-        "three attempts are 500 ms then 1 s apart"
+    // The daemon waits 500 ms then 1 s between them; a stand-in waits almost
+    // nothing, so the policy is asserted rather than measured.
+    assert_eq!(
+        crate::hithink::BACKOFF,
+        [Duration::from_millis(500), Duration::from_secs(1)]
     );
     for entry in cn_entries() {
         assert_eq!(market.read(entry, 1).health, Health::Unavailable);
@@ -1342,6 +1529,183 @@ async fn cn_phase_from_trading_days() {
         3,
         "and nothing is fetched under it"
     );
+}
+
+/// One poll, item by item (`a-share-engine` SPEC §2.1): the raw fields parsed
+/// exactly, and the per-item verdict the execution plane reads. Awareness is
+/// fed exactly as before.
+#[cfg(test)]
+#[tokio::test]
+async fn hithink_observed_per_item() {
+    use crate::hithink::Reason;
+
+    let maotai = crate::catalog::find("600519.XSHG").unwrap(); // main board, 10%
+    let catl = crate::catalog::find("300750.XSHE").unwrap(); // ChiNext, 20%
+    // 600519: inside its band. 601318: no reference at all. 000001: a last
+    // price above its 10% ceiling. 000858: missing from the reply entirely.
+    // 300750: exactly at its ChiNext ceiling, which is still inside the band.
+    let items: Vec<(&str, &str, &str, &str, &str)> = vec![
+        ("600519.SH", "1290.88", "1200", "3400", "1309.30"),
+        ("601318.SH", "55.70", "1200", "3400", "0"),
+        ("000001.SZ", "13.50", "1200", "3400", "11.78"),
+        ("300750.SZ", "300.00", "1200", "3400", "250.00"),
+    ];
+    let (base, _hits, _seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, snapshot_body(&items)),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+
+    let observed = poll_hithink_observed(&hithink, &market).await.unwrap();
+    let by_id: HashMap<&str, &Observed> = observed
+        .iter()
+        .map(|o| (o.entry.instrument_id, o))
+        .collect();
+    assert_eq!(observed.len(), 5, "one per CN catalog entry");
+
+    let good = by_id["600519.XSHG"];
+    assert_eq!(good.ok, Ok(()));
+    assert_eq!(good.last, "1290.88".parse().unwrap());
+    assert_eq!(good.prev_close, "1309.30".parse().unwrap());
+    assert_eq!(good.volume, "1200".parse().unwrap());
+    assert_eq!(good.accepted.as_deref(), Some("1290.88"));
+
+    assert_eq!(by_id["601318.XSHG"].ok, Err(Reason::NoReference));
+    assert_eq!(by_id["000001.XSHE"].ok, Err(Reason::PriceOutOfBand));
+    assert_eq!(
+        by_id["300750.XSHE"].ok,
+        Ok(()),
+        "the ChiNext ceiling is inside the 20% band"
+    );
+
+    // The instrument the reply omitted: no numbers, its own reason, and
+    // DEGRADED awareness with nothing substituted.
+    let missing = by_id["000858.XSHE"];
+    assert_eq!(missing.ok, Err(Reason::FeedLost));
+    assert_eq!(
+        (missing.last, missing.prev_close, missing.volume),
+        (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO)
+    );
+    assert!(missing.accepted.is_none());
+    assert_eq!(market.read(catl, 1).health, Health::Live);
+    assert_eq!(
+        market
+            .read(crate::catalog::find("000858.XSHE").unwrap(), 1)
+            .health,
+        Health::Unavailable
+    );
+    assert_eq!(market.read(maotai, 1).last.as_deref(), Some("1290.88"));
+
+    // A refused snapshot is one reason for the whole leg, and it is the rate
+    // limit when that is what the provider said.
+    let (base, _hits, _seen) = scripted_server(vec![
+        (200, crate::hithink::provider::envelope(0, "null")),
+        (200, crate::hithink::provider::envelope(429, "null")),
+    ]);
+    let (_dir, hithink) = configured(&base).await;
+    let market = attached(&hithink);
+    assert_eq!(
+        poll_hithink_observed(&hithink, &market).await,
+        Err(Reason::RateLimited)
+    );
+}
+
+/// The §2.3 awareness fields on a CN HiThink observation: the reference, the
+/// band, the inferred band date, the price condition, and the volume. Yahoo —
+/// CN included — carries none of them.
+#[cfg(test)]
+#[test]
+fn cn_awareness_band_fields() {
+    let entry = crate::catalog::find("000001.XSHE").unwrap(); // main board, tick 0.01
+    let state = MarketState::new();
+    let received = at(Tz::Asia__Shanghai, 2026, 3, 4, 10, 0, 0);
+    let prev: Decimal = "11.78".parse().unwrap();
+
+    state.accept_hithink(
+        entry,
+        "11.90".parse().unwrap(),
+        Some(prev),
+        "1200",
+        "34",
+        received,
+    );
+    let value = serde_json::to_value(state.read(entry, received)).unwrap();
+    assert_eq!(value["prev_close"], "11.78");
+    assert_eq!(value["limit_up"], "12.96", "11.78 * 1.1 = 12.958 → 12.96");
+    assert_eq!(value["limit_down"], "10.60", "11.78 * 0.9 = 10.602 → 10.60");
+    assert_eq!(
+        value["band_date"], "20260304",
+        "the Shanghai date of receipt — inferred, never a source timestamp"
+    );
+    assert_eq!(value["volume"], "1200");
+    assert!(
+        value.get("price_condition").is_none(),
+        "a price inside the band carries no condition"
+    );
+
+    // At a boundary the condition appears — a price condition, not a claim
+    // about counterparties.
+    state.accept_hithink(
+        entry,
+        "12.96".parse().unwrap(),
+        Some(prev),
+        "1300",
+        "34",
+        received,
+    );
+    assert_eq!(
+        state.read(entry, received).price_condition,
+        Some(AT_UPPER_LIMIT)
+    );
+    state.accept_hithink(
+        entry,
+        "10.60".parse().unwrap(),
+        Some(prev),
+        "1400",
+        "34",
+        received,
+    );
+    assert_eq!(
+        state.read(entry, received).price_condition,
+        Some(AT_LOWER_LIMIT)
+    );
+
+    // No usable reference: the band fields are simply absent.
+    state.accept_hithink(
+        entry,
+        "11.90".parse().unwrap(),
+        None,
+        "1500",
+        "34",
+        received,
+    );
+    let value = serde_json::to_value(state.read(entry, received)).unwrap();
+    for omitted in ["prev_close", "limit_up", "limit_down", "band_date"] {
+        assert!(value.get(omitted).is_none(), "{omitted} must be omitted");
+    }
+
+    // And a Yahoo observation of the same CN instrument carries none of them.
+    state.accept(
+        entry,
+        &ChartQuote {
+            price: "11.90".parse().unwrap(),
+            currency: "CNY".to_owned(),
+            source_time_ns: received,
+        },
+        received,
+    );
+    let value = serde_json::to_value(state.read(entry, received)).unwrap();
+    for omitted in [
+        "prev_close",
+        "limit_up",
+        "limit_down",
+        "band_date",
+        "price_condition",
+        "volume",
+    ] {
+        assert!(value.get(omitted).is_none(), "{omitted} must be omitted");
+    }
 }
 
 #[cfg(test)]

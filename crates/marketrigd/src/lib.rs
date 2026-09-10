@@ -1,6 +1,7 @@
 pub mod api;
 pub mod catalog;
 pub mod claude;
+pub mod cn;
 pub mod codex;
 pub mod daemon;
 pub mod desk;

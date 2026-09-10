@@ -14,35 +14,46 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use nautilus_common::cache::{Cache, CacheView};
-use nautilus_common::clients::DataClient;
-use nautilus_common::clock::Clock;
+use nautilus_common::clients::{DataClient, ExecutionClient};
+use nautilus_common::clock::{Clock, TestClock};
 use nautilus_common::enums::Environment;
-use nautilus_common::factories::{ClientConfig, DataClientFactory};
+use nautilus_common::factories::{
+    ClientConfig, DataClientFactory, SimulatedExecutionClientFactory,
+};
 use nautilus_common::live::runner::get_data_event_sender;
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_common::messages::DataEvent;
 use nautilus_common::messages::data::SubscribeQuotes;
 use nautilus_core::UnixNanos;
+use nautilus_execution::client::core::ExecutionClientCore;
 use nautilus_execution::models::fee::{FeeModelAny, MakerTakerFeeModel};
 use nautilus_live::node::{LiveNode, LiveNodeHandle, NodeRunMode};
 use nautilus_model::data::{Data, QuoteTick};
 use nautilus_model::enums::{AccountType, BookType, OmsType};
-use nautilus_model::identifiers::{AccountId, ClientId, InstrumentId, TraderId, Venue};
+use nautilus_model::identifiers::{
+    AccountId, ClientId, ClientOrderId, InstrumentId, TraderId, Venue,
+};
 use nautilus_model::instruments::{Equity, InstrumentAny};
+use nautilus_model::orders::Order;
 use nautilus_model::types::fixed::{HIGH_PRECISION_MODE, PRECISION_BYTES};
 use nautilus_model::types::{Currency, Money, Price, Quantity};
 use nautilus_portfolio::portfolio::Portfolio;
-use nautilus_sandbox::{SandboxExecutionClientConfig, SandboxExecutionClientFactory};
+use nautilus_sandbox::{
+    SandboxExecutionClient, SandboxExecutionClientConfig, SandboxExecutionClientFactory,
+};
 use rust_decimal::Decimal;
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::catalog::{self, Entry, Market};
+use crate::cn::{self, CnExec, Exec};
 use crate::feed::{
     self, ChartClient, FeedBase, IDLE_INTERVAL, MarketState, Phase, next_delay, phase,
 };
@@ -73,6 +84,145 @@ pub fn assert_precision() {
         PRECISION_BYTES, 8,
         "nautilus-* must be built with 8-byte fixed-point values"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The controlled-clock seam (feature SPEC `a-share-engine` §6)
+// ---------------------------------------------------------------------------
+
+/// Seeds every node's clock at a chosen instant, so the CN session, owning-day
+/// and deadline decisions — and the stamps NautilusTrader puts on its own
+/// events — are the harness's to drive (feature SPEC `a-share-engine` §5.1,
+/// §6). Honored only alongside [`crate::store::TEST_DATA_ROOT_ENV`], exactly as
+/// [`crate::feed::TEST_QUOTE_URL_ENV`] is.
+pub const TEST_CLOCK_ENV: &str = "MARKETRIG_TEST_CLOCK_NS";
+
+/// The instant the seam names, or `None` for the ordinary `LiveClock`.
+pub fn test_clock_start_ns() -> Option<u64> {
+    resolve_clock_start(
+        std::env::var_os(crate::store::TEST_DATA_ROOT_ENV).as_deref(),
+        std::env::var(TEST_CLOCK_ENV).ok().as_deref(),
+    )
+}
+
+/// The seam's rule, apart from the environment: both variables or nothing, and
+/// the instant is nanoseconds ([`crate::feed::resolve_base_url`]'s shape).
+fn resolve_clock_start(
+    test_data_root: Option<&std::ffi::OsStr>,
+    test_clock_ns: Option<&str>,
+) -> Option<u64> {
+    match (test_data_root, test_clock_ns) {
+        (Some(_), Some(value)) => value.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// Desks registered for controlled time in-process, and the instant their clock
+/// starts at. The environment seam above answers for every desk; this map is how
+/// one module check controls one desk without disturbing its neighbours in the
+/// same test binary, and it exists only in a test build.
+#[cfg(test)]
+static CONTROLLED: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn registered(desk_id: &str) -> Option<u64> {
+    CONTROLLED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(desk_id)
+        .copied()
+}
+
+#[cfg(not(test))]
+fn registered(_desk_id: &str) -> Option<u64> {
+    None
+}
+
+// The clock instance for a desk, on the thread that built its node. [`build`]
+// asks for it once for the kernel factory and once per venue for the exec
+// factory; every call must answer the *same* clock, which is what this memo
+// guarantees.
+thread_local! {
+    static CLOCKS: RefCell<HashMap<String, Rc<RefCell<TestClock>>>> =
+        RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+pub(crate) fn register_controlled(desk_id: &str, start_ns: u64) {
+    CONTROLLED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(desk_id.to_owned(), start_ns);
+}
+
+#[cfg(test)]
+pub(crate) fn unregister_controlled(desk_id: &str) {
+    CONTROLLED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(desk_id);
+}
+
+/// The seam [`build`] reads: the desk's shared `TestClock`, or `None` for an
+/// ordinary desk on a `LiveClock`.
+fn controlled_clock(desk_id: &str) -> Option<Rc<RefCell<TestClock>>> {
+    let start_ns = registered(desk_id).or_else(test_clock_start_ns)?;
+    Some(CLOCKS.with_borrow_mut(|clocks| {
+        Rc::clone(clocks.entry(desk_id.to_owned()).or_insert_with(|| {
+            let mut clock = TestClock::new();
+            clock.advance_time(UnixNanos::from(start_ns), true);
+            Rc::new(RefCell::new(clock))
+        }))
+    }))
+}
+
+/// The sandbox factory with the controlled clock injected — the same
+/// `SandboxExecutionClient` the daemon builds, differing only in which clock it
+/// and its matching engines read.
+///
+/// The swap is required: `nautilus-sandbox-0.62.0/src/factory.rs:80` hard-codes
+/// `LiveClock::default()` for the sandbox client and passes that clock to every
+/// `OrderMatchingEngine` it creates, so the kernel clock factory alone would
+/// leave every order and fill event stamped with wall-clock time.
+#[derive(Debug)]
+struct ControlledSandboxFactory(Rc<RefCell<TestClock>>);
+
+impl SimulatedExecutionClientFactory for ControlledSandboxFactory {
+    fn create(
+        &self,
+        name: &str,
+        config: &dyn ClientConfig,
+        cache: Rc<RefCell<Cache>>,
+    ) -> anyhow::Result<Box<dyn ExecutionClient>> {
+        let config = config
+            .as_any()
+            .downcast_ref::<SandboxExecutionClientConfig>()
+            .ok_or_else(|| anyhow::anyhow!("{name} needs a SandboxExecutionClientConfig"))?
+            .clone();
+        let core = ExecutionClientCore::new(
+            config.trader_id,
+            ClientId::from(name),
+            config.venue,
+            config.oms_type,
+            config.account_id,
+            config.account_type,
+            config.base_currency,
+            cache.clone(),
+        );
+        let clock: Rc<RefCell<dyn Clock>> = Rc::clone(&self.0) as Rc<RefCell<dyn Clock>>;
+        Ok(Box::new(SandboxExecutionClient::new(
+            core, config, clock, cache,
+        )))
+    }
+
+    fn name(&self) -> &str {
+        "SANDBOX"
+    }
+
+    fn config_type(&self) -> &str {
+        "SandboxExecutionClientConfig"
+    }
 }
 
 /// A node failure, which every market-plane operation answers as
@@ -116,6 +266,10 @@ pub struct NodeContext {
     /// and only NautilusTrader can rebuild it (`crate::trade::apply`).
     pub portfolio: Rc<RefCell<Portfolio>>,
     pub trader_id: TraderId,
+    /// The node's CN execution state: the release latch and, per CN instrument,
+    /// the busy flag, the monotonic publish stamp and readiness
+    /// (`crate::cn`). In memory only, touched on this thread alone.
+    pub cn: Exec,
 }
 
 /// A started desk node: a synchronous way to run work on its thread, and the
@@ -150,6 +304,40 @@ impl Node {
             }))
             .map_err(|_| NodeError::new(gone()))?;
         answer.recv().map_err(|_| NodeError::new(gone()))
+    }
+
+    /// The node clock's current instant — the one time source every CN decision
+    /// reads (feature SPEC `a-share-engine` §5.1).
+    pub fn now_ns(&self) -> Result<u64, NodeError> {
+        self.call(|context| context.clock.borrow().timestamp_ns().as_u64())
+    }
+
+    /// Advances a controlled node clock to `to_ns` and dispatches every time
+    /// event it releases, on the node thread; answers the dispatched timer names
+    /// in order. A `TestClock` in a live node has no runner draining it, so
+    /// nothing fires unless this is called.
+    ///
+    /// An ordinary node is on a `LiveClock` and answers an error: time is not
+    /// the daemon's to move there.
+    pub fn advance_to(&self, to_ns: u64) -> Result<Vec<String>, NodeError> {
+        self.call(move |context| -> Result<Vec<String>, &'static str> {
+            let handlers = {
+                let mut clock = context.clock.borrow_mut();
+                let test = clock
+                    .as_any_mut()
+                    .downcast_mut::<TestClock>()
+                    .ok_or("this desk's node is not on a controlled clock")?;
+                let events = test.advance_time(UnixNanos::from(to_ns), true);
+                test.match_handlers(events)
+            };
+            let mut fired = Vec::new();
+            for handler in handlers {
+                fired.push(handler.event.name.to_string());
+                handler.run();
+            }
+            Ok(fired)
+        })?
+        .map_err(NodeError::new)
     }
 
     /// Signals the run loop to stop and waits for the thread to finish. The
@@ -295,7 +483,24 @@ impl Registry {
             node.stop_and_join();
             return Err(e);
         }
+        if let Err(e) = reconcile_cn(&node) {
+            node.stop_and_join();
+            return Err(e);
+        }
+        // Only now may the feed publish: restoration decided, the expired CN
+        // orders are terminal, and the session gate is back up (§5.3).
+        node.call(|context| context.cn.borrow_mut().released = true)?;
         Ok(node)
+    }
+
+    /// Advances every started node's clock, for the controlled-clock seam's own
+    /// route. Answers the instant they were moved to.
+    pub fn advance_all(&self, to_ns: u64) -> Result<u64, NodeError> {
+        let nodes: Vec<Arc<Node>> = self.lock().values().map(Arc::clone).collect();
+        for node in &nodes {
+            node.advance_to(to_ns)?;
+        }
+        Ok(to_ns)
     }
 
     /// One `operational_events` row for a node lifecycle fact (§5, migration 2).
@@ -311,6 +516,85 @@ impl Registry {
 
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Node>>> {
         self.nodes.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The CN half of node start, after `trade::restore` and before the feed is let
+/// through (feature SPEC `a-share-engine` §5.3): terminate every restored CN
+/// order that has outlived its trading day, re-establish the per-instrument
+/// session gate the sandbox lost with its matching engines, and discard the
+/// temporal baselines.
+///
+/// The cancel is the same `TradingCommand::CancelOrder` [`trade::cancel`] sends,
+/// stamped by the node clock, and it goes out before any quote exists — which is
+/// what makes it beat the first crossing observation (F3 (1a), (2)).
+fn reconcile_cn(node: &Node) -> Result<(), NodeError> {
+    let now_ns = node.now_ns()?;
+    let expired: Vec<ClientOrderId> = node.call(move |context| {
+        let orders: Vec<nautilus_model::orders::OrderAny> = context
+            .cache
+            .borrow()
+            .orders_open(None, None, None, None, None)
+            .into_iter()
+            .filter(|order| {
+                catalog::find(order.instrument_id().to_string().as_str())
+                    .is_some_and(|entry| entry.market == Market::Cn)
+                    && cn::expired(order, now_ns)
+            })
+            .map(|order| order.cloned())
+            .collect();
+        orders
+            .iter()
+            .map(|order| {
+                trade::cancel_on_node(context.trader_id, order, now_ns);
+                order.client_order_id()
+            })
+            .collect()
+    })?;
+
+    for client_order_id in expired {
+        settle_closed(node, client_order_id)?;
+    }
+
+    // The session gate is per-`OrderMatchingEngine` in-memory state that no
+    // snapshot carries (F3 (8)), so every CN instrument is re-gated on every
+    // start, whatever the phase.
+    node.call(move |context| {
+        let action = cn::status_for(now_ns);
+        for entry in feed::cn_entries() {
+            let ts = context
+                .cn
+                .borrow_mut()
+                .stamp(InstrumentId::from(entry.instrument_id), now_ns);
+            cn::publish_status(context, entry, action, ts);
+        }
+        context.cn.borrow_mut().reset();
+    })?;
+    Ok(())
+}
+
+/// Waits for one order to reach a terminal state, reading the node's cache
+/// between the runner's turns — [`trade::settle`]'s shape, for the one cancel
+/// recovery issues itself.
+fn settle_closed(node: &Node, client_order_id: ClientOrderId) -> Result<(), NodeError> {
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        let closed = node.call(move |context| {
+            context
+                .cache
+                .borrow()
+                .order(&client_order_id)
+                .is_none_or(|order| order.is_closed())
+        })?;
+        if closed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(NodeError::new(format!(
+                "the paper book did not terminate the expired order {client_order_id} in time"
+            )));
+        }
+        thread::sleep(Duration::from_millis(2));
     }
 }
 
@@ -337,8 +621,8 @@ fn node_thread(
     // polling task and the job loop are its neighbours on this one thread.
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
-        let mut node = match build(&desk_id, feed_base, market) {
-            Ok(node) => node,
+        let (mut node, cn) = match build(&desk_id, feed_base, market) {
+            Ok(built) => built,
             Err(e) => {
                 let _ = ready.send(Err(e));
                 return;
@@ -349,6 +633,7 @@ fn node_thread(
             clock: node.kernel().clock(),
             portfolio: Rc::clone(&node.kernel().portfolio),
             trader_id: node.trader_id(),
+            cn,
         };
         // The message bus is thread-local, so durable capture is subscribed here,
         // on the node thread, and sees exactly this desk's events (§5).
@@ -378,8 +663,12 @@ fn build(
     desk_id: &str,
     feed_base: Option<FeedBase>,
     market: Arc<MarketState>,
-) -> Result<LiveNode, String> {
+) -> Result<(LiveNode, Exec), String> {
     assert_precision();
+
+    // Shared by the data client's polling tasks and by every job that runs
+    // through `Node::call`: one node, one CN execution state.
+    let cn: Exec = Rc::new(RefCell::new(CnExec::new()));
 
     let trader_id = TraderId::from(format!("MARKETRIG-{desk_id}").as_str());
     let mut logging = LoggerConfig::from_spec("stdout=Off;fileout=Off;is_colored=false")
@@ -402,30 +691,28 @@ fn build(
         .add_data_client(
             Some(DATA_CLIENT.to_owned()),
             Box::new(ChartDataClientFactory),
-            Box::new(ChartDataClientConfig { feed_base, market }),
+            Box::new(ChartDataClientConfig {
+                feed_base,
+                market,
+                cn: Rc::clone(&cn),
+            }),
         )
         .map_err(|e| e.to_string())?;
 
-    // The A-share feasibility spike's controlled-clock seam
-    // (`feasibility/clock.rs`). It compiles only under `cfg(test)`, and only a
-    // desk the harness registered gets one; every other desk, and every non-test
-    // build, takes the branches below unchanged.
-    #[cfg(test)]
-    let controlled = crate::feasibility::clock::controlled(desk_id);
-    #[cfg(test)]
+    // The controlled-clock seam: only a desk the environment or a module check
+    // named gets one; every other desk takes the ordinary `LiveClock` branches
+    // below unchanged. `ClockFactory` memoizes the kernel clock and calls the
+    // closure again per component clock, so returning clones of one `Rc` makes
+    // kernel, components and sandbox share one instance.
+    let controlled = controlled_clock(desk_id);
     if let Some(clock) = controlled.clone() {
         builder = builder.with_clock_factory(move || clock.clone() as Rc<RefCell<dyn Clock>>);
     }
 
     for (venue, market_key) in venues() {
-        let exec_factory: Box<dyn nautilus_common::factories::SimulatedExecutionClientFactory> = {
-            #[cfg(test)]
-            match controlled.clone() {
-                Some(clock) => Box::new(crate::feasibility::clock::ControlledSandboxFactory(clock)),
-                None => Box::new(SandboxExecutionClientFactory::new()),
-            }
-            #[cfg(not(test))]
-            Box::new(SandboxExecutionClientFactory::new())
+        let exec_factory: Box<dyn SimulatedExecutionClientFactory> = match controlled.clone() {
+            Some(clock) => Box::new(ControlledSandboxFactory(clock)),
+            None => Box::new(SandboxExecutionClientFactory::new()),
         };
         builder = builder
             .add_simulated_exec_client(
@@ -438,7 +725,7 @@ fn build(
 
     let node = builder.build().map_err(|e| e.to_string())?;
     load_catalog(&node)?;
-    Ok(node)
+    Ok((node, cn))
 }
 
 /// The catalog as NautilusTrader instruments in the node's cache (§3, §4.3). The
@@ -569,6 +856,9 @@ fn currency(market: Market) -> Currency {
 struct ChartDataClientConfig {
     feed_base: Option<FeedBase>,
     market: Arc<MarketState>,
+    /// The node's CN execution state, whose release latch holds this client's
+    /// first publish until recovery has decided (§5.3).
+    cn: Exec,
 }
 
 impl ClientConfig for ChartDataClientConfig {
@@ -586,7 +876,7 @@ impl DataClientFactory for ChartDataClientFactory {
         name: &str,
         config: &dyn ClientConfig,
         cache: CacheView,
-        _clock: Rc<RefCell<dyn Clock>>,
+        clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn DataClient>> {
         let config = config
             .as_any()
@@ -602,6 +892,8 @@ impl DataClientFactory for ChartDataClientFactory {
             assume_open: config.feed_base.as_ref().is_some_and(|base| base.standin),
             market: Arc::clone(&config.market),
             cache,
+            clock,
+            cn: Rc::clone(&config.cn),
             subscribed: false,
             connected: false,
         }))
@@ -634,6 +926,11 @@ struct ChartDataClient {
     assume_open: bool,
     market: Arc<MarketState>,
     cache: CacheView,
+    /// The node's own clock — the same instance the sandbox stamps its events
+    /// with — which is what a `CN` receipt is stamped by (§5.1).
+    clock: Rc<RefCell<dyn Clock>>,
+    /// The release latch and the CN execution state (§5.3).
+    cn: Exec,
     /// The catalog is subscribed once, when the data engine starts this client.
     subscribed: bool,
     connected: bool,
@@ -688,6 +985,7 @@ impl DataClient for ChartDataClient {
                 self.cache.clone(),
                 sender.clone(),
                 self.assume_open,
+                Rc::clone(&self.cn),
             ));
         }
         tokio::task::spawn_local(poll_cn(
@@ -696,6 +994,8 @@ impl DataClient for ChartDataClient {
             self.cache.clone(),
             sender,
             self.assume_open,
+            Rc::clone(&self.cn),
+            Rc::clone(&self.clock),
         ));
         Ok(())
     }
@@ -751,7 +1051,9 @@ async fn poll(
     cache: CacheView,
     sender: UnboundedSender<DataEvent>,
     assume_open: bool,
+    cn: Exec,
 ) {
+    released(&cn).await;
     let instrument_id = InstrumentId::from(entry.instrument_id);
     if poll_once(entry, instrument_id, &chart, &market, &sender)
         .await
@@ -796,11 +1098,17 @@ async fn poll_cn(
     cache: CacheView,
     sender: UnboundedSender<DataEvent>,
     assume_open: bool,
+    cn: Exec,
+    clock: Rc<RefCell<dyn Clock>>,
 ) {
+    released(&cn).await;
     let entries: Vec<(&'static Entry, InstrumentId)> = feed::cn_entries()
         .map(|entry| (entry, InstrumentId::from(entry.instrument_id)))
         .collect();
-    if cn_cycle(&entries, &chart, &market, &sender).await.is_err() {
+    if cn_cycle(&entries, &chart, &market, &sender, &clock)
+        .await
+        .is_err()
+    {
         return;
     }
     loop {
@@ -816,7 +1124,10 @@ async fn poll_cn(
         match next_delay(cadence_phase, any_exposed) {
             Some(delay) => {
                 tokio::time::sleep(delay).await;
-                if cn_cycle(&entries, &chart, &market, &sender).await.is_err() {
+                if cn_cycle(&entries, &chart, &market, &sender, &clock)
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -832,6 +1143,7 @@ async fn cn_cycle(
     chart: &ChartClient,
     market: &MarketState,
     sender: &UnboundedSender<DataEvent>,
+    clock: &Rc<RefCell<dyn Clock>>,
 ) -> Result<(), ()> {
     if let Some(hithink) = market.hithink().cloned()
         && hithink.a_share_feed() == AShareFeed::Hithink
@@ -845,15 +1157,19 @@ async fn cn_cycle(
             }
             return Ok(());
         }
-        for (entry, last, received_at_ns) in feed::poll_hithink(&hithink, market).await {
+        for (entry, last, _received_at_ns) in feed::poll_hithink(&hithink, market).await {
+            // The batched reply carries no source time, so the event stamp is
+            // receipt — read from the **node clock**, the one time source the
+            // CN execution boundary judges against (feature SPEC
+            // `a-share-engine` §5.1). `received_at_ns` stays MarketRig's wall
+            // clock for the awareness row `feed::poll_hithink` already wrote.
+            let receipt = clock.borrow().timestamp_ns().as_u64() as i64;
             let tick = synthesized(
                 entry,
                 InstrumentId::from(entry.instrument_id),
                 &last,
-                // The batched reply carries no source time, so the event stamp
-                // is receipt (feature SPEC `hithink-a-share` §2.3).
-                received_at_ns,
-                received_at_ns,
+                receipt,
+                receipt,
             );
             sender
                 .send(DataEvent::Data(Data::Quote(tick)))
@@ -865,6 +1181,20 @@ async fn cn_cycle(
         poll_once(entry, *instrument_id, chart, market, sender).await?;
     }
     Ok(())
+}
+
+/// Holds a polling task until `Registry::start` has restored the book,
+/// terminated the expired CN orders and re-established the session gate (§5.3,
+/// F3 (1b): the first poll otherwise beats restoration and fills a prior-day
+/// order against data the daemon never had a chance to gate).
+///
+/// ponytail: a 10 ms poll on a latch rather than a `Notify`, because the latch is
+/// set exactly once per node and the wait is a startup cost nobody measures. The
+/// upgrade path is a `tokio::sync::Notify` if a node ever re-arms it.
+async fn released(cn: &Exec) {
+    while !cn.borrow().released {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// One poll. `Err` means the node is gone and the task should end; a feed failure
@@ -950,6 +1280,58 @@ fn precision_asserted() {
     // before it touches a builder, so the node started by
     // `sender_on_node_thread` observed it.
     assert_precision();
+}
+
+/// Names a desk registered for controlled time in-process. Dropping it
+/// unregisters the desk, so a later test reusing the same store never inherits
+/// controlled time.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ClockHandle {
+    desk_id: String,
+}
+
+#[cfg(test)]
+impl ClockHandle {
+    pub(crate) fn desk_id(&self) -> &str {
+        &self.desk_id
+    }
+}
+
+#[cfg(test)]
+impl Drop for ClockHandle {
+    fn drop(&mut self) {
+        unregister_controlled(&self.desk_id);
+    }
+}
+
+/// A registry whose `desk_name` desk runs on a `TestClock` seeded at `start_ns`
+/// — the in-process form of the [`TEST_CLOCK_ENV`] seam, so one module check
+/// controls one desk. The desk row is seeded here; the node starts on the first
+/// [`Registry::ensure`].
+#[cfg(test)]
+pub(crate) fn controlled_registry(
+    store: &Store,
+    feed_base: Option<FeedBase>,
+    desk_name: &'static str,
+    start_ns: u64,
+) -> (Registry, ClockHandle) {
+    let desk_id = seeded_desk(store, desk_name);
+    register_controlled(&desk_id, start_ns);
+    let registry = Registry::new(store.clone(), Arc::new(MarketState::new()), feed_base);
+    (registry, ClockHandle { desk_id })
+}
+
+/// [`Node::advance_to`], panicking — the spike's own vocabulary.
+#[cfg(test)]
+pub(crate) fn advance(node: &Node, to_ns: u64) -> Vec<String> {
+    node.advance_to(to_ns).expect("the node answers")
+}
+
+/// [`Node::now_ns`], panicking.
+#[cfg(test)]
+pub(crate) fn now_ns_of(node: &Node) -> u64 {
+    node.now_ns().expect("the node answers")
 }
 
 /// A desk row a node can be started against (the `operational_events` foreign
@@ -1100,4 +1482,416 @@ fn sender_on_node_thread() {
         ["TRADING_NODE_FAILED", "TRADING_NODE_STARTED"]
     );
     dark.stop_all();
+}
+
+// ---------------------------------------------------------------------------
+// node::clock_seam_is_gated_by_the_data_root, node::the_first_publish_waits_for_recovery,
+// node::a_prior_day_cn_order_is_terminated_at_start,
+// node::a_same_day_restart_keeps_the_order_resting
+// (feature SPEC `a-share-engine` §5.1, §5.3, §6)
+// ---------------------------------------------------------------------------
+
+/// 2026-09-09 09:35:00 Asia/Shanghai, inside the CN morning session.
+#[cfg(test)]
+pub(crate) const CN_0935: u64 = 1_788_917_700_000_000_000;
+#[cfg(test)]
+pub(crate) const SECOND_NS: u64 = 1_000_000_000;
+#[cfg(test)]
+pub(crate) const DAY_NS: u64 = 86_400 * SECOND_NS;
+
+/// The one CN instrument the CN checks trade.
+#[cfg(test)]
+pub(crate) fn moutai() -> &'static Entry {
+    catalog::find("600519.XSHG").expect("the CN catalog entry")
+}
+
+/// Publishes one book through the production publisher, on the node thread.
+#[cfg(test)]
+pub(crate) fn publish(
+    node: &Node,
+    entry: &'static Entry,
+    bid: (&str, u32),
+    ask: (&str, u32),
+    ts_ns: u64,
+) {
+    let bid = (bid.0.parse::<Decimal>().unwrap(), Decimal::from(bid.1));
+    let ask = (ask.0.parse::<Decimal>().unwrap(), Decimal::from(ask.1));
+    node.call(move |context| cn::publish_quote(context, entry, bid, ask, ts_ns))
+        .expect("the node answers");
+    within(10, "the published book reaches the node", || {
+        node.call(move |context| {
+            context
+                .cache
+                .borrow()
+                .quote(&InstrumentId::from(entry.instrument_id))
+                .is_some_and(|quote| quote.ts_event.as_u64() == ts_ns)
+        })
+        .unwrap()
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn order_status(node: &Node, client_order_id: &str) -> Option<String> {
+    let id = ClientOrderId::from(client_order_id);
+    node.call(move |context| {
+        context
+            .cache
+            .borrow()
+            .order(&id)
+            .map(|order| order.status().to_string())
+    })
+    .expect("the node answers")
+}
+
+/// The desk's captured event kinds for one client order id, oldest first.
+#[cfg(test)]
+pub(crate) fn kinds(store: &Store, desk_id: &str, client_order_id: &str) -> Vec<String> {
+    let (desk, order) = (desk_id.to_owned(), client_order_id.to_owned());
+    store
+        .call(move |conn| {
+            conn.prepare(
+                "SELECT kind FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2 \
+                 ORDER BY occurred_at_ns, id",
+            )?
+            .query_map(rusqlite::params![desk, order], |r| r.get(0))?
+            .collect()
+        })
+        .expect("the order events read")
+}
+
+#[cfg(test)]
+pub(crate) fn fill_count(store: &Store) -> i64 {
+    store
+        .call(|conn| conn.query_row("SELECT count(*) FROM fills", [], |r| r.get(0)))
+        .expect("the fills count")
+}
+
+/// The venue account's balance as `total|locked|free`, and how many entries its
+/// per-instrument lock map holds — the reservation accounting a terminal event
+/// has to move (R1).
+#[cfg(test)]
+pub(crate) fn reservation(node: &Node, venue: &str, desk_id: &str) -> (String, usize) {
+    let account_id = AccountId::from(format!("{venue}-{desk_id}").as_str());
+    node.call(move |context| {
+        let cache = context.cache.borrow();
+        let account = cache.account(&account_id).expect("the venue account");
+        let balance = account
+            .balances()
+            .values()
+            .copied()
+            .next()
+            .expect("one balance");
+        let locked = match &*account {
+            nautilus_model::accounts::AccountAny::Cash(cash) => cash.balances_locked.len(),
+            other => panic!("the sandbox account is a cash account, got {other:?}"),
+        };
+        (
+            format!("{}|{}|{}", balance.total, balance.locked, balance.free),
+            locked,
+        )
+    })
+    .expect("the node answers")
+}
+
+/// Rests one CN limit buy through the production submit path.
+#[cfg(test)]
+pub(crate) fn rest_buy(
+    store: &Store,
+    registry: &Registry,
+    desk_id: &str,
+    action_id: &str,
+    price: &str,
+) {
+    let body = format!(
+        r#"{{"action_id":"{action_id}","instrument_id":"600519.XSHG",
+            "side":"BUY","type":"LIMIT","quantity":"100","price":"{price}"}}"#
+    );
+    let (record, _) =
+        trade::submit(store, registry, desk_id, &body, &trade::Source::Session).expect("accepted");
+    assert_eq!(
+        record.outcome.clone().unwrap()["status"],
+        "ACCEPTED",
+        "{action_id} must rest, not fill"
+    );
+}
+
+/// A second registry over the same store, whose node's clock starts at
+/// `start_ns` — a restart at a chosen instant, which is what a day-lifetime
+/// decision has to be judged at.
+#[cfg(test)]
+pub(crate) fn restart_at(store: &Store, desk_id: &str, start_ns: u64) -> (Registry, Arc<Node>) {
+    register_controlled(desk_id, start_ns);
+    let registry = Registry::new(store.clone(), Arc::new(MarketState::new()), None);
+    let node = registry.ensure(desk_id).expect("the node restores");
+    (registry, node)
+}
+
+#[cfg(test)]
+#[test]
+fn clock_seam_is_gated_by_the_data_root() {
+    use std::ffi::OsStr;
+    let root = OsStr::new("/tmp/scratch");
+    assert_eq!(
+        resolve_clock_start(Some(root), Some("1788917700000000000")),
+        Some(CN_0935)
+    );
+    assert_eq!(
+        resolve_clock_start(None, Some("1788917700000000000")),
+        None,
+        "the instant alone never controls a node"
+    );
+    assert_eq!(resolve_clock_start(Some(root), None), None);
+    assert_eq!(resolve_clock_start(Some(root), Some("soon")), None);
+    assert_eq!(TEST_CLOCK_ENV, "MARKETRIG_TEST_CLOCK_NS");
+}
+
+/// The clock seam on a **real** node: the kernel and the sandbox share the
+/// injected `TestClock`, the daemon advances it, and every stamp NautilusTrader
+/// puts on an order — which is what `order_events.occurred_at_ns` is — is the
+/// injected instant (feature SPEC §6; F0).
+#[cfg(test)]
+#[test]
+fn clock_seam_drives_node() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle) = controlled_registry(&store, None, "clock-seam", CN_0935);
+    let node = registry.ensure(handle.desk_id()).expect("the node starts");
+    assert_eq!(node.now_ns().unwrap(), CN_0935);
+
+    // Advancing is the daemon's call, and the events it releases are dispatched
+    // on the node thread. The sandbox's own expiry-sweep timer fires, which is
+    // the proof that the sandbox shares this clock instance.
+    let at = CN_0935 + 60 * SECOND_NS;
+    let fired = node.advance_to(at).expect("the controlled clock advances");
+    assert_eq!(node.now_ns().unwrap(), at);
+    assert!(
+        fired.iter().any(|t| t.ends_with("-sandbox-expiry-sweep")),
+        "{fired:?}"
+    );
+
+    publish(&node, moutai(), ("1700.00", 100), ("1700.00", 100), at);
+    let (record, _) = trade::submit(
+        &store,
+        &registry,
+        handle.desk_id(),
+        r#"{"action_id":"clock-buy-1","instrument_id":"600519.XSHG",
+            "side":"BUY","type":"MARKET","quantity":"100","price":null}"#,
+        &trade::Source::Session,
+    )
+    .expect("the market buy is accepted");
+    assert_eq!(record.outcome.clone().unwrap()["status"], "FILLED");
+
+    let stamps: Vec<i64> = store
+        .call(|conn| {
+            conn.prepare("SELECT occurred_at_ns FROM order_events")?
+                .query_map([], |r| r.get(0))?
+                .collect()
+        })
+        .unwrap();
+    assert!(
+        !stamps.is_empty() && stamps.iter().all(|ns| *ns == at as i64),
+        "every stored order event carries the injected instant {at}: {stamps:?}"
+    );
+    registry.stop_all();
+}
+
+/// §5.3's first half: the feed publishes nothing until restoration has decided.
+/// Without the latch the first poll wins the race and fills the restored order
+/// against data the daemon never gated (F3 (1b), 3 restarts out of 3).
+#[cfg(test)]
+#[test]
+fn the_first_publish_waits_for_recovery() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle) = controlled_registry(&store, None, "cn-hold", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let node = registry.ensure(&desk_id).expect("the node starts");
+    publish(&node, moutai(), ("1700.00", 100), ("1700.00", 100), CN_0935);
+    rest_buy(&store, &registry, &desk_id, "cn-hold-1", "1600.00");
+    registry.stop_all();
+
+    // The restart's feed answers a crossing 1500.00 to whatever it is asked.
+    let (base, _hits, _requests) = feed::scripted_server(vec![(
+        200,
+        feed::chart_body("600519.SS", "CNY", "1500.00", 1_788_917_700),
+    )]);
+    register_controlled(&desk_id, CN_0935);
+    let registry = Registry::new(
+        store.clone(),
+        Arc::new(MarketState::new()),
+        Some(FeedBase::standin(base)),
+    );
+    let node = registry.ensure(&desk_id).expect("the node restores");
+
+    // `ensure` returns with the book restored and no market data at all: the
+    // poller was still holding its first publish.
+    assert_eq!(
+        order_status(&node, "cn-hold-1").as_deref(),
+        Some("ACCEPTED")
+    );
+    assert_eq!(fill_count(&store), 0, "nothing filled during recovery");
+
+    // And the feed does resume: the same crossing quote lands afterwards.
+    within(10, "the released feed publishes", || {
+        node.call(|context| {
+            context
+                .cache
+                .borrow()
+                .quote(&InstrumentId::from(moutai().instrument_id))
+                .is_some()
+        })
+        .unwrap()
+    });
+    registry.stop_all();
+}
+
+/// §5.3: a restored CN order that has outlived its trading day is terminated
+/// exactly once, under its original identifier, before any quote exists — and
+/// its reservation is released (R1 S1, S4).
+#[cfg(test)]
+#[test]
+fn a_prior_day_cn_order_is_terminated_at_start() {
+    for (name, restart_ns) in [
+        ("cn-nextday", CN_0935 + DAY_NS),
+        ("cn-past-deadline", CN_0935 + 21_300 * SECOND_NS),
+    ] {
+        let (_dir, store) = crate::store::open_temp();
+        let (registry, handle) = controlled_registry(&store, None, name, CN_0935);
+        let desk_id = handle.desk_id().to_owned();
+        let node = registry.ensure(&desk_id).expect("the node starts");
+        publish(&node, moutai(), ("1700.00", 100), ("1700.00", 100), CN_0935);
+        rest_buy(&store, &registry, &desk_id, "cn-expired-1", "1600.00");
+        assert_eq!(
+            reservation(&node, "XSHG", &desk_id).0,
+            "500000.00 CNY|160000.00 CNY|340000.00 CNY"
+        );
+        registry.stop_all();
+
+        let (registry, node) = restart_at(&store, &desk_id, restart_ns);
+        assert_eq!(
+            order_status(&node, "cn-expired-1").as_deref(),
+            Some("CANCELED"),
+            "{name}: recovery terminated the expired order before returning"
+        );
+        assert_eq!(
+            kinds(&store, &desk_id, "cn-expired-1"),
+            [
+                "OrderInitialized",
+                "OrderSubmitted",
+                "OrderAccepted",
+                "OrderCanceled"
+            ],
+            "{name}: exactly one terminal event under the original id"
+        );
+        assert_eq!(
+            reservation(&node, "XSHG", &desk_id),
+            ("500000.00 CNY|0.00 CNY|500000.00 CNY".to_owned(), 0),
+            "{name}: the reservation is released"
+        );
+
+        // The crossing quote the restart was racing fills nothing now.
+        publish(
+            &node,
+            moutai(),
+            ("1500.00", 100),
+            ("1500.00", 100),
+            restart_ns + SECOND_NS,
+        );
+        assert_eq!(fill_count(&store), 0, "{name}");
+        let history = trade::history_orders(&store, &desk_id).expect("the history reads");
+        assert_eq!(history.len(), 1, "{name}: {history:?}");
+        assert_eq!(history[0]["status"], "CANCELED");
+        registry.stop_all();
+
+        // And a second restart is idempotent: nothing to cancel, nothing added.
+        let (registry, node) = restart_at(&store, &desk_id, restart_ns + 60 * SECOND_NS);
+        assert_eq!(
+            kinds(&store, &desk_id, "cn-expired-1").len(),
+            4,
+            "{name}: no duplicate terminal event"
+        );
+        assert_eq!(reservation(&node, "XSHG", &desk_id).1, 0, "{name}");
+        assert_eq!(
+            trade::history_orders(&store, &desk_id)
+                .expect("the history reads")
+                .len(),
+            1,
+            "{name}: one chain"
+        );
+        registry.stop_all();
+    }
+}
+
+/// §5.1: the same trading day's order survives a lunch-break restart. It is not
+/// terminated, it keeps resting, and once the session is open again it fills on
+/// a crossing quote under its own identifier.
+#[cfg(test)]
+#[test]
+fn a_same_day_restart_keeps_the_order_resting() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle) = controlled_registry(&store, None, "cn-lunch", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let node = registry.ensure(&desk_id).expect("the node starts");
+    publish(&node, moutai(), ("1700.00", 100), ("1700.00", 100), CN_0935);
+    rest_buy(&store, &registry, &desk_id, "cn-lunch-1", "1600.00");
+    registry.stop_all();
+
+    // 12:10, inside the lunch break: the day is not over, so nothing expires,
+    // and the session gate comes back closed.
+    let lunch = CN_0935 + 9_300 * SECOND_NS;
+    let (registry, node) = restart_at(&store, &desk_id, lunch);
+    assert_eq!(
+        order_status(&node, "cn-lunch-1").as_deref(),
+        Some("ACCEPTED")
+    );
+    assert_eq!(
+        node.call(|context| {
+            context
+                .cache
+                .borrow()
+                .instrument_status(&InstrumentId::from(moutai().instrument_id))
+                .map(|cached| cached.action)
+        })
+        .unwrap(),
+        Some(nautilus_model::enums::MarketStatusAction::Close),
+        "the lunch restart re-gates the instrument closed"
+    );
+    assert_eq!(
+        reservation(&node, "XSHG", &desk_id),
+        ("500000.00 CNY|160000.00 CNY|340000.00 CNY".to_owned(), 1),
+        "the reservation came back and was rebuilt"
+    );
+
+    // 13:05, the afternoon session. Reopening the gate is the poller's job; the
+    // order then fills on the first crossing quote, once, under its own id.
+    let afternoon = CN_0935 + 12_600 * SECOND_NS;
+    node.advance_to(afternoon).expect("the clock advances");
+    node.call(move |context| {
+        let ts = context
+            .cn
+            .borrow_mut()
+            .stamp(InstrumentId::from(moutai().instrument_id), afternoon);
+        cn::publish_status(context, moutai(), cn::status_for(afternoon), ts);
+    })
+    .unwrap();
+    publish(
+        &node,
+        moutai(),
+        ("1500.00", 100),
+        ("1500.00", 100),
+        afternoon + SECOND_NS,
+    );
+    within(10, "the resting order fills", || {
+        order_status(&node, "cn-lunch-1").as_deref() == Some("FILLED")
+    });
+    assert_eq!(fill_count(&store), 1);
+    assert_eq!(
+        kinds(&store, &desk_id, "cn-lunch-1"),
+        [
+            "OrderInitialized",
+            "OrderSubmitted",
+            "OrderAccepted",
+            "OrderFilled"
+        ],
+        "restoration replayed nothing"
+    );
+    registry.stop_all();
 }

@@ -34,7 +34,7 @@ use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::accounts::AccountAny;
 use nautilus_model::enums::{OmsType, OrderSide, OrderStatus, OrderType, TimeInForce};
 use nautilus_model::events::{OrderEventAny, PositionClosed, PositionEvent};
-use nautilus_model::identifiers::{ClientOrderId, InstrumentId, StrategyId};
+use nautilus_model::identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId};
 use nautilus_model::orders::{Order, OrderAny};
 use nautilus_model::position::Position;
 use nautilus_model::types::{Price, Quantity};
@@ -64,6 +64,10 @@ const STRATEGY: &str = "MARKETRIG-001";
 /// reads the node's cache between turns rather than blocking it.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 const SETTLE_POLL: Duration = Duration::from_millis(2);
+
+/// The event kinds an order carries exactly once in its life. A second one is
+/// restoration re-handing the order, never new history (§4.3, §5).
+const ACCEPTED_ONCE: [&str; 2] = ["OrderSubmitted", "OrderAccepted"];
 
 // ---------------------------------------------------------------------------
 // Errors (§7 codes, append-only per D68)
@@ -332,7 +336,25 @@ fn place_and_settle(
     form: Form,
 ) -> Result<Value, TradeError> {
     let client_order_id = ClientOrderId::from(action_id);
-    node.call(move |context| place(context, form, client_order_id))?;
+    if form.entry.market == catalog::Market::Cn {
+        // CN admission runs inside the node's own critical section: one closure
+        // that finds the instrument neither busy nor unready and hands the
+        // order, so an executable book can never stand between the check and
+        // the placement (feature SPEC `a-share-engine` §2.5, F8 item 2).
+        crate::cn::admit(
+            node,
+            InstrumentId::from(form.entry.instrument_id),
+            move |context| place(context, form, client_order_id),
+        )
+        .map_err(|reason| {
+            TradeError::Unavailable(format!(
+                "the desk cannot trade {} right now: {reason}",
+                form.entry.instrument_id
+            ))
+        })?;
+    } else {
+        node.call(move |context| place(context, form, client_order_id))?;
+    }
     let settled = settle(node, client_order_id, settled_submit)?;
     finish(store, desk_id, action_id, &settled.projection)?;
 
@@ -370,14 +392,13 @@ pub fn cancel(
 
     let node = registry.ensure(desk_id)?;
     let target = ClientOrderId::from(client_order_id);
-    let Some((instrument_id, venue_order_id)) = node.call(move |context| {
+    let open = node.call(move |context| {
         let cache = context.cache.borrow();
-        let order = cache.order(&target)?;
-        (!order.is_closed()).then(|| (order.instrument_id(), order.venue_order_id()))
-    })?
-    else {
+        cache.order(&target).is_some_and(|order| !order.is_closed())
+    })?;
+    if !open {
         return Err(TradeError::OrderNotFound(client_order_id.to_string()));
-    };
+    }
 
     // A cancel's request spans the route: the order it names rode the path and
     // its own identity the body, so the recorded request is the pair.
@@ -393,24 +414,16 @@ pub fn cancel(
         Begun::New(record) => record,
     };
 
-    // A cancel needs no risk check, so it goes straight to the execution engine's
-    // queued endpoint, exactly as a NautilusTrader strategy's cancel does.
     node.call(move |context| {
-        msgbus::send_trading_command(
-            MessagingSwitchboard::exec_engine_queue_execute(),
-            TradingCommand::CancelOrder(CancelOrder::new(
-                context.trader_id,
-                None,
-                StrategyId::new(STRATEGY),
-                instrument_id,
-                target,
-                venue_order_id,
-                UUID4::new(),
-                UnixNanos::from(now_ns().max(0) as u64),
-                None,
-                None,
-            )),
-        );
+        let at = context.clock.borrow().timestamp_ns().as_u64();
+        let order = context
+            .cache
+            .borrow()
+            .order(&target)
+            .map(|order| order.cloned());
+        if let Some(order) = order.filter(|order| !order.is_closed()) {
+            cancel_on_node(context.trader_id, &order, at);
+        }
     })?;
 
     let settled = settle(&node, target, settled_cancel)?;
@@ -935,13 +948,17 @@ pub(crate) fn place_form(
 /// `OrderSubmitted` and `OrderAccepted` the re-placement would otherwise repeat,
 /// which is exactly why restoration adds no history rows (§4.3).
 fn hand_to_node(context: &NodeContext, order: OrderAny, announce: bool) {
+    // The node's own clock, not `store::now_ns()`: every instant a command
+    // carries into NautilusTrader is the one time source the CN session,
+    // owning-day and deadline decisions read (feature SPEC `a-share-engine`
+    // §5.1). On an ordinary node it is a `LiveClock` and reads wall clock.
     let command = SubmitOrder::from_order(
         &order,
         context.trader_id,
         None,
         None,
         UUID4::new(),
-        UnixNanos::from(now_ns().max(0) as u64),
+        context.clock.borrow().timestamp_ns(),
     );
     let initialized = OrderEventAny::Initialized(order.init_event().clone());
     let strategy_id = order.strategy_id();
@@ -959,6 +976,33 @@ fn hand_to_node(context: &NodeContext, order: OrderAny, announce: bool) {
     msgbus::send_trading_command(
         MessagingSwitchboard::risk_engine_queue_execute(),
         TradingCommand::SubmitOrder(command),
+    );
+}
+
+/// Sends the one supported termination for a resting order: the same
+/// `TradingCommand::CancelOrder` a cancel action sends, stamped at `at_ns` from
+/// the node's own clock, straight to the execution engine's queued endpoint —
+/// no risk check, exactly as a NautilusTrader strategy's cancel does.
+///
+/// `crate::node`'s start-time CN reconciliation issues it too, which is why it
+/// is a function and not the body of [`cancel`]: the runner drains exec commands
+/// ahead of data (F3 (1a)), so a cancel queued at start beats a crossing quote
+/// already sitting in the data channel.
+pub(crate) fn cancel_on_node(trader_id: TraderId, order: &OrderAny, at_ns: u64) {
+    msgbus::send_trading_command(
+        MessagingSwitchboard::exec_engine_queue_execute(),
+        TradingCommand::CancelOrder(CancelOrder::new(
+            trader_id,
+            None,
+            StrategyId::new(STRATEGY),
+            order.instrument_id(),
+            order.client_order_id(),
+            order.venue_order_id(),
+            UUID4::new(),
+            UnixNanos::from(at_ns),
+            None,
+            None,
+        )),
     );
 }
 
@@ -1388,15 +1432,32 @@ fn capture_order(desk_id: &str, store: &Store, cache: &Rc<RefCell<Cache>>, event
         // order re-placed without its client-side `OrderSubmitted`, is not one —
         // and re-inserting an event would duplicate its fill too.
         let mut seen: Vec<String> = Vec::new();
+        let mut accepted: Vec<&'static str> = Vec::new();
         {
             let mut statement = tx.prepare(
-                "SELECT payload FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
+                "SELECT kind, payload FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
             )?;
             let mut stored = statement.query(params![desk, client_order_id])?;
             while let Some(row) = stored.next()? {
-                seen.extend(stored_event_id(&row.get::<_, String>(0)?));
+                let kind: String = row.get(0)?;
+                seen.extend(stored_event_id(&row.get::<_, String>(1)?));
+                if let Some(once) = ACCEPTED_ONCE.iter().find(|once| ***once == *kind) {
+                    accepted.push(once);
+                }
             }
         }
+        let mut rows = rows;
+        // An order is submitted and accepted once in its life. A repeat comes
+        // from restoration re-handing it: for an order that was *partially*
+        // filled, `(PartiallyFilled, Accepted)` is a legal transition in the
+        // pinned crate (`nautilus-model-0.62.0/src/orders/mod.rs:287`), so the
+        // re-hand's `OrderAccepted` is applied and published where an untouched
+        // accepted order's would have been dropped. Storing it puts a second
+        // acceptance in the chain that `OrderAny::from_events` cannot replay,
+        // and the order falls out of the history (§5, R1-5). Restoration adds no
+        // history (§4.3), so the repeat is not stored — nothing native is lost,
+        // because the acceptance it repeats is already there.
+        rows.retain(|row| !accepted.contains(&row.kind));
         for row in rows.iter().filter(|row| !seen.contains(&row.event_id)) {
             tx.execute(
                 "INSERT INTO order_events \
@@ -2664,4 +2725,66 @@ fn constitution_names_the_approval_boundary() {
         include_str!("../seed/AGENTS.md").contains(paragraph),
         "the seeded constitution must carry §3.3's paragraph byte for byte:\n{paragraph}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// trade::a_restarted_partial_fill_replays_with_one_acceptance
+// (feature SPEC `a-share-engine` §5.3)
+// ---------------------------------------------------------------------------
+
+/// Restoration re-hands a partially filled order, and
+/// `(PartiallyFilled, Accepted)` is a legal transition in the pinned crate
+/// (`nautilus-model-0.62.0/src/orders/mod.rs:287`) — unlike the untouched
+/// accepted case, whose repeat NautilusTrader drops — so the re-hand's
+/// `OrderAccepted` is applied and published. It is not new history: an order is
+/// submitted and accepted once, so [`capture_order`] stores it once, the stored
+/// chain stays replayable, and the fill is still in it.
+#[cfg(test)]
+#[test]
+fn a_restarted_partial_fill_replays_with_one_acceptance() {
+    use crate::node::{CN_0935, SECOND_NS, controlled_registry, moutai, publish, restart_at};
+
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle) = controlled_registry(&store, None, "partial", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let node = registry.ensure(&desk_id).expect("the node starts");
+    publish(&node, moutai(), ("1700.00", 100), ("1700.00", 100), CN_0935);
+    crate::node::rest_buy(&store, &registry, &desk_id, "partial-1", "1600.00");
+
+    // An ask smaller than the order: the matching engine sizes the fill from the
+    // book level, so 60 of 100 fill.
+    let at = CN_0935 + 60 * SECOND_NS;
+    node.advance_to(at).expect("the clock advances");
+    publish(&node, moutai(), ("1500.00", 100), ("1500.00", 60), at);
+    crate::node::within(10, "the partial fill lands", || {
+        crate::node::order_status(&node, "partial-1").as_deref() == Some("PARTIALLY_FILLED")
+    });
+    assert_eq!(crate::node::fill_count(&store), 1);
+    registry.stop_all();
+
+    let (registry, node) = restart_at(&store, &desk_id, at + SECOND_NS);
+    let open = open_orders(&node).expect("the open orders read");
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["filled_quantity"], "60", "the fill survived");
+    assert_eq!(
+        crate::node::kinds(&store, &desk_id, "partial-1"),
+        [
+            "OrderInitialized",
+            "OrderSubmitted",
+            "OrderAccepted",
+            "OrderFilled"
+        ],
+        "one acceptance, and the fill is still in the chain"
+    );
+    let history = history_orders(&store, &desk_id).expect("the history reads");
+    assert_eq!(history.len(), 1, "the chain replays: {history:?}");
+    assert_eq!(history[0]["client_order_id"], "partial-1");
+    assert_eq!(history[0]["status"], "PARTIALLY_FILLED");
+    assert_eq!(history[0]["filled_quantity"], "60");
+    assert_eq!(
+        crate::node::fill_count(&store),
+        1,
+        "and no fill was doubled"
+    );
+    registry.stop_all();
 }

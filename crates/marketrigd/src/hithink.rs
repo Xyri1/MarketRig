@@ -8,7 +8,7 @@
 //! calendar below, and the research passthrough all go through [`Hithink::request`],
 //! so the retry table and the `2003` rule are written once.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -39,12 +39,17 @@ const BASE_URL: &str = "https://fuyao.aicubes.cn";
 /// exactly as the quote stand-in does.
 pub const TEST_HITHINK_URL_ENV: &str = "MARKETRIG_TEST_HITHINK_URL";
 
-/// HiThink's retry contract (§2.2, per HT-2): three attempts, 500 ms then 1 s
-/// apart, on `4001`, `5001`–`5003`, HTTP 429 or 5xx, and transport errors —
-/// never on any other `1xxx`/`2xxx` code.
+/// HiThink's retry contract (§2.2, per HT-2; `a-share-engine` SPEC §2.1): three
+/// attempts, 500 ms then 1 s apart, on `4001`, envelope `429`, `5001`–`5003`,
+/// HTTP 429 or 5xx, and transport errors — never on any other `1xxx`/`2xxx`
+/// code. The real service answers rate limiting as envelope `429`, not `4001`
+/// (F7 §3), so both codes are in the set.
 pub const ATTEMPTS: u32 = 3;
-const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
-const RATE_LIMITED: i64 = 4001;
+pub const BACKOFF: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
+/// What a stand-in waits instead, so the module checks pay no real seconds for
+/// the bound. The policy the daemon runs is [`BACKOFF`].
+const STANDIN_BACKOFF: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];
+const RATE_LIMITED: [i64; 2] = [4001, 429];
 const KEY_REJECTED: i64 = 2003;
 const RETRYABLE_SERVER: std::ops::RangeInclusive<i64> = 5001..=5003;
 
@@ -61,6 +66,13 @@ const VALIDATE_PATH: &str = "meta/tickers/search";
 const VALIDATE_QUERY: &str = "q=600519&limit=1";
 pub const SNAPSHOT_PATH: &str = "a-share/prices/snapshot";
 const CALENDAR_PATH: &str = "a-share/calendar/trading-days";
+/// The unadjusted daily bar that dates an observation (`a-share-engine` SPEC
+/// §2.1). It is also a documented research path, and it shares this module's
+/// one client and one key with the other three.
+const HISTORICAL_PATH: &str = "a-share/prices/historical";
+/// The bar window: ten days back from the read, wide enough to carry the
+/// current day's bar across any holiday run.
+const BAR_WINDOW_MS: i64 = 10 * 24 * 60 * 60 * 1_000;
 
 const EVENT: &str = "HITHINK_PROVIDER_CHANGED";
 
@@ -103,6 +115,80 @@ pub enum Calendar {
     /// R1's Monday–Friday session rule, which every `US` and `HK` observation
     /// carries too (per D78).
     Weekday,
+}
+
+/// Why CN execution is not available, in MarketRig's own vocabulary
+/// (`a-share-engine` SPEC §2.1, §2.3, per AE-3, AE-8). One string enum shared by
+/// the readiness checks here, the per-node execution state, and the order
+/// refusals; `YahooSimplified` is a policy label rather than a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Reason {
+    NoCalendar,
+    CalendarRefused,
+    NotTradingDay,
+    OutOfSession,
+    DateUnproven,
+    NoReference,
+    ReferenceChanged,
+    PriceOutOfBand,
+    FeedLost,
+    RateLimited,
+    PublicationFailed,
+    PublicationPending,
+    NodeNotStarted,
+    YahooSimplified,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::NoCalendar => "NO_CALENDAR",
+            Reason::CalendarRefused => "CALENDAR_REFUSED",
+            Reason::NotTradingDay => "NOT_TRADING_DAY",
+            Reason::OutOfSession => "OUT_OF_SESSION",
+            Reason::DateUnproven => "DATE_UNPROVEN",
+            Reason::NoReference => "NO_REFERENCE",
+            Reason::ReferenceChanged => "REFERENCE_CHANGED",
+            Reason::PriceOutOfBand => "PRICE_OUT_OF_BAND",
+            Reason::FeedLost => "FEED_LOST",
+            Reason::RateLimited => "RATE_LIMITED",
+            Reason::PublicationFailed => "PUBLICATION_FAILED",
+            Reason::PublicationPending => "PUBLICATION_PENDING",
+            Reason::NodeNotStarted => "NODE_NOT_STARTED",
+            Reason::YahooSimplified => "YAHOO_SIMPLIFIED",
+        }
+    }
+}
+
+impl fmt::Display for Reason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The day's trading-day evidence (`a-share-engine` SPEC §2.1): the list, and
+/// the Shanghai date it was adopted for. It authorizes execution only while that
+/// date is still today — never carried across the rollover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TradingDays {
+    pub shanghai_date: String,
+    pub days: BTreeSet<String>,
+}
+
+/// What one [`Hithink::refresh_calendar_if_due`] call did (§2.1), so a caller
+/// can surface `CALENDAR_REFUSED` rather than guess from a phase label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarRefresh {
+    /// Not under HiThink, or the key is gone: the calendar is not this
+    /// provider's to fetch.
+    NotDue,
+    /// Today's evidence already stands; no request was issued, so no refusal
+    /// could revoke it.
+    Held,
+    /// A successful list for today, adopted — replacing any contradictory one.
+    Adopted,
+    Refused(Reason),
 }
 
 /// The `hithink_provider` row as the routes answer it — never a key (§1.2).
@@ -271,8 +357,15 @@ struct Live {
     feed: AShareFeed,
     key: Option<String>,
     available: bool,
-    calendar: Option<BTreeSet<String>>,
-    calendar_fetched_at_ns: i64,
+    /// Today's trading-day evidence, valid only while its own Shanghai date is
+    /// today (`a-share-engine` SPEC §2.1).
+    calendar: Option<TradingDays>,
+    /// The Shanghai date whose calendar refresh was refused, so a day that
+    /// never adopted a list can say `CALENDAR_REFUSED` instead of `NO_CALENDAR`.
+    calendar_refused_on: Option<String>,
+    /// Per instrument, the Shanghai date a current-day unadjusted bar proved
+    /// (§2.1). Cleared by the rollover, like the calendar.
+    bars: HashMap<&'static str, String>,
 }
 
 /// The installation's HiThink provider. One per daemon, in `ApiState` and on the
@@ -288,6 +381,9 @@ pub struct Hithink {
     /// False keeps this daemon off the public service entirely
     /// (`MARKETRIG_TEST_NO_TRADING`, §1.3).
     enabled: bool,
+    /// The waits between the [`ATTEMPTS`] attempts: [`BACKOFF`] in production,
+    /// [`STANDIN_BACKOFF`] against a stand-in.
+    backoff: [Duration; 2],
     http: reqwest::Client,
     state: Mutex<Live>,
     /// The research gate (§4.1): held across the upstream call, carrying the
@@ -343,6 +439,7 @@ impl Hithink {
             base_url,
             standin,
             enabled,
+            backoff: if standin { STANDIN_BACKOFF } else { BACKOFF },
             http: reqwest::Client::builder()
                 .no_proxy()
                 .user_agent(concat!("MarketRig/", env!("CARGO_PKG_VERSION")))
@@ -354,7 +451,8 @@ impl Hithink {
                 feed: row.a_share_feed,
                 key,
                 calendar: None,
-                calendar_fetched_at_ns: 0,
+                calendar_refused_on: None,
+                bars: HashMap::new(),
             }),
             gate: tokio::sync::Mutex::new(None),
         })
@@ -414,13 +512,11 @@ impl Hithink {
         if !crate::research_paths::RESEARCH_PATHS.contains(&path) {
             return Err(HithinkError::ResearchPathUnknown(path.to_string()));
         }
-        let mut gate = self.gate.lock().await;
-        if let Some(wait) = gate.and_then(|last| SPACING.checked_sub(last.elapsed())) {
-            tokio::time::sleep(wait).await;
-        }
-        let answer = self.request(path, query).await;
-        *gate = Some(Instant::now());
-        Ok(answer.map_err(Failure::research)?.bytes)
+        Ok(self
+            .spaced(path, query)
+            .await
+            .map_err(Failure::research)?
+            .bytes)
     }
 
     /// The same call against a key that is not stored yet — validation's one
@@ -440,7 +536,7 @@ impl Hithink {
         let mut last = String::new();
         for attempt in 1..=ATTEMPTS {
             if attempt > 1 {
-                tokio::time::sleep(BACKOFF[attempt as usize - 2]).await;
+                tokio::time::sleep(self.backoff[attempt as usize - 2]).await;
             }
             match self.attempt(&url, key).await {
                 Once::Done(answer) => return Ok(answer),
@@ -485,7 +581,7 @@ impl Hithink {
             return Once::Fatal(format!("HTTP {} carried no JSON envelope", status.as_u16()));
         };
         let code = body.get("code").and_then(Value::as_i64).unwrap_or(-1);
-        if code == RATE_LIMITED || RETRYABLE_SERVER.contains(&code) {
+        if RATE_LIMITED.contains(&code) || RETRYABLE_SERVER.contains(&code) {
             return Once::Retry(format!("code {code}"));
         }
         Once::Done(Answer {
@@ -619,7 +715,8 @@ impl Hithink {
             live.feed = AShareFeed::Yahoo;
             live.available = false;
             live.calendar = None;
-            live.calendar_fetched_at_ns = 0;
+            live.calendar_refused_on = None;
+            live.bars.clear();
         }
         Ok(self.resource(row))
     }
@@ -673,14 +770,19 @@ impl Hithink {
     // The calendar (§3)
     // -----------------------------------------------------------------------
 
-    /// The `CN` phase and the rule that labeled it (§3, per HT-3). Under Yahoo,
-    /// or before any list has been fetched, this is R1's weekday rule exactly.
+    /// The `CN` phase and the rule that labeled it (§3, per HT-3) — awareness
+    /// only. Under Yahoo, before any list has been fetched, or once the held
+    /// list belongs to a past Shanghai day, this is R1's weekday rule exactly,
+    /// and that fallback never authorizes execution ([`trading_day`] does).
+    ///
+    /// [`trading_day`]: Self::trading_day
     pub fn cn_phase(&self, at_ns: i64) -> (Phase, Calendar) {
         let session = feed::phase(Market::Cn, at_ns);
+        let today = shanghai_date(at_ns);
         let live = self.lock();
         match (live.feed, live.calendar.as_ref()) {
-            (AShareFeed::Hithink, Some(days)) => {
-                let open = session == Phase::Open && days.contains(&shanghai_date(at_ns));
+            (AShareFeed::Hithink, Some(held)) if held.shanghai_date == today => {
+                let open = session == Phase::Open && held.days.contains(&today);
                 let phase = if open { Phase::Open } else { Phase::Closed };
                 (phase, Calendar::Hithink)
             }
@@ -688,39 +790,190 @@ impl Hithink {
         }
     }
 
-    /// Fetches the trading-day list on the first `CN` cycle under HiThink and
-    /// again on the first cycle past Shanghai midnight (§3). A failure keeps
-    /// whatever set is held — including none — and is retried next cycle.
-    pub async fn refresh_calendar_if_due(&self, at_ns: i64) {
-        let due = {
-            let live = self.lock();
-            live.feed == AShareFeed::Hithink
-                && live.available
-                && (live.calendar.is_none()
-                    || shanghai_date(live.calendar_fetched_at_ns) != shanghai_date(at_ns))
-        };
-        if !due {
-            return;
+    /// Whether today is a proven trading day (`a-share-engine` SPEC §2.1) —
+    /// the execution gate, which only a same-day list can open. The weekday
+    /// fallback is not evidence: with no list this is `NO_CALENDAR`, and with a
+    /// refused one for today, `CALENDAR_REFUSED`.
+    pub fn trading_day(&self, at_ns: i64) -> Result<(), Reason> {
+        let today = shanghai_date(at_ns);
+        let live = self.lock();
+        match live.calendar.as_ref() {
+            Some(held) if held.shanghai_date == today => {
+                if held.days.contains(&today) {
+                    Ok(())
+                } else {
+                    Err(Reason::NotTradingDay)
+                }
+            }
+            _ if live.calendar_refused_on.as_deref() == Some(today.as_str()) => {
+                Err(Reason::CalendarRefused)
+            }
+            _ => Err(Reason::NoCalendar),
         }
+    }
+
+    /// Fetches the trading-day list on the first `CN` cycle under HiThink and
+    /// again on the first cycle past Shanghai midnight (§3, `a-share-engine`
+    /// SPEC §2.1). Today's adopted list is held for the day, so no redundant
+    /// read is issued and no refusal can revoke it; a refusal on a day with no
+    /// list is remembered as `CALENDAR_REFUSED` and retried next cycle; a
+    /// successful list always replaces whatever was held, including a
+    /// contradictory one.
+    pub async fn refresh_calendar_if_due(&self, at_ns: i64) -> CalendarRefresh {
+        let today = shanghai_date(at_ns);
+        {
+            let mut live = self.lock();
+            if live.feed != AShareFeed::Hithink || !live.available {
+                return CalendarRefresh::NotDue;
+            }
+            // The rollover carries no evidence: a list, a refusal and every bar
+            // from a past Shanghai day go before anything is asked again.
+            if live
+                .calendar
+                .as_ref()
+                .is_some_and(|held| held.shanghai_date != today)
+            {
+                live.calendar = None;
+            }
+            if live.calendar.is_some() {
+                return CalendarRefresh::Held;
+            }
+            if live
+                .calendar_refused_on
+                .as_deref()
+                .is_some_and(|d| d != today)
+            {
+                live.calendar_refused_on = None;
+            }
+            live.bars.retain(|_, proven| *proven == today);
+        }
+        let refused = |why: Reason| {
+            self.lock().calendar_refused_on = Some(today.clone());
+            CalendarRefresh::Refused(why)
+        };
         match self.request(CALENDAR_PATH, "").await {
             Ok(answer) if answer.code == 0 => {
                 let days = trading_days(&answer.bytes);
                 if days.is_empty() {
                     tracing::warn!("the HiThink trading-day list was empty");
-                    return;
+                    return refused(Reason::CalendarRefused);
                 }
                 let mut live = self.lock();
-                live.calendar = Some(days);
-                live.calendar_fetched_at_ns = at_ns;
+                live.calendar = Some(TradingDays {
+                    shanghai_date: today,
+                    days,
+                });
+                live.calendar_refused_on = None;
+                CalendarRefresh::Adopted
             }
             Ok(answer) => {
                 tracing::warn!(
                     code = answer.code,
                     "the HiThink trading-day list was refused"
                 );
+                refused(rate_limited_or(answer.code, Reason::CalendarRefused))
             }
-            Err(e) => tracing::warn!("the HiThink trading-day list did not arrive: {e}"),
+            Err(e) => {
+                tracing::warn!("the HiThink trading-day list did not arrive: {e}");
+                refused(match failure_reason(&e) {
+                    Reason::RateLimited => Reason::RateLimited,
+                    _ => Reason::CalendarRefused,
+                })
+            }
         }
+    }
+
+    /// Per-instrument current-day bar evidence (`a-share-engine` SPEC §2.1):
+    /// one successful unadjusted daily read per instrument per Shanghai day,
+    /// whose newest bar must be dated today. Success is held for the day and
+    /// cleared by the rollover; a failed or refused read answers `Err` for this
+    /// call and is retried on the next one — the poll cadence, never a loop.
+    pub async fn bar_evidence(
+        &self,
+        entry: &'static crate::catalog::Entry,
+        at_ns: i64,
+    ) -> Result<(), Reason> {
+        let today = shanghai_date(at_ns);
+        let Some(thscode) = entry.hithink_symbol else {
+            return Err(Reason::DateUnproven);
+        };
+        {
+            let mut live = self.lock();
+            live.bars.retain(|_, proven| *proven == today);
+            if live.bars.get(entry.instrument_id) == Some(&today) {
+                return Ok(());
+            }
+        }
+        // The F7 request shape: one thscode, daily, unadjusted, a window that
+        // ends now and is wide enough to carry the current day's bar.
+        let end_ms = at_ns / 1_000_000;
+        let start_ms = end_ms - BAR_WINDOW_MS;
+        let query =
+            format!("thscode={thscode}&interval=1d&start={start_ms}&end={end_ms}&adjust=none");
+        let answer = match self.spaced(HISTORICAL_PATH, &query).await {
+            Ok(answer) if answer.code == 0 => answer,
+            Ok(answer) => {
+                tracing::warn!(code = answer.code, thscode, "the HiThink bar was refused");
+                return Err(rate_limited_or(answer.code, Reason::DateUnproven));
+            }
+            Err(e) => {
+                tracing::warn!(thscode, "the HiThink bar did not arrive: {e}");
+                return Err(match failure_reason(&e) {
+                    Reason::RateLimited => Reason::RateLimited,
+                    _ => Reason::DateUnproven,
+                });
+            }
+        };
+        match latest_bar_date(&answer.bytes) {
+            Some(date) if date == today => {
+                self.lock().bars.insert(entry.instrument_id, today);
+                Ok(())
+            }
+            other => {
+                tracing::warn!(thscode, bar = other, "the HiThink bar is not today's");
+                Err(Reason::DateUnproven)
+            }
+        }
+    }
+
+    /// One upstream call under the installation-wide spacing gate (§4.1), which
+    /// the passthrough and the bar read share.
+    async fn spaced(&self, path: &str, query: &str) -> Result<Answer, Failure> {
+        let mut gate = self.gate.lock().await;
+        if let Some(wait) = gate.and_then(|last| SPACING.checked_sub(last.elapsed())) {
+            tokio::time::sleep(wait).await;
+        }
+        let answer = self.request(path, query).await;
+        *gate = Some(Instant::now());
+        answer
+    }
+}
+
+/// Whether an exhausted call's last reason was rate limiting — the two strings
+/// [`Hithink::attempt`] writes for `HTTP 429` and the envelope codes.
+///
+/// ponytail: the reason travels as text because [`Failure`] carries no code.
+/// The upgrade path is a typed last-reason on `Failure` if a second caller
+/// needs to branch on it.
+pub(crate) fn failure_reason(failure: &Failure) -> Reason {
+    match failure {
+        Failure::Unreachable { last, .. } if is_rate_limit(last) => Reason::RateLimited,
+        _ => Reason::FeedLost,
+    }
+}
+
+fn is_rate_limit(last: &str) -> bool {
+    RATE_LIMITED
+        .iter()
+        .any(|code| last == format!("code {code}"))
+        || last == "HTTP 429"
+}
+
+pub(crate) fn rate_limited_or(code: i64, otherwise: Reason) -> Reason {
+    if RATE_LIMITED.contains(&code) {
+        Reason::RateLimited
+    } else {
+        otherwise
     }
 }
 
@@ -768,11 +1021,24 @@ fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
 
 /// The Shanghai calendar date of an instant, `yyyyMMdd` — the form HiThink's
 /// list carries (§3).
-fn shanghai_date(at_ns: i64) -> String {
+pub(crate) fn shanghai_date(at_ns: i64) -> String {
     DateTime::from_timestamp_nanos(at_ns)
         .with_timezone(&Tz::Asia__Shanghai)
         .format("%Y%m%d")
         .to_string()
+}
+
+/// The Shanghai date of the newest `data.item[].date_ms` in a daily-bar answer
+/// (`a-share-engine` SPEC §2.1). The bars carry milliseconds alone; the readable
+/// `date` string is the calendar endpoint's, not this one's.
+fn latest_bar_date(bytes: &[u8]) -> Option<String> {
+    let body = serde_json::from_slice::<Value>(bytes).ok()?;
+    let newest = body["data"]["item"]
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("date_ms")?.as_i64())
+        .max()?;
+    Some(shanghai_date(newest * 1_000_000))
 }
 
 /// `data.item[].date` from the trading-days answer (§3).
@@ -1134,5 +1400,244 @@ mod research {
             "one validation and two research requests"
         );
         assert_eq!(SPACING, Duration::from_millis(200));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// readiness::* (feature SPEC `a-share-engine` §2.1)
+// ---------------------------------------------------------------------------
+
+/// The day's evidence: what authorizes CN execution, what merely labels a
+/// phase, and what a refusal may and may not take away.
+#[cfg(test)]
+mod readiness {
+    use super::provider::{envelope, scratch};
+    use super::*;
+
+    const KEY: &str = "hithink-fake-key-0123456789";
+
+    fn at(y: i32, m: u32, d: u32, hour: u32) -> i64 {
+        use chrono::TimeZone;
+
+        Tz::Asia__Shanghai
+            .with_ymd_and_hms(y, m, d, hour, 0, 0)
+            .unwrap()
+            .timestamp_nanos_opt()
+            .unwrap()
+    }
+
+    /// The trading-day answer for a set of `yyyyMMdd` dates.
+    fn days(dates: &[&str]) -> (u16, String) {
+        let item = dates
+            .iter()
+            .map(|d| format!(r#"{{"date_ms":0,"date":"{d}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        (
+            200,
+            envelope(0, &format!(r#"{{"timestamp":0,"item":[{item}]}}"#)),
+        )
+    }
+
+    /// A daily-bar answer whose newest bar is dated `at_ns`'s Shanghai day,
+    /// with one older bar behind it (F7 §2.2: `date_ms` and `close_price`).
+    fn bars(at_ns: i64) -> (u16, String) {
+        let newest = at_ns / 1_000_000;
+        (
+            200,
+            envelope(
+                0,
+                &format!(
+                    r#"{{"timestamp":{newest},"item":[
+                       {{"date_ms":{},"close_price":1309.30}},
+                       {{"date_ms":{newest},"close_price":1290.88}}]}}"#,
+                    newest - 86_400_000
+                ),
+            ),
+        )
+    }
+
+    /// A validated provider on `HITHINK`, over a stand-in running `replies`
+    /// after the one validation reply `put` consumes.
+    async fn standin(replies: Vec<(u16, String)>) -> (tempfile::TempDir, Arc<Hithink>, Requests) {
+        let mut script = vec![(200, envelope(0, "null"))];
+        script.extend(replies);
+        let (base, _hits, seen) = feed::scripted_server(script);
+        let (dir, hithink) = scratch(&base);
+        hithink.put(KEY).await.unwrap();
+        (dir, hithink, seen)
+    }
+
+    type Requests = Arc<Mutex<Vec<String>>>;
+
+    /// The requests the stand-in saw after `put`'s validation call.
+    fn asked(seen: &Requests) -> Vec<String> {
+        seen.lock().unwrap_or_else(PoisonError::into_inner)[1..].to_vec()
+    }
+
+    /// The calendar dates the day, and only today's list authorizes execution:
+    /// a refusal can never revoke a day that succeeded, the rollover always
+    /// revokes, and the weekday fallback authorizes nothing at any point.
+    #[tokio::test]
+    async fn calendar_evidence_is_dated_and_a_refusal_never_revokes_today() {
+        let wednesday = at(2026, 3, 4, 10);
+        let thursday = at(2026, 3, 5, 10);
+        let (_dir, hithink, seen) = standin(vec![
+            days(&["20260304", "20260305"]),
+            (429, envelope(429, "null")),
+        ])
+        .await;
+
+        // 1. The day starts unavailable: the weekday rule may call the session
+        // OPEN, but it is not evidence and cannot authorize execution.
+        assert_eq!(
+            hithink.cn_phase(wednesday),
+            (Phase::Open, Calendar::Weekday)
+        );
+        assert_eq!(hithink.trading_day(wednesday), Err(Reason::NoCalendar));
+
+        // 2. The day's one read is adopted, and it is what opens execution.
+        assert_eq!(
+            hithink.refresh_calendar_if_due(wednesday).await,
+            CalendarRefresh::Adopted
+        );
+        assert_eq!(hithink.trading_day(wednesday), Ok(()));
+        assert_eq!(
+            hithink.cn_phase(wednesday),
+            (Phase::Open, Calendar::Hithink)
+        );
+
+        // 3. Later the same Shanghai day, with the stand-in now refusing
+        // everything: nothing is asked, so nothing can be revoked.
+        for hour in [11, 13, 14] {
+            assert_eq!(
+                hithink.refresh_calendar_if_due(at(2026, 3, 4, hour)).await,
+                CalendarRefresh::Held
+            );
+        }
+        assert_eq!(asked(&seen).len(), 1, "one calendar read per Shanghai day");
+        assert_eq!(hithink.trading_day(at(2026, 3, 4, 14)), Ok(()));
+
+        // 4. The rollover revokes it before anything is asked, and the refused
+        // refresh leaves the new day unavailable — never yesterday's list.
+        assert_eq!(
+            hithink.refresh_calendar_if_due(thursday).await,
+            CalendarRefresh::Refused(Reason::RateLimited),
+            "envelope 429 is rate limiting, and it exhausts the bound"
+        );
+        assert_eq!(asked(&seen).len(), 1 + ATTEMPTS as usize);
+        assert_eq!(hithink.trading_day(thursday), Err(Reason::CalendarRefused));
+        assert_eq!(
+            hithink.cn_phase(thursday),
+            (Phase::Open, Calendar::Weekday),
+            "a past day's list labels nothing, and the fallback is awareness only"
+        );
+    }
+
+    /// A successful list always replaces what is held, and a list without today
+    /// is `NOT_TRADING_DAY` rather than an absence of evidence.
+    #[tokio::test]
+    async fn a_contradictory_list_replaces_and_a_holiday_blocks() {
+        let wednesday = at(2026, 3, 4, 10);
+        let thursday = at(2026, 3, 5, 10);
+        let (_dir, hithink, _seen) =
+            standin(vec![days(&["20260304", "20260305"]), days(&["20260306"])]).await;
+
+        hithink.refresh_calendar_if_due(wednesday).await;
+        assert_eq!(hithink.trading_day(wednesday), Ok(()));
+        // The next day's read contradicts it — Thursday is no longer a trading
+        // day — and the newer answer wins.
+        assert_eq!(
+            hithink.refresh_calendar_if_due(thursday).await,
+            CalendarRefresh::Adopted
+        );
+        assert_eq!(hithink.trading_day(thursday), Err(Reason::NotTradingDay));
+        assert_eq!(
+            hithink.cn_phase(thursday),
+            (Phase::Closed, Calendar::Hithink)
+        );
+    }
+
+    /// Under Yahoo the calendar is not this provider's to fetch, and nothing is
+    /// asked (§3).
+    #[tokio::test]
+    async fn yahoo_asks_for_no_calendar() {
+        let wednesday = at(2026, 3, 4, 10);
+        let (_dir, hithink, seen) = standin(vec![days(&["20260304"])]).await;
+        hithink.patch(AShareFeed::Yahoo).unwrap();
+        assert_eq!(
+            hithink.refresh_calendar_if_due(wednesday).await,
+            CalendarRefresh::NotDue
+        );
+        assert!(asked(&seen).is_empty());
+        assert_eq!(hithink.trading_day(wednesday), Err(Reason::NoCalendar));
+    }
+
+    /// One successful current-day bar per instrument per Shanghai day: held for
+    /// the day, refetched after the rollover, and retried on the poll cadence
+    /// while it fails.
+    #[tokio::test]
+    async fn bar_evidence_is_read_once_a_day_and_retried_while_it_fails() {
+        let wednesday = at(2026, 3, 4, 10);
+        let thursday = at(2026, 3, 5, 10);
+        let entry = crate::catalog::find("600519.XSHG").unwrap();
+        let other = crate::catalog::find("300750.XSHE").unwrap();
+        let refusal = (200, envelope(4001, "null"));
+        let (_dir, hithink, seen) = standin(vec![
+            bars(wednesday),
+            bars(wednesday),
+            // Thursday's first call refuses on all three attempts; the call
+            // after it succeeds.
+            refusal.clone(),
+            refusal.clone(),
+            refusal,
+            bars(thursday),
+        ])
+        .await;
+
+        // The request is F7's shape: one thscode, daily, unadjusted.
+        assert_eq!(hithink.bar_evidence(entry, wednesday).await, Ok(()));
+        let first = asked(&seen);
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].starts_with(
+                "GET /api/a-share/prices/historical?thscode=600519.SH&interval=1d&start="
+            ) && first[0].ends_with("&adjust=none"),
+            "{first:?}"
+        );
+
+        // Held for the day: the same instrument asks nothing more, while a
+        // second instrument has its own evidence to establish.
+        assert_eq!(
+            hithink.bar_evidence(entry, at(2026, 3, 4, 14)).await,
+            Ok(())
+        );
+        assert_eq!(asked(&seen).len(), 1, "one bar read per instrument per day");
+        assert_eq!(hithink.bar_evidence(other, wednesday).await, Ok(()));
+        assert_eq!(asked(&seen).len(), 2);
+
+        // The rollover clears it. The refused read answers for this call alone
+        // — `4001` exhausts the bound as rate limiting — and the next call
+        // retries and succeeds.
+        assert_eq!(
+            hithink.bar_evidence(entry, thursday).await,
+            Err(Reason::RateLimited)
+        );
+        assert_eq!(asked(&seen).len(), 2 + ATTEMPTS as usize);
+        assert_eq!(hithink.bar_evidence(entry, thursday).await, Ok(()));
+    }
+
+    /// A bar that is not the current day's proves nothing: `DATE_UNPROVEN`,
+    /// and nothing is held.
+    #[tokio::test]
+    async fn a_stale_bar_is_not_evidence() {
+        let wednesday = at(2026, 3, 4, 10);
+        let entry = crate::catalog::find("600519.XSHG").unwrap();
+        let (_dir, hithink, _seen) = standin(vec![bars(at(2026, 3, 3, 10)), bars(wednesday)]).await;
+        assert_eq!(
+            hithink.bar_evidence(entry, wednesday).await,
+            Err(Reason::DateUnproven)
+        );
+        assert_eq!(hithink.bar_evidence(entry, wednesday).await, Ok(()));
     }
 }

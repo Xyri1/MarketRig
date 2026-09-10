@@ -9,9 +9,9 @@
 //! B. Does a refused redundant calendar read revoke today's successful calendar
 //!    evidence?
 //!
-//! Every test below asserts **today's** behaviour, not the behaviour
-//! `sdd/features/a-share-engine/SPEC.md` §2.1 asks for. Where the two differ the
-//! test name says so.
+//! The spike asserted today's behaviour; slice 014 implemented §2.1, so the two
+//! answers below that recorded a defect — the unretried envelope-only 429 and
+//! the calendar with no expiry — now assert the required outcome instead.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,9 +30,10 @@ const HISTORICAL_PATH: &str = "a-share/prices/historical";
 const SNAPSHOT_QUERY: &str = "thscodes=600519.SH";
 const HISTORICAL_QUERY: &str = "thscode=600519.SH&interval=1d&adjust=none";
 
-/// 500 ms + 1 s, less scheduling slack. `BACKOFF` is a private const in
-/// `hithink.rs` with no injection seam, so this is measured, not driven.
-const BACKOFF_FLOOR: Duration = Duration::from_millis(1_400);
+/// The production waits between the three attempts. A stand-in waits almost
+/// nothing (`hithink::STANDIN_BACKOFF`), so the bound is asserted by the attempt
+/// count and this policy, never by measuring a test's own elapsed time.
+const BACKOFF_POLICY: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(1)];
 
 /// What one bounded call ended as: the envelope `code` it returned, or the
 /// attempt count in its `Failure::Unreachable`.
@@ -171,67 +172,60 @@ async fn http_429_twice_then_200_retries_on_all_three_endpoints() {
     let refusal = (429, envelope(429, "null"));
     let good = (200, envelope(0, r#"{"item":[]}"#));
 
-    let (n, outcome, elapsed) =
+    let (n, outcome, _elapsed) =
         snapshot(vec![refusal.clone(), refusal.clone(), good.clone()]).await;
     assert_eq!((n, outcome), (3, Ok(0)), "snapshot");
-    assert!(elapsed >= BACKOFF_FLOOR, "snapshot backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
-    let (n, outcome, elapsed) =
+    let (n, outcome, _elapsed) =
         historical(vec![refusal.clone(), refusal.clone(), good.clone()]).await;
     assert_eq!((n, outcome), (3, Ok(0)), "historical bar");
-    assert!(elapsed >= BACKOFF_FLOOR, "historical backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
     let wednesday = at(2026, 3, 4, 10);
-    let (n, adopted, elapsed) = calendar(
+    let (n, adopted, _elapsed) = calendar(
         vec![refusal.clone(), refusal, (200, days(wednesday))],
         wednesday,
     )
     .await;
     assert_eq!((n, adopted), (3, true), "calendar");
-    assert!(elapsed >= BACKOFF_FLOOR, "calendar backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 }
 
-/// (ii) HTTP 200 with envelope `code: 429`: **not** retried today. One attempt,
-/// the refusal handed straight back to the caller.
-///
-/// This is the FAIL against `sdd/features/a-share-engine/SPEC.md` §2.1 ("Back
-/// off on HTTP 429 or envelope 429/4001 using the existing three-attempt
-/// bound"). `RATE_LIMITED` is `4001` (`hithink.rs:47`) and `RETRYABLE_SERVER` is
-/// `5001..=5003` (`hithink.rs:49`); `429` is in neither, so `attempt`
-/// (`hithink.rs:488`) returns `Once::Done`.
+/// (ii) HTTP 200 with envelope `code: 429` is rate limiting, not an answer
+/// (F7 §3): it takes the same bounded retry path as HTTP 429 and `4001`, on all
+/// three endpoints (`sdd/features/a-share-engine/SPEC.md` §2.1). The spike found
+/// this unretried; `RATE_LIMITED` now carries both codes.
 #[tokio::test]
-async fn envelope_only_429_is_not_retried_today() {
+async fn envelope_only_429_takes_the_bounded_retry_path() {
     let refusal = (200, envelope(429, "null"));
     let good = (200, envelope(0, r#"{"item":[]}"#));
 
-    let (n, outcome, elapsed) =
+    let (n, outcome, _elapsed) =
         snapshot(vec![refusal.clone(), refusal.clone(), good.clone()]).await;
     assert_eq!(
         (n, outcome),
-        (1, Ok(429)),
-        "the envelope-only 429 is a delivered answer, not a retry"
+        (3, Ok(0)),
+        "two envelope-only 429s are retried, and the third attempt answers"
     );
-    assert!(
-        elapsed < Duration::from_millis(400),
-        "no backoff {elapsed:?}"
-    );
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
     let (n, outcome, _) = historical(vec![refusal.clone(), refusal.clone(), good]).await;
-    assert_eq!(
-        (n, outcome),
-        (1, Ok(429)),
-        "the passthrough hands the refusal to the agent verbatim"
-    );
+    assert_eq!((n, outcome), (3, Ok(0)), "historical bar");
 
-    // The calendar's own `code != 0` arm logs and returns, so one refusal
-    // leaves the day with no list at all and the WEEKDAY fallback standing.
+    // And the calendar adopts the answer the retry reached.
     let wednesday = at(2026, 3, 4, 10);
     let (n, adopted, _) = calendar(
         vec![refusal.clone(), refusal, (200, days(wednesday))],
         wednesday,
     )
     .await;
-    assert_eq!((n, adopted), (1, false), "calendar");
+    assert_eq!((n, adopted), (3, true), "calendar");
+
+    // Exhaustion is the endpoint's existing failure outcome, never a replay of
+    // anything: three attempts, then `Failure::Unreachable`.
+    let (n, outcome, _) = snapshot(vec![(200, envelope(429, "null"))]).await;
+    assert_eq!((n, outcome), (3, Err(ATTEMPTS)), "snapshot exhaustion");
 }
 
 /// (iii) Envelope `4001` twice, then a good body: the documented retryable
@@ -241,10 +235,10 @@ async fn envelope_4001_twice_then_good_retries_on_all_three_endpoints() {
     let refusal = (200, envelope(4001, "null"));
     let good = (200, envelope(0, r#"{"item":[]}"#));
 
-    let (n, outcome, elapsed) =
+    let (n, outcome, _elapsed) =
         snapshot(vec![refusal.clone(), refusal.clone(), good.clone()]).await;
     assert_eq!((n, outcome), (3, Ok(0)), "snapshot");
-    assert!(elapsed >= BACKOFF_FLOOR, "snapshot backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
     let (n, outcome, _) = historical(vec![refusal.clone(), refusal.clone(), good]).await;
     assert_eq!((n, outcome), (3, Ok(0)), "historical bar");
@@ -265,55 +259,57 @@ async fn three_refusals_exhaust_the_bound_on_all_three_endpoints() {
     let refusal = (429, envelope(429, "null"));
     assert_eq!(ATTEMPTS, 3);
 
-    let (n, outcome, elapsed) = snapshot(vec![refusal.clone()]).await;
+    let (n, outcome, _elapsed) = snapshot(vec![refusal.clone()]).await;
     assert_eq!((n, outcome), (3, Err(ATTEMPTS)), "snapshot");
-    assert!(elapsed >= BACKOFF_FLOOR, "snapshot backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
-    let (n, outcome, elapsed) = historical(vec![refusal.clone()]).await;
+    let (n, outcome, _elapsed) = historical(vec![refusal.clone()]).await;
     assert_eq!(
         (n, outcome),
         (3, Err(ATTEMPTS)),
         "historical bar; RESEARCH_UNREACHABLE"
     );
-    assert!(elapsed >= BACKOFF_FLOOR, "historical backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 
     // Exhaustion and one refusal are indistinguishable to the calendar: both
     // just leave the list unset.
     let wednesday = at(2026, 3, 4, 10);
-    let (n, adopted, elapsed) = calendar(vec![refusal], wednesday).await;
+    let (n, adopted, _elapsed) = calendar(vec![refusal], wednesday).await;
     assert_eq!((n, adopted), (3, false), "calendar");
-    assert!(elapsed >= BACKOFF_FLOOR, "calendar backoff {elapsed:?}");
+    assert_eq!(crate::hithink::BACKOFF, BACKOFF_POLICY);
 }
 
 // ---------------------------------------------------------------------------
 // B — what a refused redundant calendar read does to today's evidence
 // ---------------------------------------------------------------------------
 
-/// Today's whole calendar story, in one pass.
+/// Today's whole calendar story, in one pass — §2.1's rule, which the spike
+/// found absent and slice 014 installed.
 ///
-/// 1. With no list, a session hour is `(OPEN, WEEKDAY)` — there is no
-///    start-unavailable readiness state (`hithink.rs:678`).
-/// 2. A positive list is adopted for the Shanghai day.
+/// 1. With no list the day starts unavailable: the weekday rule may label the
+///    session OPEN, but it authorizes no execution (`NO_CALENDAR`).
+/// 2. A positive list is adopted for the Shanghai day and is what opens it.
 /// 3. Within that day no redundant read is issued at all, so no refusal can
-///    revoke it: `refresh_calendar_if_due` is not due (`hithink.rs:694`).
-/// 4. Across the rollover the refusal keeps the **stale** set instead, which is
-///    the opposite failure from the one §2.1 guards against.
-/// 5. Nothing CN-execution-relevant flips either way, because today no CN
-///    execution path consults the calendar: `cn_phase`'s only callers are
-///    `feed.rs:537 phase_of` (the awareness `market_phase`/`calendar` fields)
-///    and `node.rs:812 poll_cn` (the poll cadence).
+///    revoke it.
+/// 4. Across the rollover the stale set is dropped before anything is asked,
+///    and the refusal leaves the new day unavailable — never yesterday's list.
 #[tokio::test]
-async fn a_refusal_cannot_revoke_todays_calendar_because_no_second_read_is_issued() {
+async fn a_refusal_never_revokes_todays_calendar_and_the_rollover_always_does() {
     let wednesday = at(2026, 3, 4, 10);
     let thursday = at(2026, 3, 5, 10);
     let (_dir, hithink, seen) =
         standin(vec![(200, days(wednesday)), (429, envelope(429, "null"))]).await;
 
-    // 1. No list yet: the weekday rule reports the session OPEN.
+    // 1. No list yet: the weekday rule reports the session OPEN, and execution
+    //    is unavailable all the same.
     assert_eq!(
         hithink.cn_phase(wednesday),
         (Phase::Open, Calendar::Weekday),
-        "no calendar evidence still reads OPEN (§2.1 wants UNAVAILABLE/NO_CALENDAR)"
+        "the fallback is awareness only"
+    );
+    assert_eq!(
+        hithink.trading_day(wednesday),
+        Err(crate::hithink::Reason::NoCalendar)
     );
 
     // 2. The day's one read succeeds and is adopted.
@@ -323,6 +319,7 @@ async fn a_refusal_cannot_revoke_todays_calendar_because_no_second_read_is_issue
         hithink.cn_phase(wednesday),
         (Phase::Open, Calendar::Hithink)
     );
+    assert_eq!(hithink.trading_day(wednesday), Ok(()));
 
     // 3. Later the same Shanghai day, with the stand-in now refusing every
     //    request: no request is issued, so the evidence cannot be revoked.
@@ -334,20 +331,23 @@ async fn a_refusal_cannot_revoke_todays_calendar_because_no_second_read_is_issue
         1,
         "one calendar read per Shanghai day, refusal or not"
     );
-    assert_eq!(
-        hithink.cn_phase(at(2026, 3, 4, 14)),
-        (Phase::Open, Calendar::Hithink),
-        "today's evidence stands"
-    );
+    assert_eq!(hithink.trading_day(at(2026, 3, 4, 14)), Ok(()));
     assert!(hithink.feed_ready(), "a 429 never touches the provider row");
 
-    // 4. Rollover: now it is due, the refusal exhausts, and yesterday's set is
-    //    kept and still consulted — retention with no expiry.
-    hithink.refresh_calendar_if_due(thursday).await;
+    // 4. Rollover: the stale set is gone before the read, the refusal exhausts
+    //    the bound as rate limiting, and the new day is unavailable.
+    assert_eq!(
+        hithink.refresh_calendar_if_due(thursday).await,
+        crate::hithink::CalendarRefresh::Refused(crate::hithink::Reason::RateLimited)
+    );
     assert_eq!(after_validation(&seen).len(), 1 + ATTEMPTS as usize);
     assert_eq!(
         hithink.cn_phase(thursday),
-        (Phase::Closed, Calendar::Hithink),
-        "the stale set labels the new day, and is named HITHINK while being yesterday's"
+        (Phase::Open, Calendar::Weekday),
+        "yesterday's set labels nothing today"
+    );
+    assert_eq!(
+        hithink.trading_day(thursday),
+        Err(crate::hithink::Reason::CalendarRefused)
     );
 }

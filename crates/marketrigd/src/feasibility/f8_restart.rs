@@ -46,8 +46,8 @@
 //! - [`session_end_cancels_with_a_baseline_standing`]
 //! - [`approval_takes_the_baseline_at_decide_time`]
 //! - [`two_competing_sells_survive_a_restart`]
-//! - [`restored_partial_fill_duplicates_order_accepted_and_drops_history`] — R1's
-//!   retained regression, as its own named test.
+//! - [`restored_partial_fill_keeps_one_acceptance_and_replays`] — R1's retained
+//!   regression, now asserting the corrected behaviour (slice 014 step 1).
 //!
 //! Platform: macOS only; no Windows run.
 
@@ -1536,18 +1536,15 @@ fn two_competing_sells_survive_a_restart() {
 /// sorts before the fill, and `history_orders` can no longer rebuild the chain
 /// and returns `[]`.
 ///
-/// This test asserts **today's defective behaviour**, so it stays runnable and
-/// fails the day the defect is fixed.
-///
-/// `ponytail:` the required fix is slice 012's, generalized: `capture_order`
-/// must not store an event the restored chain already carries (the re-handed
-/// `OrderSubmitted`/`OrderAccepted` of a restored order), or `history_orders`
-/// must rebuild from a de-duplicated chain. AE-9 executions use the full
-/// synthetic quantity and so cannot produce a partial fill of their own, but a
-/// partial fill can still exist from a Yahoo-mode desk or a pre-AE-9 order, so
-/// the regression is retained rather than dropped.
+/// **Fixed in slice 014 step 1**, and asserted here as the correct outcome:
+/// `crate::trade::capture_order` stores an order's `OrderSubmitted` and
+/// `OrderAccepted` exactly once, so the re-hand's repeat is not new history, the
+/// stored chain replays, and the fill is still in it. AE-9 executions use the
+/// full synthetic quantity and so cannot produce a partial fill of their own,
+/// but a partial fill can still exist from a Yahoo-mode desk, so the scenario is
+/// retained.
 #[test]
-fn restored_partial_fill_duplicates_order_accepted_and_drops_history() {
+fn restored_partial_fill_keeps_one_acceptance_and_replays() {
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = open_desk(&store, "f8r-partial", CN_0935);
     let desk_id = handle.desk_id().to_owned();
@@ -1581,7 +1578,8 @@ fn restored_partial_fill_duplicates_order_accepted_and_drops_history() {
     assert_eq!(restored.len(), 1, "{restored:?}");
     assert_eq!(
         restored[0]["status"], "ACCEPTED",
-        "DEFECT: a partially filled order comes back ACCEPTED"
+        "the node's own live view: `(PartiallyFilled, Accepted)` is a legal \
+         transition, so the re-hand's acceptance is applied"
     );
     assert_eq!(restored[0]["filled_quantity"], "60");
     assert_eq!(
@@ -1590,15 +1588,13 @@ fn restored_partial_fill_duplicates_order_accepted_and_drops_history() {
             "OrderInitialized",
             "OrderSubmitted",
             "OrderAccepted",
-            "OrderAccepted",
             "OrderFilled"
         ],
-        "DEFECT: restoration replayed a duplicate OrderAccepted"
+        "one acceptance, and the fill is still in the chain"
     );
     let history: Vec<Value> = trade::history_orders(&store, &desk_id).expect("the history reads");
-    assert!(
-        history.is_empty(),
-        "DEFECT: the duplicated chain drops out of history_orders: {history:?}"
-    );
+    assert_eq!(history.len(), 1, "the chain replays: {history:?}");
+    assert_eq!(history[0]["status"], "PARTIALLY_FILLED");
+    assert_eq!(history[0]["filled_quantity"], "60");
     registry.stop_all();
 }

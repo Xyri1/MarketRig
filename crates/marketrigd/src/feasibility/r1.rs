@@ -618,29 +618,25 @@ fn s2_partial_fill_releases_only_the_unfilled_reservation() {
     assert_eq!(restored_order[0]["status"], "ACCEPTED");
     assert_eq!(restored_order[0]["filled_quantity"], "60");
     assert_eq!(restored_order[0]["quantity"], "100");
-    // 2. Because that event is applied it is also **published**, so
-    //    `crate::trade::capture_order` stores a second `OrderAccepted` — stamped
-    //    at the restarted node's clock, which sorts it *before* the fill — and
-    //    the stored chain stops replaying. This is the slice-012 family of
-    //    defect (a stored chain `OrderAny::from_events` cannot rebuild), for
-    //    partially filled orders across a restart.
+    // 2. Because that event is applied it is also **published**. Storing it
+    //    would put a second `OrderAccepted` in the chain — stamped at the
+    //    restarted node's clock, which sorts it *before* the fill — and the
+    //    stored chain would stop replaying. Slice 014 step 1 fixed that in
+    //    `crate::trade::capture_order`: an order is submitted and accepted once,
+    //    and a re-hand's repeat is not new history.
     assert_eq!(
         kinds(&store, &desk_id, "r1-s2-1"),
         vec![
             "OrderInitialized",
             "OrderSubmitted",
             "OrderAccepted",
-            "OrderAccepted",
             "OrderFilled"
         ],
-        "DEFECT (separate from R1): restoration replayed a duplicate OrderAccepted"
+        "restoration added no acceptance of its own"
     );
-    assert!(
-        trade::history_orders(&store, &desk_id)
-            .expect("the history reads")
-            .is_empty(),
-        "DEFECT (separate from R1): the duplicated chain drops out of history_orders"
-    );
+    let replayed = trade::history_orders(&store, &desk_id).expect("the history reads");
+    assert_eq!(replayed.len(), 1, "the chain still replays: {replayed:?}");
+    assert_eq!(replayed[0]["filled_quantity"], "60");
 
     let before_cancel = balance_cny(&node, &desk_id);
     cancel(&store, &registry, &desk_id, "r1-s2-1", "r1-s2-cancel");

@@ -206,7 +206,15 @@ pub fn openapi() -> utoipa::openapi::OpenApi {
 /// sockets that check it themselves.
 pub fn router(state: ApiState) -> Router {
     let state = Arc::new(state);
-    guarded()
+    let mut guarded = guarded();
+    // The controlled-clock seam's own route, and only under it: it is not part
+    // of the product surface, so it is registered plainly and stays out of the
+    // OpenAPI document (§6.1, as the sockets do). Without the seam it is not
+    // routed at all, and a caller gets the router's own 404.
+    if crate::node::test_clock_start_ns().is_some() {
+        guarded = guarded.route("/test/clock", axum::routing::put(test_clock));
+    }
+    guarded
         .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
         .merge(unguarded())
         .with_state(state)
@@ -2299,6 +2307,29 @@ async fn decide_approval(
 async fn quit(State(state): State<Arc<ApiState>>) -> Response {
     let _ = state.quit.try_send(());
     (StatusCode::ACCEPTED, Json(serde_json::json!({}))).into_response()
+}
+
+/// `PUT /test/clock {"now_ns"}` — the controlled-clock seam's own route
+/// (feature SPEC `a-share-engine` §6). It advances every started node's clock to
+/// the named instant and dispatches the time events that releases, which is how
+/// the harness drives a session boundary without waiting for wall-clock time.
+/// Registered only under the seam; it is not part of the product surface and is
+/// absent from the OpenAPI document.
+async fn test_clock(State(state): State<Arc<ApiState>>, body: String) -> Response {
+    let now_ns = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|body| body.get("now_ns")?.as_u64());
+    let Some(now_ns) = now_ns else {
+        return envelope(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_FAILED",
+            "The request body must be a JSON object with a now_ns nanosecond instant.".to_string(),
+        );
+    };
+    match state.registry.advance_all(now_ns) {
+        Ok(now_ns) => Json(serde_json::json!({ "now_ns": now_ns })).into_response(),
+        Err(e) => envelope(StatusCode::SERVICE_UNAVAILABLE, e.code(), e.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------

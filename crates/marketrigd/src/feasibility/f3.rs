@@ -1037,16 +1037,22 @@ fn a_closed_market_does_not_survive_a_restart() {
 
     let (registry, node) = restart(&store, None, &desk_id);
     assert_eq!(status(&node, ORDER), OrderStatus::Accepted);
-    assert!(
+    // The snapshot carries no status at all; what the restarted node holds is
+    // the one `crate::node`'s start-time CN reconciliation published for the
+    // restart instant — the product change this finding asked for. The restart
+    // is at 09:35 (harness limit), so it is `Trading`, and day D's `Close` is
+    // gone either way.
+    assert_eq!(
         node.call(|context| {
             context
                 .cache
                 .borrow()
                 .instrument_status(&InstrumentId::from("600519.XSHG"))
-                .is_none()
+                .map(|cached| cached.action)
         })
         .unwrap(),
-        "and no status came back with the snapshot"
+        Some(MarketStatusAction::Trading),
+        "node start republished the session gate for the restart instant"
     );
 
     advance(&node, CN_1530);

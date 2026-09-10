@@ -143,6 +143,7 @@ impl Feed {
                                 "/hithink/api/a-share/calendar/trading-days",
                                 get(ht_calendar),
                             )
+                            .route("/hithink/api/a-share/prices/historical", get(ht_historical))
                             .route(
                                 "/hithink/api/a-share/financials/income-statements",
                                 get(ht_income),
@@ -573,6 +574,50 @@ async fn ht_calendar(
         r#"{{"code":0,"message":"success","request_id":"gate-calendar","data":{{"timestamp":0,"item":[{}]}}}}"#,
         items.join(",")
     ))
+}
+
+/// `GET /api/a-share/prices/historical?thscode=…` — the current-day unadjusted
+/// daily bar the readiness rule dates an observation by (`a-share-engine` SPEC
+/// §2.1): two bars, the newest at today's Asia/Shanghai midnight.
+async fn ht_historical(
+    State(script): State<HithinkScript>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let mut script = script.lock().unwrap_or_else(PoisonError::into_inner);
+    scripted(
+        &mut script,
+        "a-share/prices/historical",
+        &query,
+        &headers,
+        false,
+    );
+    let code = query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|p| p.strip_prefix("thscode=").map(str::to_owned))
+        .unwrap_or_default();
+    let last = script
+        .prices
+        .get(code.as_str())
+        .copied()
+        .unwrap_or(CN_PRICE);
+    let today_ms = shanghai_midnight_s() * 1_000;
+    json_body(format!(
+        r#"{{"code":0,"message":"success","request_id":"gate-historical","data":{{"timestamp":{today_ms},"item":[
+           {{"date_ms":{},"close_price":{}}},
+           {{"date_ms":{today_ms},"close_price":{}}}]}}}}"#,
+        today_ms - 86_400_000,
+        decimal(last - CN_STEP),
+        decimal(last)
+    ))
+}
+
+/// Today's Asia/Shanghai midnight, as a Unix second — what a current-day bar's
+/// `date_ms` carries (F7 §2.2).
+fn shanghai_midnight_s() -> i64 {
+    let now = crate::now_secs() as i64;
+    (now + 8 * 3_600) / 86_400 * 86_400 - 8 * 3_600
 }
 
 /// `GET /api/a-share/financials/income-statements` — one fixed envelope, and
