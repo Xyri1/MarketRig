@@ -53,7 +53,7 @@ impl Board {
     }
 
     /// The per-order share cap (§3.2).
-    pub fn limit_cap(self, kind: OrderKind) -> u64 {
+    pub fn share_cap(self, kind: OrderKind) -> u64 {
         match (self, kind) {
             (Board::Main, _) => 1_000_000,
             (Board::ChiNext, OrderKind::Limit) => 300_000,
@@ -102,6 +102,24 @@ pub struct Entry {
     pub price_increment: &'static str,
     /// The order-quantity multiple.
     pub lot_size: u32,
+}
+
+impl Entry {
+    /// This entry's inclusive daily band around a provider reference — the one
+    /// derivation every caller uses (§2.2). `None` unless the entry names a
+    /// board and the reference is positive, which is the same thing as "this
+    /// instrument has no band".
+    pub fn band(&self, prev_close: Decimal) -> Option<(Decimal, Decimal)> {
+        let board = self.board?;
+        if prev_close <= Decimal::ZERO {
+            return None;
+        }
+        let tick: Decimal = self
+            .price_increment
+            .parse()
+            .expect("catalog tick is decimal text (catalog::entries_valid)");
+        Some(band(prev_close, tick, board))
+    }
 }
 
 /// Column order of the [`ENTRIES`] table below — the arguments *are* the
@@ -410,7 +428,7 @@ fn band_and_caps() {
         (Board::Main, 1_000_000, 1_000_000),
         (Board::ChiNext, 300_000, 150_000),
     ] {
-        assert_eq!(board.limit_cap(OrderKind::Limit), limit);
-        assert_eq!(board.limit_cap(OrderKind::Market), market);
+        assert_eq!(board.share_cap(OrderKind::Limit), limit);
+        assert_eq!(board.share_cap(OrderKind::Market), market);
     }
 }

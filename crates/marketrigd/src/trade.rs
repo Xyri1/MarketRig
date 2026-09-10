@@ -708,13 +708,11 @@ fn validate(body: &str) -> Result<(String, Form), TradeError> {
             OrderType::Limit => catalog::OrderKind::Limit,
             _ => catalog::OrderKind::Market,
         };
-        if crate::cn::over_cap(board, kind, quantity) {
+        let cap = board.share_cap(kind);
+        if quantity > Decimal::from(cap) {
             return Err(TradeError::Invalid(format!(
-                "quantity {:?} exceeds the {} cap of {} shares for {}",
-                body.quantity,
-                body.order_type,
-                board.limit_cap(kind),
-                entry.instrument_id
+                "quantity {:?} exceeds the {} cap of {cap} shares for {}",
+                body.quantity, body.order_type, entry.instrument_id
             )));
         }
     }

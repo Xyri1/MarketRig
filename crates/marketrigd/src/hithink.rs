@@ -120,14 +120,14 @@ pub enum Calendar {
 /// Why CN execution is not available, in MarketRig's own vocabulary
 /// (`a-share-engine` SPEC §2.1, §2.3, per AE-3, AE-8). One string enum shared by
 /// the readiness checks here, the per-node execution state, and the order
-/// refusals; `YahooSimplified` is a policy label rather than a block.
+/// refusals. Every variant is a block: out-of-session is `CLOSED`/`PAUSED` with
+/// no reason at all, and the fill policy is its own field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Reason {
     NoCalendar,
     CalendarRefused,
     NotTradingDay,
-    OutOfSession,
     DateUnproven,
     NoReference,
     ReferenceChanged,
@@ -137,7 +137,6 @@ pub enum Reason {
     PublicationFailed,
     PublicationPending,
     NodeNotStarted,
-    YahooSimplified,
 }
 
 impl Reason {
@@ -146,7 +145,6 @@ impl Reason {
             Reason::NoCalendar => "NO_CALENDAR",
             Reason::CalendarRefused => "CALENDAR_REFUSED",
             Reason::NotTradingDay => "NOT_TRADING_DAY",
-            Reason::OutOfSession => "OUT_OF_SESSION",
             Reason::DateUnproven => "DATE_UNPROVEN",
             Reason::NoReference => "NO_REFERENCE",
             Reason::ReferenceChanged => "REFERENCE_CHANGED",
@@ -156,7 +154,6 @@ impl Reason {
             Reason::PublicationFailed => "PUBLICATION_FAILED",
             Reason::PublicationPending => "PUBLICATION_PENDING",
             Reason::NodeNotStarted => "NODE_NOT_STARTED",
-            Reason::YahooSimplified => "YAHOO_SIMPLIFIED",
         }
     }
 }

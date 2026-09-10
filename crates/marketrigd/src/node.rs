@@ -1243,16 +1243,10 @@ async fn cn_cycle(
             Err(reason) => Err(reason),
         };
         // The resting set is read after every await and immediately before the
-        // rule runs, so an order admitted in between is baselined, not released.
-        let at = now();
-        let plan = {
-            let resting = cn::resting_limits(
-                &cache.borrow(),
-                InstrumentId::from(item.entry.instrument_id),
-            );
-            cn.borrow_mut().observe(&item, evidence, at, &resting)
-        };
-        cn::execute(item.entry, plan, cache, cn, at).await;
+        // rule runs, so an order admitted in between is baselined, not released
+        // — and an instrument a MARKET admission owns right now sits the cycle
+        // out rather than republishing over its sized book (§2.5, F8 item 2).
+        cn::cycle_observation(&item, evidence, cache, cn, now()).await;
     }
     Ok(())
 }

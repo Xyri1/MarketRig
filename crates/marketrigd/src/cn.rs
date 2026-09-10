@@ -37,7 +37,7 @@ use nautilus_model::orders::{Order, OrderAny};
 use nautilus_model::types::{Price, Quantity};
 use rust_decimal::Decimal;
 
-use crate::catalog::{Board, Entry, OrderKind};
+use crate::catalog::Entry;
 use crate::feed::Observed;
 use crate::hithink::{AShareFeed, Reason};
 use crate::node::{Node, NodeContext};
@@ -73,9 +73,10 @@ fn shanghai(at_ns: u64) -> DateTime<Tz> {
 }
 
 /// The Shanghai calendar date of an instant, `yyyyMMdd` — the form the day
-/// comparisons and the provider's own calendar use.
+/// comparisons and the provider's own calendar use. One derivation, shared with
+/// the provider's own dating of its answers.
 pub fn shanghai_date(at_ns: u64) -> String {
-    shanghai(at_ns).format("%Y%m%d").to_string()
+    crate::hithink::shanghai_date(at_ns.min(i64::MAX as u64) as i64)
 }
 
 /// The instant of `hour:minute` Asia/Shanghai on the date `at_ns` falls in.
@@ -398,6 +399,16 @@ pub struct CnExec {
     /// `controlled_registry_uncalendared` and get the production default back.
     #[cfg(test)]
     pub assume_calendar: bool,
+    /// The second module-check seam, and only that: does a boundary alert sweep
+    /// the orders past their day lifetime? The `feasibility` checks wind one
+    /// node's clock across Shanghai days without ever restarting it — a state
+    /// production cannot reach, because `Registry::start` reconciles every
+    /// prior-day CN order before the first poll — so the sweep would terminate
+    /// the very resting orders they characterize the sandbox with. The checks
+    /// that *are* about the session boundaries turn it on ([`desk`]); production
+    /// always sweeps.
+    #[cfg(test)]
+    pub sweep: bool,
     per: HashMap<InstrumentId, Inst>,
 }
 
@@ -408,6 +419,8 @@ impl Default for CnExec {
             feed: AShareFeed::Yahoo,
             #[cfg(test)]
             assume_calendar: false,
+            #[cfg(test)]
+            sweep: false,
             per: HashMap::new(),
         }
     }
@@ -426,6 +439,15 @@ impl CnExec {
             return Ok(());
         }
         day
+    }
+
+    /// Does a boundary end the day for the orders that outlived it? Always, in
+    /// production; see [`CnExec::sweep`] for the module-check seam.
+    fn sweeps(&self) -> bool {
+        #[cfg(test)]
+        return self.sweep;
+        #[cfg(not(test))]
+        true
     }
 
     pub fn inst(&mut self, instrument_id: InstrumentId) -> &mut Inst {
@@ -613,10 +635,7 @@ impl CnExec {
         let instrument_id = InstrumentId::from(entry.instrument_id);
         observed.ok?;
         evidence?;
-        let board = entry.board.ok_or(Reason::NoReference)?;
-        if observed.prev_close <= Decimal::ZERO {
-            return Err(Reason::NoReference);
-        }
+        let (limit_up, limit_down) = entry.band(observed.prev_close).ok_or(Reason::NoReference)?;
         {
             let inst = self.inst(instrument_id);
             // A reference that changed during the day blocks that instrument
@@ -633,11 +652,6 @@ impl CnExec {
                 return Err(Reason::ReferenceChanged);
             }
         }
-        let tick: Decimal = entry
-            .price_increment
-            .parse()
-            .expect("catalog tick is decimal text (catalog::entries_valid)");
-        let (limit_up, limit_down) = crate::catalog::band(observed.prev_close, tick, board);
         Ok(Ready {
             prev_close: observed.prev_close,
             limit_up,
@@ -823,6 +837,43 @@ pub fn block(exec: &mut CnExec) {
     }
 }
 
+/// One poll cycle's whole treatment of one CN item, on the node thread: read
+/// the resting set, apply the AE-9 rule, publish what it planned — unless a
+/// MARKET admission owns the instrument right now.
+///
+/// The critical section is two-directional (F8 item 2). A MARKET's sized book
+/// stands from [`size_for_market`] until [`restore_idle`], across the off-thread
+/// `confirm`, `place` and `settle`; a cycle that observed in between would
+/// advance the baselines *and* republish an idle or crossing book over it, and
+/// the MARKET would then meet a zero-size book after the resting LIMITs its own
+/// publication already filled.
+///
+/// So a busy instrument sits the cycle out **before** [`CnExec::observe`] runs:
+/// nothing is observed, so no `seq` or `prev_volume` advance is lost, and the
+/// next cycle judges its fresher snapshot against the same baselines it would
+/// have. The awareness row this snapshot already wrote stands either way, and
+/// the busy window is a single order's placement — bounded by the same timeout
+/// [`admit`] waits out.
+pub async fn cycle_observation(
+    observed: &Observed,
+    evidence: Result<(), Reason>,
+    cache: &CacheView,
+    exec: &Exec,
+    at_ns: u64,
+) {
+    let entry = observed.entry;
+    let instrument_id = InstrumentId::from(entry.instrument_id);
+    if exec.borrow_mut().inst(instrument_id).busy {
+        return;
+    }
+    let plan = {
+        let resting = resting_limits(&cache.borrow(), instrument_id);
+        exec.borrow_mut()
+            .observe(observed, evidence, at_ns, &resting)
+    };
+    execute(entry, plan, cache, exec, at_ns).await;
+}
+
 /// Publishes what one observation planned, on the node thread, from the polling
 /// task (§2.5). A crossing book is up for exactly one confirmed tick with the
 /// instrument marked busy, and the idle book is restored and confirmed before
@@ -996,12 +1047,27 @@ where
         let outcome = node
             .call(move |context| {
                 {
+                    let now_ns = context.clock.borrow().timestamp_ns().as_u64();
                     let mut exec = context.cn.borrow_mut();
                     let inst = exec.inst(instrument_id);
                     if inst.busy {
                         return Err(Reason::PublicationPending);
                     }
-                    inst.readiness?;
+                    // The pre-check must answer with the readiness [`check`]
+                    // will, or an approval passes here, records its decision,
+                    // and is then refused by `check` — which §5.2 forbids: an
+                    // unavailable instrument leaves the action pending with no
+                    // decision at all. Inside a session that is `ready_at`,
+                    // which reads held evidence from an earlier Shanghai date
+                    // as `NO_CALENDAR` (§2.1). Outside one it is the raw
+                    // readiness, so `check`'s `ORDER_INVALID` for the session
+                    // window still wins over a `MARKET_UNAVAILABLE` that is
+                    // only a rollover because the market is shut (gate A1).
+                    if in_session(now_ns) {
+                        inst.ready_at(now_ns)?;
+                    } else {
+                        inst.readiness?;
+                    }
                 }
                 Ok(attempt(context))
             })
@@ -1323,14 +1389,15 @@ fn arm(
 ) {
     let at = next_boundary_ns(now_ns);
     let again = (Rc::clone(&clock), cache.clone(), Rc::clone(&exec));
-    let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |event| {
+    let callback: Rc<dyn Fn(TimeEvent)> = Rc::new(move |_event| {
         let (clock, cache, exec) = &again;
-        // A cancel is stamped with the *alert's* instant, which is the boundary
-        // the day lifetime ends at; the session gate and the next alert are read
-        // from the clock's own, so a clock that jumped over several boundaries
-        // still lands on the status it is actually in.
+        // Everything a boundary decides — the gate, the expiry sweep, the
+        // cancel stamps and the next alert — reads the clock's own instant, not
+        // the alert's: one clock step can cross several boundaries (a jump, a
+        // suspended laptop) and only one alert is ever armed, so the alert that
+        // fires says nothing about which boundaries were passed.
         let now = clock.borrow().timestamp_ns().as_u64();
-        boundary(cache, exec, trader_id, event.ts_event.as_u64(), now);
+        boundary(cache, exec, trader_id, now);
         arm(
             Rc::clone(clock),
             cache.clone(),
@@ -1350,36 +1417,40 @@ fn arm(
 }
 
 /// What a boundary does, on the node thread and without a quote: re-gate every
-/// CN instrument, and at 14:57 terminate every remaining CN order (§5.1).
-fn boundary(cache: &CacheView, exec: &Exec, trader_id: TraderId, at_ns: u64, now_ns: u64) {
+/// CN instrument, and terminate every CN order that has outlived its trading
+/// day (§5.1).
+///
+/// The sweep runs at *every* boundary, 09:30 included, and asks [`expired`] per
+/// order rather than asking which boundary fired: a clock that stepped from
+/// 11:00 to 15:30, or a daemon that slept overnight, fires whichever single
+/// alert was armed, and the orders it stepped over must still end their day.
+fn boundary(cache: &CacheView, exec: &Exec, trader_id: TraderId, now_ns: u64) {
     {
         let mut exec = exec.borrow_mut();
         for entry in crate::feed::cn_entries() {
             gate(&mut exec, entry, now_ns);
         }
+        if !exec.sweeps() {
+            return;
+        }
     }
-    if at_ns < deadline_ns(at_ns) {
-        return;
-    }
+    // The full order list filtered `!is_closed()`, not `orders_open`, which
+    // excludes `INITIALIZED` — the same reason [`sellable`] reads it that way.
     let expiring: Vec<OrderAny> = cache
         .borrow()
-        .orders_open(None, None, None, None, None)
+        .orders(None, None, None, None, None)
         .into_iter()
         .filter(|order| {
-            crate::catalog::find(order.instrument_id().to_string().as_str())
-                .is_some_and(|entry| entry.market == crate::catalog::Market::Cn)
-                && expired(order, at_ns)
+            !order.is_closed()
+                && crate::catalog::find(order.instrument_id().to_string().as_str())
+                    .is_some_and(|entry| entry.market == crate::catalog::Market::Cn)
+                && expired(order, now_ns)
         })
         .map(|order| order.cloned())
         .collect();
     for order in &expiring {
-        crate::trade::cancel_on_node(trader_id, order, at_ns);
+        crate::trade::cancel_on_node(trader_id, order, now_ns);
     }
-}
-
-/// The board cap for a quantity and order type (§3.2).
-pub fn over_cap(board: Board, kind: OrderKind, quantity: Decimal) -> bool {
-    quantity > Decimal::from(board.limit_cap(kind))
 }
 
 // ---------------------------------------------------------------------------
@@ -1420,8 +1491,13 @@ fn desk(
 ) -> (Registry, crate::node::ClockHandle, Arc<Node>) {
     let (registry, handle) = controlled_registry(store, None, name, start_ns);
     let node = registry.ensure(handle.desk_id()).expect("the node starts");
-    node.call(|context| context.cn.borrow_mut().feed = AShareFeed::Hithink)
-        .expect("the node answers");
+    node.call(|context| {
+        let mut exec = context.cn.borrow_mut();
+        exec.feed = AShareFeed::Hithink;
+        // A CN desk under the production day-lifetime rule.
+        exec.sweep = true;
+    })
+    .expect("the node answers");
     (registry, handle, node)
 }
 
@@ -1439,26 +1515,25 @@ fn snapshot(entry: &'static Entry, last: &str, prev_close: &str, volume: u64) ->
     }
 }
 
-/// Runs the production observation path for one item exactly as `cn_cycle`
-/// does — read the resting set, apply the rule, execute the plan on the node
-/// thread — and waits for the publication to have settled.
+/// Hands one item to the production observation path — the very call `cn_cycle`
+/// makes — on the node thread, without waiting for it.
 #[cfg(test)]
-fn observe_on_node(node: &Node, observed: Observed, evidence: Result<(), Reason>, at_ns: u64) {
-    let entry = observed.entry;
-    let instrument_id = InstrumentId::from(entry.instrument_id);
+fn observation(node: &Node, observed: Observed, evidence: Result<(), Reason>, at_ns: u64) {
     node.call(move |context| {
         let cache = CacheView::new(Rc::clone(&context.cache));
         let exec = Rc::clone(&context.cn);
-        let plan = {
-            let resting = resting_limits(&cache.borrow(), instrument_id);
-            exec.borrow_mut()
-                .observe(&observed, evidence, at_ns, &resting)
-        };
         tokio::task::spawn_local(async move {
-            execute(entry, plan, &cache, &exec, at_ns).await;
+            cycle_observation(&observed, evidence, &cache, &exec, at_ns).await;
         });
     })
     .expect("the node answers");
+}
+
+/// [`observation`], waiting for the publication it planned to have settled.
+#[cfg(test)]
+fn observe_on_node(node: &Node, observed: Observed, evidence: Result<(), Reason>, at_ns: u64) {
+    let instrument_id = InstrumentId::from(observed.entry.instrument_id);
+    observation(node, observed, evidence, at_ns);
     within(10, "the observation's plan is published", || {
         node.call(move |context| {
             let mut exec = context.cn.borrow_mut();
@@ -1643,30 +1718,8 @@ fn stamps_are_strictly_monotonic() {
 }
 
 // ---------------------------------------------------------------------------
-// A2 — the board caps (§3.2)
+// A2 — the board caps (§3.2); the cap table itself is `catalog::band_and_caps`
 // ---------------------------------------------------------------------------
-
-#[cfg(test)]
-#[test]
-fn board_caps_admit_the_boundary_and_refuse_above_it() {
-    use crate::catalog::OrderKind::{Limit, Market};
-    for (board, kind, cap) in [
-        (Board::Main, Limit, 1_000_000u64),
-        (Board::Main, Market, 1_000_000),
-        (Board::ChiNext, Limit, 300_000),
-        (Board::ChiNext, Market, 150_000),
-    ] {
-        assert_eq!(board.limit_cap(kind), cap);
-        assert!(
-            !over_cap(board, kind, Decimal::from(cap)),
-            "at cap passes: {board:?} {kind:?}"
-        );
-        assert!(
-            over_cap(board, kind, Decimal::from(cap + 100)),
-            "over cap fails: {board:?} {kind:?}"
-        );
-    }
-}
 
 /// §1.2's structural half, through the production submit path: a CN BUY is a
 /// whole lot, a CN SELL is not held to that rule, and both boards' caps are
@@ -2128,7 +2181,11 @@ fn a_limit_fills_only_on_a_qualifying_observation() {
     );
 
     // Every fill is inside the day's band, and the book is idle again.
-    let (up, down) = crate::catalog::band(Decimal::from(10), Decimal::new(1, 2), Board::Main);
+    let (up, down) = crate::catalog::band(
+        Decimal::from(10),
+        Decimal::new(1, 2),
+        crate::catalog::Board::Main,
+    );
     for (_, price, _) in fills(&store, "cn-ae9-buy")
         .into_iter()
         .chain(fills(&store, "cn-ae9-sell"))
@@ -2621,6 +2678,116 @@ fn a_market_fills_at_last_after_the_compatible_resting_limits() {
     registry.stop_all();
 }
 
+/// §2.5, F8 item 2: the critical section holds in both directions. While a
+/// MARKET's sized book stands — from the sizing publication until the idle book
+/// is restored — a poll cycle observing the same instrument publishes nothing
+/// over it and advances no baseline; once the instrument is released the very
+/// next cycle publishes again, and a MARKET still fills its whole quantity.
+#[cfg(test)]
+#[test]
+fn a_poll_cycle_never_republishes_over_a_sized_market_book() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = desk(&store, "cn-busy", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let instrument_id = InstrumentId::from(pingan().instrument_id);
+    let at = CN_0935 + SECOND_NS;
+    observe_on_node(&node, snapshot(pingan(), "9.95", "10.00", 1000), Ok(()), at);
+    order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-busy-rest",
+        "000001.XSHE",
+        "BUY",
+        100,
+        Some("10.00"),
+    )
+    .expect("the compatible limit buy rests");
+
+    // The MARKET's own half of the section: the sized publication, which owns
+    // the instrument until `restore_idle`.
+    let intent = Intent {
+        entry: pingan(),
+        side: OrderSide::Buy,
+        quantity: Decimal::from(300),
+        price: None,
+    };
+    let sent = node
+        .call(move |context| size_for_market(context, intent, at + SECOND_NS))
+        .expect("the node answers")
+        .expect("a sized book");
+    confirm(&node, instrument_id, sent).expect("the sized book landed");
+
+    // A poll cycle for the same instrument, with a qualifying observation.
+    observation(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 5000),
+        Ok(()),
+        at + 2 * SECOND_NS,
+    );
+    thread::sleep(Duration::from_millis(100));
+    let held = node
+        .call(move |context| {
+            let sizes = {
+                let cache = context.cache.borrow();
+                let quote = cache.quote(&instrument_id).expect("a quote");
+                (
+                    quote.ts_event.as_u64(),
+                    quote.bid_size.as_decimal(),
+                    quote.ask_size.as_decimal(),
+                )
+            };
+            let mut exec = context.cn.borrow_mut();
+            let inst = exec.inst(instrument_id);
+            (sizes, inst.seq, inst.prev_volume)
+        })
+        .expect("the node answers");
+    assert_eq!(
+        held,
+        (
+            (sent, Decimal::ZERO, Decimal::from(400)),
+            1,
+            Some(Decimal::from(1000))
+        ),
+        "the sized book stands untouched and no baseline advanced"
+    );
+
+    // Released, the next cycle publishes again.
+    restore_idle(&node, pingan(), Decimal::new(995, 2), sent + 1).expect("the idle book is back");
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.95", "10.00", 5001),
+        Ok(()),
+        at + 3 * SECOND_NS,
+    );
+    assert_eq!(
+        node.call(move |context| context.cn.borrow_mut().inst(instrument_id).seq)
+            .expect("the node answers"),
+        2,
+        "the released instrument is observed again"
+    );
+
+    // And the MARKET still fills its whole requested quantity at last.
+    let filled = order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-busy-market",
+        "000001.XSHE",
+        "BUY",
+        300,
+        None,
+    )
+    .expect("the market buy is accepted");
+    assert_eq!(filled["status"], "FILLED", "{filled}");
+    assert_eq!(
+        fills(&store, "cn-busy-market"),
+        vec![("300".to_owned(), "9.95".to_owned(), "0.90".to_owned())],
+        "the whole quantity at last, no slip"
+    );
+    registry.stop_all();
+}
+
 /// §2.3, §2.5: a MARKET into a suppressed side gets the sandbox's own
 /// no-market rejection; a MARKET the risk engine denies leaves the resting
 /// fills its own publication produced in place, and the idle book restored.
@@ -2845,6 +3012,203 @@ fn the_boundary_alerts_pause_at_lunch_and_cancel_at_1457() {
         .to_string(),
         "The order is not well formed: 000001.XSHE is outside the supported session \
          [09:30,11:30) and [13:00,14:57) Asia/Shanghai."
+    );
+    registry.stop_all();
+}
+
+/// §5.1: one clock step can cross several boundaries — a jump, a suspended
+/// daemon — and only one alert is ever armed. Whichever fires, every order past
+/// its day lifetime ends, exactly once, and its reservation is released.
+#[cfg(test)]
+#[test]
+fn a_clock_step_over_1457_cancels_on_whichever_boundary_fires() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = desk(&store, "cn-jump", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+
+    // 11:00, with only the 11:30 alert armed.
+    let eleven = CN_0935 + 5_100 * SECOND_NS;
+    node.advance_to(eleven).expect("the clock advances");
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1000),
+        Ok(()),
+        eleven,
+    );
+    order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-jump-1",
+        "000001.XSHE",
+        "BUY",
+        100,
+        Some("10.00"),
+    )
+    .expect("the limit buy rests");
+
+    // One step to 15:30: 11:30 fires, 14:57 was never armed, and the order is
+    // still terminated.
+    let fired = node
+        .advance_to(CN_0935 + 21_300 * SECOND_NS)
+        .expect("the clock advances");
+    assert!(fired.iter().any(|name| name == ALERT), "{fired:?}");
+    within(10, "the stepped-over deadline still ends the day", || {
+        order_status(&node, "cn-jump-1").as_deref() == Some("CANCELED")
+    });
+    assert_eq!(
+        crate::node::kinds(&store, &desk_id, "cn-jump-1"),
+        [
+            "OrderInitialized",
+            "OrderSubmitted",
+            "OrderAccepted",
+            "OrderCanceled"
+        ],
+        "exactly one cancel"
+    );
+    assert_eq!(
+        reservation(&node, "XSHE", &desk_id),
+        ("500000.00 CNY|0.00 CNY|500000.00 CNY".to_owned(), 0),
+        "OrderCanceled released the reservation"
+    );
+    registry.stop_all();
+}
+
+/// §5.1, §2.1: a daemon that slept through the close wakes on the next day's
+/// first boundary. The prior day's order is terminated, and the instrument is
+/// not `Trading` for the new day until a poll re-establishes readiness.
+#[cfg(test)]
+#[test]
+fn an_overnight_step_cancels_the_prior_days_order_and_reopens_unready() {
+    let (_dir, store) = crate::store::open_temp();
+    let two = CN_0935 + 15_900 * SECOND_NS; // 14:00 Asia/Shanghai
+    let (registry, handle, node) = desk(&store, "cn-overnight", two);
+    let desk_id = handle.desk_id().to_owned();
+    let instrument_id = InstrumentId::from(pingan().instrument_id);
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1000),
+        Ok(()),
+        two,
+    );
+    order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-overnight-1",
+        "000001.XSHE",
+        "BUY",
+        100,
+        Some("10.00"),
+    )
+    .expect("the limit buy rests");
+
+    // One step to the next day's 09:35: the 14:57 alert fires a day late.
+    let next = CN_0935 + DAY_NS;
+    let fired = node.advance_to(next).expect("the clock advances");
+    assert!(fired.iter().any(|name| name == ALERT), "{fired:?}");
+    within(10, "the prior day's order is terminated", || {
+        order_status(&node, "cn-overnight-1").as_deref() == Some("CANCELED")
+    });
+    assert_eq!(
+        node.call(move |context| {
+            let mut exec = context.cn.borrow_mut();
+            let inst = exec.inst(instrument_id);
+            (inst.ready_at(next), inst.status)
+        })
+        .expect("the node answers"),
+        (Err(Reason::NoCalendar), Some(MarketStatusAction::Pause)),
+        "yesterday's evidence does not open the new day"
+    );
+
+    // The new day's first accepted observation is what reopens it.
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1000),
+        Ok(()),
+        next,
+    );
+    assert_eq!(
+        node.call(move |context| context.cn.borrow_mut().inst(instrument_id).status)
+            .expect("the node answers"),
+        Some(MarketStatusAction::Trading)
+    );
+    registry.stop_all();
+}
+
+/// §5.2: an approval whose readiness lapsed with the Shanghai rollover — before
+/// any poll on the new day — leaves the action `PENDING` with no decision
+/// recorded at all, because the pre-check reads the same readiness the
+/// execution-time checks will.
+#[cfg(test)]
+#[test]
+fn an_approval_after_a_rollover_records_no_decision() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = desk(&store, "cn-rollover", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1000),
+        Ok(()),
+        CN_0935,
+    );
+    store
+        .unit(|tx| {
+            tx.execute(
+                "UPDATE installation_settings SET paper_order_policy = 'REQUIRE_APPROVAL' \
+                 WHERE id = 1",
+                [],
+            )
+        })
+        .expect("the policy a `PUT /settings/policies` would have written");
+    let (pending, submitted) = trade::submit(
+        &store,
+        &registry,
+        &desk_id,
+        r#"{"action_id":"cn-rollover-1","instrument_id":"000001.XSHE",
+            "side":"BUY","type":"LIMIT","quantity":"100","price":"10.00"}"#,
+        &trade::Source::Session,
+    )
+    .expect("a gated order is recorded");
+    assert_eq!(submitted, trade::Submitted::Pending);
+
+    // The next Shanghai day, inside the session, before any poll.
+    node.advance_to(CN_0935 + DAY_NS)
+        .expect("the clock advances");
+    let blocked = trade::decide(
+        &store,
+        &registry,
+        &desk_id,
+        &pending.id,
+        crate::policy::Decision::Approve,
+    )
+    .expect_err("a rolled-over readiness cannot decide the action");
+    assert_eq!(blocked.code(), "MARKET_UNAVAILABLE");
+    assert_eq!(
+        blocked.to_string(),
+        "The desk's market plane is unavailable: the desk cannot trade 000001.XSHE \
+         right now: NO_CALENDAR."
+    );
+    assert_eq!(
+        trade::history_actions(&store, &desk_id)
+            .expect("the actions read")
+            .into_iter()
+            .find(|row| row.action_id == "cn-rollover-1")
+            .expect("the row")
+            .approval,
+        "PENDING",
+        "no approval decision was recorded"
+    );
+    assert_eq!(
+        store
+            .call(|conn| conn.query_row(
+                "SELECT count(*) FROM operational_events WHERE kind = 'APPROVAL_DECIDED'",
+                [],
+                |r| r.get::<_, i64>(0)
+            ))
+            .expect("the events read"),
+        0,
+        "and no APPROVAL_DECIDED event"
     );
     registry.stop_all();
 }

@@ -1733,12 +1733,12 @@ async fn instruments(
                 value["band_percent"] = serde_json::json!(board.band_percent());
                 value["limit_order_cap"] = serde_json::json!(
                     board
-                        .limit_cap(crate::catalog::OrderKind::Limit)
+                        .share_cap(crate::catalog::OrderKind::Limit)
                         .to_string()
                 );
                 value["market_order_cap"] = serde_json::json!(
                     board
-                        .limit_cap(crate::catalog::OrderKind::Market)
+                        .share_cap(crate::catalog::OrderKind::Market)
                         .to_string()
                 );
             }

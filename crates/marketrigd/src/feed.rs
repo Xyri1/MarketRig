@@ -655,15 +655,8 @@ impl Band {
 /// The band around a CN reference, as §2.2 derives it — `None` unless the entry
 /// names a board and the provider gave a positive reference.
 fn cn_band(entry: &Entry, prev_close: Option<Decimal>) -> Option<Band> {
-    let (board, prev) = (entry.board?, prev_close?);
-    if prev <= Decimal::ZERO {
-        return None;
-    }
-    let tick: Decimal = entry
-        .price_increment
-        .parse()
-        .expect("catalog tick is decimal text (catalog::entries_valid)");
-    let (up, down) = crate::catalog::band(prev, tick, board);
+    let prev = prev_close?;
+    let (up, down) = entry.band(prev)?;
     Some(Band {
         prev: at_precision(prev, entry.price_increment),
         up: at_precision(up, entry.price_increment),
@@ -832,14 +825,9 @@ fn verdict(
     if volume < Decimal::ZERO {
         return Err(Reason::FeedLost);
     }
-    let Some(board) = entry.board else {
+    let Some((up, down)) = entry.band(prev) else {
         return Err(Reason::NoReference);
     };
-    let tick: Decimal = entry
-        .price_increment
-        .parse()
-        .expect("catalog tick is decimal text (catalog::entries_valid)");
-    let (up, down) = crate::catalog::band(prev, tick, board);
     if last <= Decimal::ZERO || last > up || last < down {
         return Err(Reason::PriceOutOfBand);
     }
@@ -847,9 +835,11 @@ fn verdict(
 }
 
 /// The awareness half of [`poll_hithink_observed`]: the instruments whose
-/// observation advanced, with their accepted price text and receipt instant, so
-/// the poller can publish their ticks.
-pub async fn poll_hithink(
+/// observation advanced, with their accepted price text and receipt instant.
+/// The poller reads the whole [`Observed`] instead; this shape is what the
+/// awareness checks below assert against.
+#[cfg(test)]
+async fn poll_hithink(
     hithink: &crate::hithink::Hithink,
     market: &MarketState,
 ) -> Vec<(&'static Entry, String, i64)> {
