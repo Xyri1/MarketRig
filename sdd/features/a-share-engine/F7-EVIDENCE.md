@@ -769,3 +769,81 @@ withheld until the §R2.3 samples exist. What is already decided by evidence: `p
 is the reference and a derived cross-check must not gate (§R2.6), no source-delay
 guarantee can be offered (§R2.9), and the calendar needs no storage to be re-established
 conservatively (§R2.7).
+
+## R2 — opening window 2026-09-10 (interim)
+
+Sample: `sdd/features/a-share-engine/f7/intraday/open-0931-20260910T093103+0800.json`
+(window 1 of the six in §R2.3, run by launchd at 09:31:03 Asia/Shanghai; 14/14 requests,
+all HTTP 200 with envelope `code: 0`, `stopped_early: null`, no rate limit). Three rounds
+at 09:31:03, 09:31:24, 09:31:45, each one batched snapshot (5 codes) plus three
+`interval=1d&adjust=none` reads (600519.SH, 000001.SZ, 300750.SZ), then one calendar and
+one auction read. This is the opening window only; it settles nothing about the other five.
+
+**Trading day confirmed.** The run's own `calendar/trading-days` returned `count: 243`,
+`max_date: "20260910"`. Today is a trading day; the §R2.3 windows stand.
+
+**a) Does today's daily bar exist at 09:31? — Yes.** All three codes carry a bar with
+`date_ms 1788969600000` = 2026-09-10 00:00:00 +0800 in all three rounds. It is the newest
+bar; 2026-09-09 and 2026-09-08 sit behind it unchanged across the rounds.
+
+**b) Does `close_price` track the snapshot's `last_price`? — It moves with it, and the two
+are not equal.** Snapshot and bar are separate requests 0–1 s apart, so they race; the
+discrepancies are kept, not smoothed.
+
+| Round | Code | snapshot `last_price` / `volume` | today's bar `close_price` / `volume` | Δclose | Δvolume |
+| --- | --- | --- | --- | --- | --- |
+| 1 (09:31:03) | 600519.SH | 1294 / 41200 | 1292.8 / 46300 | −1.20 | +5100 |
+| 1 | 000001.SZ | 11.72 / 3128159 | 11.72 / 3128159 | 0.00 | 0 |
+| 1 | 300750.SZ | 334 / 1117801 | 333.94 / 1098201 | −0.06 | −19600 |
+| 2 (09:31:24) | 600519.SH | 1290.49 / 64400 | 1291.29 / 78200 | +0.80 | +13800 |
+| 2 | 000001.SZ | 11.70 / 3338859 | 11.71 / 3361459 | +0.01 | +22600 |
+| 2 | 300750.SZ | 333.33 / 1226601 | 333.33 / 1226601 | 0.00 | 0 |
+| 3 (09:31:45) | 600519.SH | 1290.80 / 81600 | 1290.28 / 84700 | −0.52 | +3100 |
+| 3 | 000001.SZ | 11.69 / 3851059 | 11.70 / 3824559 | +0.01 | −26500 |
+| 3 | 300750.SZ | 332.99 / 1373201 | 332.99 / 1373201 | 0.00 | 0 |
+
+Exactly equal in 4 of 9 pairs (both fields at once, never one alone). Where they differ the
+sign goes both ways: the bar is ahead of the snapshot in 4 pairs and behind it in 2. The
+largest gap is 600519.SH round 1, −1.20 on price and 5100 shares. §R2.10 assumption 5 —
+"the current-day bar tracks the running last price intraday" — holds only in the loose
+sense of moving together; an equality rule would fail here, and the tolerance is not
+derivable from three reads.
+
+**c) Do volume and turnover move? — Yes.** Every one of the five snapshot codes increases
+strictly across the three reads, on both fields: 600519.SH `volume` 41200 → 64400 → 81600
+and `turnover` 53,270,761 → 83,235,241 → 105,443,270; 601318.SH 2,224,460 → 2,902,660 →
+3,279,160; 000001.SZ 3,128,159 → 3,338,859 → 3,851,059; 000858.SZ 241,400 → 303,000 →
+497,100; 300750.SZ 1,117,801 → 1,226,601 → 1,373,201. The bar's own `volume` increases
+too, for all three bar codes. Movement, not freshness (§R2.9).
+
+**d) `auction_phase` / `data_status` — `"closed"` / `"final"` during continuous trading.**
+One auction read per run, at 09:31:46, 46 minutes after the 09:15 auction opened and 16
+minutes into continuous trading. So `auction_phase: "closed"` refers to the auction, not
+the session, and `data_status: "final"` is the same value the after-hours dry run saw. Two
+further observations from it: `pre_close_price` equals the snapshot's `prev_price` for 5/5
+codes, and its `last_price` is stale against the round-3 snapshot for 5/5 (600519.SH
+1291.29 vs 1290.80 — 1291.29 is the round-2 *bar* close; 601318.SH 55.55 vs 55.53;
+000001.SZ 11.70 vs 11.69; 000858.SZ 71.03 vs 70.92; 300750.SZ 333.03 vs 332.99). Nothing
+here tests the halt claim (§R2.10 assumption 3): none of the five was halted.
+
+**e) Does `data.timestamp` track the wall clock? — Per endpoint, three behaviours.**
+
+| Endpoint | `data.timestamp` at request start 09:31:03 / 09:31:24 / 09:31:45 | Behaviour |
+| --- | --- | --- |
+| `prices/snapshot` | 09:31:02.000 / 09:31:21.000 / 09:31:40.000 | Whole seconds, behind the request start by 1 s, 3 s, 5 s |
+| `prices/historical` | 00:00:00.000 in all 9 reads | The trading day's midnight, not a clock |
+| `calendar/trading-days` | 09:31:46.054 (request 09:31:45) | Millisecond, the response instant |
+| `auction/snapshot` | 09:31:46.426 (request 09:31:46) | Millisecond, the response instant |
+
+The snapshot's timestamp advances with the wall clock but is not the response instant, and
+the gap grew 1 → 3 → 5 s across three reads. Three points; whether that is drift, jitter,
+or coincidence is not decidable from this sample. It remains a response-side field: it does
+not certify when the exchange observed the price, so it does not create a source delay
+(§R2.5, §R2.9). **Source delay stays unknown.**
+
+**What remains.** Five windows: `open-0945`, `lunch-1259`, `lunch-1301`, `pm-1430`,
+`close-1457` (§R2.3). Open questions they carry: whether the bar exists and moves again
+after the 13:00 reopen; whether the snapshot's `data.timestamp` freezes during the lunch
+break while `volume` stops; whether `data_status` ever leaves `"final"`; whether the
+snapshot/bar gap seen in (b) narrows once the open settles; whether a halted name appears
+in any window. The §R2.10 recommendation stays withheld.
