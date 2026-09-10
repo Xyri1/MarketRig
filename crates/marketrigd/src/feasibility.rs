@@ -8,4 +8,8 @@ pub mod f2;
 pub mod f3;
 pub mod f4;
 pub mod f6;
+pub mod f8_limit;
+pub mod f8_market;
+pub mod f8_provider;
+pub mod f8_restart;
 pub mod r1;
