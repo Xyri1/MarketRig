@@ -83,7 +83,8 @@ use serde_json::Value;
 
 use crate::catalog::Entry;
 use crate::feasibility::clock::{
-    CN_0935, ClockHandle, SECOND_NS, advance, controlled_registry, publish_book, stored_events,
+    CN_0935, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry, publish_book,
+    stored_events,
 };
 use crate::node::{Node, Registry, within};
 use crate::store::Store;
@@ -116,7 +117,9 @@ fn pingan_id() -> InstrumentId {
 /// A started desk on the controlled clock at 09:35 Asia/Shanghai, no feed, no
 /// book yet.
 fn desk(store: &Store, name: &'static str) -> (Registry, ClockHandle, Arc<Node>) {
-    let (registry, handle) = controlled_registry(store, None, name, CN_0935);
+    // Day D−1, so [`seed_position`]'s shares are not held by §1.1's T+1 lock on
+    // day D (slice 014 step 3).
+    let (registry, handle) = controlled_registry(store, None, name, CN_0935 - DAY_NS);
     let node = registry.ensure(handle.desk_id()).expect("the node starts");
     (registry, handle, node)
 }
@@ -325,7 +328,9 @@ fn seed_position(
     quantity: u32,
     at_ns: u64,
 ) -> u64 {
-    sized_at(node, LAST_BEFORE, quantity, at_ns);
+    // The buy is on day D−1 and the caller continues on day D, so the shares are
+    // sellable (§1.1's T+1 term is zero).
+    sized_at(node, LAST_BEFORE, quantity, at_ns - DAY_NS);
     let filled = submit(store, registry, desk_id, "f8m-seed", "BUY", quantity, None)
         .expect("the seeding market buy is accepted");
     assert_eq!(filled["status"], "FILLED", "{filled}");
@@ -516,17 +521,21 @@ fn market_sell_without_holdings_is_rejected() {
         None,
     )
     .expect_err("a market sell with no holdings is refused");
-    let TradeError::Rejected(reason) = &refused else {
-        panic!("the sandbox refused natively: {refused:?}");
+    // F8 measured the *native* short-sell guard here. §1.1's sellability check
+    // now answers first, from the node cache, and nothing reaches the sandbox
+    // (slice 014 step 3); the native guard is still the last line of defence for
+    // anything placed around MarketRig.
+    let TradeError::Invalid(what) = &refused else {
+        panic!("expected MarketRig's own eligibility refusal: {refused:?}");
     };
-    eprintln!("f8m-short-1 reason: {reason}");
-    assert!(
-        reason.starts_with("Short selling not permitted on a CASH account with position None"),
-        "the matching engine's own short-sell reason: {reason}"
-    );
     assert_eq!(
-        chain(&store, &desk_id, "f8m-short-1"),
-        vec!["OrderInitialized", "OrderSubmitted", "OrderRejected"],
+        what,
+        "quantity 100 exceeds sellable 0 for 000001.XSHE: 0 bought today are \
+         locked by T+1; 0 reserved by outstanding sells"
+    );
+    assert!(
+        chain(&store, &desk_id, "f8m-short-1").is_empty(),
+        "no native order at all"
     );
     assert!(all_fills(&store, &desk_id).is_empty());
     registry.stop_all();

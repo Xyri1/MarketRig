@@ -349,6 +349,12 @@ fn policy(store: &Store, value: &'static str) {
 
 /// The sandbox's own reason for the order's refusal, from the stored event
 /// payload — the only place it survives (per D38).
+///
+/// Unused since slice 014 step 3 turned F6's "the only native guard is the
+/// position overdraft" case into a MarketRig eligibility refusal with no native
+/// order behind it; kept because the spike's own vocabulary is what makes these
+/// files readable as a record.
+#[expect(dead_code, reason = "the spike's vocabulary, see above")]
 fn last_refusal(store: &Store, desk_id: &str, client_order_id: &str) -> Option<String> {
     use rusqlite::OptionalExtension;
 
@@ -526,28 +532,33 @@ fn competing_sells_serialize_in_one_node_job() {
             .collect();
         racers.into_iter().map(|r| r.join().unwrap()).collect()
     });
-    assert_eq!(both, [true, true], "today both sells are accepted");
-    await_status(&node, "f6-today-a", OrderStatus::Accepted);
-    await_status(&node, "f6-today-b", OrderStatus::Accepted);
-    let oversold = sellable(&node);
+    // F6 found `trade::submit` accepting *both*, oversold. Production runs the
+    // §1.1 read and the placement in one admission closure now, so exactly one
+    // wins (slice 014 step 3).
     assert_eq!(
-        (oversold.position, oversold.reserved, oversold.sellable),
-        (Decimal::from(300), Decimal::from(400), Decimal::ZERO),
-        "400 shares are reserved against a 300 position: {oversold:?}"
+        both.iter().filter(|accepted| **accepted).count(),
+        1,
+        "exactly one of two competing sells is accepted: {both:?}"
+    );
+    let winner = if both[0] { "f6-today-a" } else { "f6-today-b" };
+    await_status(&node, winner, OrderStatus::Accepted);
+    let reserved = sellable(&node);
+    assert_eq!(
+        (reserved.position, reserved.reserved, reserved.sellable),
+        (Decimal::from(300), Decimal::from(200), Decimal::from(100)),
+        "only the winner's 200 shares are reserved: {reserved:?}"
     );
 
-    // Clear the book for the prototype: a confirmed cancel each.
-    for (order, action) in [("f6-today-a", "f6-undo-a"), ("f6-today-b", "f6-undo-b")] {
-        trade::cancel(
-            &store,
-            &registry,
-            handle.desk_id(),
-            order,
-            &format!(r#"{{"action_id":"{action}"}}"#),
-            &trade::Source::Session,
-        )
-        .expect("the cancel is accepted");
-    }
+    // Clear the book for the prototype: a confirmed cancel.
+    trade::cancel(
+        &store,
+        &registry,
+        handle.desk_id(),
+        winner,
+        r#"{"action_id":"f6-undo-a"}"#,
+        &trade::Source::Session,
+    )
+    .expect("the cancel is accepted");
     assert_eq!(sellable(&node).reserved, Decimal::ZERO);
 
     // --- the prototype -----------------------------------------------------
@@ -842,6 +853,10 @@ fn pending_approval_reserves_nothing_then_reruns_unchecked() {
         "the shares are gone"
     );
 
+    // F6 found the second approval re-entering acceptance with no check at all,
+    // reserving 600 shares against a 300 position. §5.2's approval now reruns
+    // the eligibility checks: the second one is a terminal refused action with
+    // no sandbox order behind it (slice 014 step 3).
     trade::decide(
         &store,
         &registry,
@@ -849,44 +864,38 @@ fn pending_approval_reserves_nothing_then_reruns_unchecked() {
         &pending[1],
         Decision::Approve,
     )
-    .expect("the second approval re-enters acceptance");
-    await_status(&node, "f6-gated-b", OrderStatus::Accepted);
-    let doubled = sellable(&node);
+    .expect("an eligibility refusal is not a failed decision");
+    let refused = trade::history_actions(&store, handle.desk_id())
+        .expect("the actions read")
+        .into_iter()
+        .find(|row| row.action_id == "f6-gated-b")
+        .expect("the row");
+    assert_eq!(refused.approval, "APPROVED");
+    let outcome = refused.outcome.clone().expect("a terminal outcome");
+    assert_eq!(outcome["failure_code"], "ORDER_INVALID", "{outcome}");
     assert_eq!(
-        (doubled.position, doubled.reserved, doubled.sellable),
-        (Decimal::from(300), Decimal::from(600), Decimal::ZERO),
-        "today two approvals reserve 600 shares against a 300 position: {doubled:?}"
+        outcome["reason"],
+        "quantity 300 exceeds sellable 0 for 000001.XSHE: 0 bought today are \
+         locked by T+1; 300 reserved by outstanding sells",
+        "{outcome}"
     );
-
-    // The check the rerun needs, in the same job shape as the submit check: it
-    // reads the very state the second approval ignored.
-    let refusal = node
-        .call(|context| {
-            let state = sellable_from_cache(&context.cache.borrow(), CN_D_MIDNIGHT);
-            (Decimal::from(300) > state.sellable).then(|| state.refusal(300))
-        })
-        .expect("the node answers");
+    let held = sellable(&node);
     assert_eq!(
-        refusal,
-        Some(
-            "quantity 300 exceeds sellable 0 for 000001.XSHE: 0 bought today are \
-             locked by T+1; 600 reserved by outstanding sells"
-                .to_owned()
-        )
+        (held.position, held.reserved, held.sellable),
+        (Decimal::from(300), Decimal::from(300), Decimal::ZERO),
+        "and the second approval reserved nothing: {held:?}"
     );
 
     // --- changed holdings and a closed session ------------------------------
-    for (order, action) in [("f6-gated-a", "f6-undo-a"), ("f6-gated-b", "f6-undo-b")] {
-        trade::cancel(
-            &store,
-            &registry,
-            handle.desk_id(),
-            order,
-            &format!(r#"{{"action_id":"{action}"}}"#),
-            &trade::Source::Session,
-        )
-        .expect("a cancel is never gated");
-    }
+    trade::cancel(
+        &store,
+        &registry,
+        handle.desk_id(),
+        "f6-gated-a",
+        r#"{"action_id":"f6-undo-a"}"#,
+        &trade::Source::Session,
+    )
+    .expect("a cancel is never gated");
     policy(&store, "ALWAYS_ALLOW");
     trade::submit(
         &store,
@@ -910,7 +919,9 @@ fn pending_approval_reserves_nothing_then_reruns_unchecked() {
     )
     .expect("a gated order is recorded");
     // And the session closes under it: 11:45 is the lunch break, where §5.1
-    // forbids execution outright. Nothing in the daemon consults the clock.
+    // forbids execution outright. F6 found nothing in the daemon consulting the
+    // clock — the approval reached the sandbox and got its short-selling
+    // refusal. §5.1's check now answers first, on the node clock.
     advance(&node, CN_1145);
     trade::decide(
         &store,
@@ -919,18 +930,7 @@ fn pending_approval_reserves_nothing_then_reruns_unchecked() {
         &stale.id,
         Decision::Approve,
     )
-    .expect("a sandbox refusal is not a failed decision");
-    await_status(&node, "f6-gated-c", OrderStatus::Rejected);
-    assert!(
-        last_refusal(&store, handle.desk_id(), "f6-gated-c")
-            .expect("the sandbox's reason")
-            .starts_with("Short selling not permitted on a CASH account with position "),
-        "the only native guard is the position overdraft, not §1.1"
-    );
-
-    // What `finish` stores for a refusal today: the sandbox order's own
-    // projection, with the reason nowhere in it. An eligibility refusal has no
-    // order at all, so this path would store nothing.
+    .expect("a session refusal is not a failed decision");
     let row = trade::history_actions(&store, handle.desk_id())
         .expect("the actions read")
         .into_iter()
@@ -938,14 +938,16 @@ fn pending_approval_reserves_nothing_then_reruns_unchecked() {
         .expect("the row");
     let outcome = row.outcome.clone().expect("an outcome was stored");
     assert_eq!(row.approval, "APPROVED", "the decision itself stands");
-    assert_eq!(outcome["status"], "REJECTED", "{outcome}");
+    assert_eq!(outcome["failure_code"], "ORDER_INVALID", "{outcome}");
     assert_eq!(
-        outcome["client_order_id"], "f6-gated-c",
-        "the refusal is the order's projection: {outcome}"
+        outcome["reason"],
+        "000001.XSHE is outside the supported session [09:30,11:30) and \
+         [13:00,14:57) Asia/Shanghai",
+        "{outcome}"
     );
     assert!(
-        outcome.get("failure_code").is_none() && outcome.get("reason").is_none(),
-        "and carries no reason of its own: {outcome}"
+        trade::open_orders(&node).unwrap().is_empty(),
+        "and no sandbox order was created"
     );
 
     registry.stop_all();
@@ -994,26 +996,37 @@ fn odd_lot_sell_is_refused_by_marketrig_alone() {
     advance(&node, CN_0935);
     assert_eq!(sellable(&node).sellable, Decimal::from(250));
 
-    // MarketRig refuses 150 before the node is consulted.
+    // F6 found today's blanket lot check refusing 150 outright. §3.1's rule
+    // replaces it for a CN SELL: 150 % 100 == 50 == 250 % 100, so 150 is the
+    // whole odd remainder plus a lot and is accepted (slice 014 step 3). 125 is
+    // still refused, by MarketRig alone.
     let refused = trade::submit(
         &store,
         &registry,
         handle.desk_id(),
-        r#"{"action_id":"f6-oddlot-sell","instrument_id":"000001.XSHE",
-            "side":"SELL","type":"MARKET","quantity":"150","price":null}"#,
+        r#"{"action_id":"f6-oddlot-125","instrument_id":"000001.XSHE",
+            "side":"SELL","type":"MARKET","quantity":"125","price":null}"#,
         &trade::Source::Session,
     )
-    .expect_err("today's blanket lot check refuses 150");
+    .expect_err("§3.1 refuses 125 against a sellable 250");
     assert_eq!(refused.code(), "ORDER_INVALID");
     assert_eq!(
         refused.to_string(),
-        "The order is not well formed: quantity \"150\" is not a positive multiple \
-         of the 100 lot of 000001.XSHE."
+        "The order is not well formed: quantity 125 for 000001.XSHE is neither a \
+         multiple of 100 nor the whole odd remainder of sellable 250."
     );
 
-    // The sandbox has no such opinion: 150 fills, and the position is the
-    // remaining odd 100.
-    place_direct(&node, "f6-oddlot-150", OrderSide::Sell, 150, None);
+    // 150 fills, and the position is the remaining odd 100.
+    let sold = trade::submit(
+        &store,
+        &registry,
+        handle.desk_id(),
+        r#"{"action_id":"f6-oddlot-150","instrument_id":"000001.XSHE",
+            "side":"SELL","type":"MARKET","quantity":"150","price":null}"#,
+        &trade::Source::Session,
+    )
+    .expect("§3.1 accepts the odd remainder");
+    assert_eq!(sold.0.outcome.clone().unwrap()["status"], "FILLED");
     await_status(&node, "f6-oddlot-150", OrderStatus::Filled);
     let after = sellable(&node);
     assert_eq!(

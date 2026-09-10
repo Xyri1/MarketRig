@@ -66,7 +66,8 @@ use serde_json::Value;
 
 use crate::catalog::Entry;
 use crate::feasibility::clock::{
-    CN_0935, ClockHandle, SECOND_NS, advance, controlled_registry, publish_book, stored_events,
+    CN_0935, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry, publish_book,
+    stored_events,
 };
 use crate::node::{Node, Registry, within};
 use crate::store::Store;
@@ -88,10 +89,12 @@ fn pingan_id() -> InstrumentId {
 // Harness
 // ---------------------------------------------------------------------------
 
-/// A started desk on the controlled clock at 09:35 Asia/Shanghai, no feed:
-/// every observation below is published by hand.
+/// A started desk on the controlled clock at 09:35 Asia/Shanghai on day **D−1**,
+/// no feed: every observation below is published by hand, and a test that needs
+/// inventory buys it before today so §1.1's T+1 lock does not hold it (slice 014
+/// step 3).
 fn desk(store: &Store, name: &'static str) -> (Registry, ClockHandle, Arc<Node>) {
-    let (registry, handle) = controlled_registry(store, None, name, CN_0935);
+    let (registry, handle) = controlled_registry(store, None, name, CN_0935 - DAY_NS);
     let node = registry.ensure(handle.desk_id()).expect("the node starts");
     (registry, handle, node)
 }
@@ -427,9 +430,9 @@ fn sell_limit_waits_for_the_qualifying_observation() {
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = desk(&store, "f8-sell");
     let desk_id = handle.desk_id().to_owned();
-    let mut at = CN_0935 + SECOND_NS;
+    let mut at = CN_0935 - DAY_NS + SECOND_NS;
 
-    // Seed the holding on a sized book, then take the book away again.
+    // Seed the holding on a sized book on day D−1, then take the book away.
     sized(&node, "10.00", 100, at);
     let seeded = submit(
         &store,
@@ -446,9 +449,9 @@ fn sell_limit_waits_for_the_qualifying_observation() {
     let after_seed = balance_cny(&node, &desk_id);
     assert_eq!(after_seed, "498999.70 CNY|0.00 CNY|498999.70 CNY");
 
-    // Observation 1 — last 10.00, volume 1000. Compatible for a SELL @ 9.90
-    // (10.00 >= 9.90) and still no submission-time fill.
-    at += SECOND_NS;
+    // Day D, observation 1 — last 10.00, volume 1000. Compatible for a SELL @
+    // 9.90 (10.00 >= 9.90) and still no submission-time fill.
+    at = CN_0935 + SECOND_NS;
     idle(&node, "10.00", at);
     let accepted = submit(
         &store,

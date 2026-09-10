@@ -74,8 +74,8 @@ use rust_decimal::Decimal;
 
 use crate::catalog::Entry;
 use crate::feasibility::clock::{
-    CN_0935, ClockHandle, SECOND_NS, advance, controlled_registry, publish_book, publish_quote,
-    stored_events,
+    CN_0935, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry, publish_book,
+    publish_quote, stored_events,
 };
 use crate::feed::{ChartQuote, Health};
 use crate::node::{Node, Registry, within};
@@ -88,6 +88,8 @@ const CN_1130: u64 = CN_0935 + 6_900 * SECOND_NS;
 const CN_1145: u64 = CN_0935 + 7_800 * SECOND_NS;
 /// 13:00:00 — the afternoon open.
 const CN_1300: u64 = CN_0935 + 12_300 * SECOND_NS;
+/// 13:05:00 — inside the afternoon session.
+const CN_1305: u64 = CN_0935 + 12_600 * SECOND_NS;
 
 fn moutai() -> &'static Entry {
     crate::catalog::find("600519.XSHG").expect("the CN catalog entry")
@@ -293,8 +295,11 @@ fn withheld_data_still_fills_a_new_order_from_the_cached_book() {
         "the installation-wide observation is degraded"
     );
 
-    // Two hours later, still no tick. The clock is well past the morning close.
-    advance(&node, CN_1145);
+    // Hours later, still no tick, and the afternoon session has opened without
+    // one. (F1 asked this at 11:45, out of session; §5.1's admission check now
+    // refuses a CN order there, so the same question is asked at 13:05 — the
+    // book under test is still the untouched 09:35 one.)
+    advance(&node, CN_1305);
 
     // F1 (ii) / F5 (b): a crossing LIMIT fills against the two-hour-old book.
     let limit = order(
@@ -332,16 +337,16 @@ fn withheld_data_still_fills_a_new_order_from_the_cached_book() {
         "and so does a MARKET order: {market}"
     );
 
-    // Both fills are stamped with the clock's instant, hours outside the
-    // morning session, from a book last updated at 09:35.
+    // Both fills are stamped with the clock's instant, hours after the book was
+    // last updated at 09:35.
     for action in ["f1-cached-1", "f1-cached-2"] {
         let filled = chain(&store, &desk, action)
             .into_iter()
             .find(|(kind, _)| kind == "OrderFilled")
             .unwrap_or_else(|| panic!("{action} filled"));
         assert_eq!(
-            filled.1, CN_1145 as i64,
-            "{action} is stamped out of session: {filled:?}"
+            filled.1, CN_1305 as i64,
+            "{action} is stamped at the clock's instant: {filled:?}"
         );
     }
     assert_eq!(fills(&store), 2);
@@ -419,8 +424,10 @@ fn pause_gates_cn_matching_and_submission() {
     );
     assert_eq!(fills(&store), 0, "nothing filled while paused");
 
-    // (ii) A new CN order while closed. With the pause in place the sandbox
-    // refuses it itself, in its own words.
+    // (ii) A new CN order while closed. F1 found that the paused *sandbox*
+    // refuses it in its own words; production now refuses it one step earlier —
+    // §5.1's session check runs inside admission, so the order never reaches the
+    // engine at all (slice 014 step 3).
     let refused = order(
         &store,
         &registry,
@@ -432,18 +439,18 @@ fn pause_gates_cn_matching_and_submission() {
         100,
         Some("1800.00"),
     )
-    .expect_err("the paused engine refuses a new order");
-    let TradeError::Rejected(reason) = &refused else {
-        panic!("expected a sandbox rejection, got {refused:?}");
+    .expect_err("the closed session refuses a new order");
+    let TradeError::Invalid(what) = &refused else {
+        panic!("expected MarketRig's own session refusal, got {refused:?}");
     };
     assert_eq!(
-        reason, "Market 600519.XSHG is PAUSED, cannot accept order f1-pause-shut",
-        "the sandbox's own words for the refusal"
+        what,
+        "600519.XSHG is outside the supported session [09:30,11:30) and \
+         [13:00,14:57) Asia/Shanghai"
     );
-    assert_eq!(
-        kinds(&store, &desk, "f1-pause-shut"),
-        vec!["OrderInitialized", "OrderSubmitted", "OrderRejected"],
-        "and the refusal is one native terminal event"
+    assert!(
+        kinds(&store, &desk, "f1-pause-shut").is_empty(),
+        "and nothing was handed to the sandbox"
     );
 
     // (v) Venue independence: the US instrument was never paused, so its own
@@ -528,7 +535,12 @@ fn pause_gates_cn_matching_and_submission() {
 #[test]
 fn pause_gates_a_resting_sell() {
     let (_dir, store) = crate::store::open_temp();
-    let (registry, handle, node) = desk_at_0935(&store, "f1-sell", "1700.00");
+    // The shares are bought on day D−1: §1.1's T+1 lock now refuses a same-day
+    // sell of them (slice 014 step 3), and this test is about the pause gate.
+    let (registry, handle) = controlled_registry(&store, None, "f1-sell", CN_0935 - DAY_NS);
+    let node = registry.ensure(handle.desk_id()).expect("the node starts");
+    publish_quote(&node, moutai(), "1700.00", 100, CN_0935 - DAY_NS);
+    await_quote(&node, moutai(), "1700.00");
     let desk = handle.desk_id().to_owned();
 
     let bought = order(
@@ -544,6 +556,11 @@ fn pause_gates_a_resting_sell() {
     )
     .expect("the opening buy fills");
     assert_eq!(bought["status"], "FILLED", "{bought}");
+
+    // Day D: the lock has lapsed and the shares are sellable.
+    advance(&node, CN_0935);
+    publish_quote(&node, moutai(), "1700.00", 100, CN_0935);
+    await_quote(&node, moutai(), "1700.00");
 
     let rested = order(
         &store,
@@ -667,21 +684,26 @@ fn recovery_matches_only_the_new_book() {
 /// client.
 #[test]
 fn only_the_instruments_own_quote_matches_the_cached_book() {
-    let sibling = crate::catalog::find("601318.XSHG").expect("a second XSHG entry");
+    // On the US venue: the candidate question is venue-agnostic, and only the CN
+    // instruments carry MarketRig's own 14:57 alert, which would otherwise
+    // cancel the resting order halfway through this test (slice 014 step 3).
+    let sibling = crate::catalog::find("MSFT.XNAS").expect("a second XNAS entry");
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = desk_at_0935(&store, "f1-events", "1700.00");
     let desk = handle.desk_id().to_owned();
+    publish_quote(&node, apple(), "300.00", 100, CN_0935);
+    await_quote(&node, apple(), "300.00");
 
     let rested = order(
         &store,
         &registry,
         &desk,
         "f1-events-1",
-        "600519.XSHG",
+        "AAPL.XNAS",
         "BUY",
         "LIMIT",
-        100,
-        Some("1600.00"),
+        10,
+        Some("290.00"),
     )
     .expect("the resting buy is accepted");
     assert_eq!(rested["status"], "ACCEPTED", "{rested}");
@@ -689,11 +711,11 @@ fn only_the_instruments_own_quote_matches_the_cached_book() {
     // The only way to leave a crossing book behind a resting order: take the
     // crossing quote while the engine is paused, then reopen it.
     advance(&node, CN_1130);
-    publish_status(&node, moutai(), MarketStatusAction::Pause, CN_1130);
-    publish_quote(&node, moutai(), "1500.00", 100, CN_1130);
-    await_quote(&node, moutai(), "1500.00");
+    publish_status(&node, apple(), MarketStatusAction::Pause, CN_1130);
+    publish_quote(&node, apple(), "280.00", 100, CN_1130);
+    await_quote(&node, apple(), "280.00");
     advance(&node, CN_1300);
-    publish_status(&node, moutai(), MarketStatusAction::Trading, CN_1300);
+    publish_status(&node, apple(), MarketStatusAction::Trading, CN_1300);
     assert_eq!(status(&node, "f1-events-1"), OrderStatus::Accepted);
 
     // Candidate 1 and 2: every timer this node owns, across UTC midnight, so the
@@ -717,8 +739,8 @@ fn only_the_instruments_own_quote_matches_the_cached_book() {
     // Candidate 3: a quote for another instrument on the same venue, through the
     // same sandbox execution client.
     let other = midnight + 120 * SECOND_NS;
-    publish_quote(&node, sibling, "40.00", 100, other);
-    await_quote(&node, sibling, "40.00");
+    publish_quote(&node, sibling, "400.00", 100, other);
+    await_quote(&node, sibling, "400.00");
     assert_eq!(
         status(&node, "f1-events-1"),
         OrderStatus::Accepted,
@@ -729,7 +751,7 @@ fn only_the_instruments_own_quote_matches_the_cached_book() {
     // And the instrument's own quote does match it.
     let own = other + 60 * SECOND_NS;
     advance(&node, own);
-    publish_quote(&node, moutai(), "1550.00", 100, own);
+    publish_quote(&node, apple(), "285.00", 100, own);
     within(10, "its own quote fills it", || {
         status(&node, "f1-events-1") == OrderStatus::Filled
     });
@@ -855,9 +877,11 @@ fn a_zero_size_book_stops_matching_and_a_quote_restores_it() {
     .expect("the resting buy is accepted");
     assert_eq!(rested["status"], "ACCEPTED", "{rested}");
 
-    // Gate close: a crossing price with no size on either side.
-    advance(&node, CN_1130);
-    publish_book(&node, moutai(), ("1500.00", 0), ("1500.00", 0), CN_1130);
+    // Gate close: a crossing price with no size on either side. (Still inside
+    // the afternoon session, because §5.1's admission check now refuses a CN
+    // order out of session before the book can be asked anything.)
+    advance(&node, CN_1305);
+    publish_book(&node, moutai(), ("1500.00", 0), ("1500.00", 0), CN_1305);
     await_quote(&node, moutai(), "1500.00");
     assert_eq!(
         status(&node, "f5-zero-1"),
@@ -909,8 +933,9 @@ fn a_zero_size_book_stops_matching_and_a_quote_restores_it() {
     assert_eq!(fills(&store), 0, "and nothing filled");
 
     // The next real quote restores matching for both resting orders.
-    advance(&node, CN_1300);
-    publish_quote(&node, moutai(), "1550.00", 100, CN_1300);
+    let later = CN_1305 + 60 * SECOND_NS;
+    advance(&node, later);
+    publish_quote(&node, moutai(), "1550.00", 100, later);
     within(10, "both resting orders fill on the restored book", || {
         status(&node, "f5-zero-1") == OrderStatus::Filled
             && status(&node, "f5-zero-3") == OrderStatus::Filled

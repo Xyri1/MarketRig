@@ -483,7 +483,7 @@ impl Registry {
             node.stop_and_join();
             return Err(e);
         }
-        if let Err(e) = reconcile_cn(&node) {
+        if let Err(e) = reconcile_cn(&node, &self.market) {
             node.stop_and_join();
             return Err(e);
         }
@@ -528,8 +528,11 @@ impl Registry {
 /// The cancel is the same `TradingCommand::CancelOrder` [`trade::cancel`] sends,
 /// stamped by the node clock, and it goes out before any quote exists — which is
 /// what makes it beat the first crossing observation (F3 (1a), (2)).
-fn reconcile_cn(node: &Node) -> Result<(), NodeError> {
+fn reconcile_cn(node: &Node, market: &MarketState) -> Result<(), NodeError> {
     let now_ns = node.now_ns()?;
+    let feed = market
+        .hithink()
+        .map_or(AShareFeed::Yahoo, |hithink| hithink.a_share_feed());
     let expired: Vec<ClientOrderId> = node.call(move |context| {
         let orders: Vec<nautilus_model::orders::OrderAny> = context
             .cache
@@ -558,17 +561,26 @@ fn reconcile_cn(node: &Node) -> Result<(), NodeError> {
 
     // The session gate is per-`OrderMatchingEngine` in-memory state that no
     // snapshot carries (F3 (8)), so every CN instrument is re-gated on every
-    // start, whatever the phase.
+    // start, whatever the phase. Under HiThink readiness starts unavailable
+    // (feature SPEC §2.1): only the first successful cycle can open it.
     node.call(move |context| {
-        let action = cn::status_for(now_ns);
-        for entry in feed::cn_entries() {
-            let ts = context
-                .cn
-                .borrow_mut()
-                .stamp(InstrumentId::from(entry.instrument_id), now_ns);
-            cn::publish_status(context, entry, action, ts);
+        {
+            let mut exec = context.cn.borrow_mut();
+            exec.reset();
+            exec.feed = feed;
+            if feed == AShareFeed::Hithink {
+                for entry in feed::cn_entries() {
+                    exec.inst(InstrumentId::from(entry.instrument_id)).readiness =
+                        Err(crate::hithink::Reason::NoCalendar);
+                }
+            }
+            for entry in feed::cn_entries() {
+                cn::republish_status(&mut exec, entry, now_ns);
+            }
         }
-        context.cn.borrow_mut().reset();
+        // The boundary alert is armed on the node's own clock, so 11:30, 13:00
+        // and 14:57 act without a quote (feature SPEC §5.1).
+        cn::arm_session_alert(context);
     })?;
     Ok(())
 }
@@ -1105,7 +1117,7 @@ async fn poll_cn(
     let entries: Vec<(&'static Entry, InstrumentId)> = feed::cn_entries()
         .map(|entry| (entry, InstrumentId::from(entry.instrument_id)))
         .collect();
-    if cn_cycle(&entries, &chart, &market, &sender, &clock)
+    if cn_cycle(&entries, &chart, &market, &sender, &clock, &cache, &cn)
         .await
         .is_err()
     {
@@ -1124,7 +1136,7 @@ async fn poll_cn(
         match next_delay(cadence_phase, any_exposed) {
             Some(delay) => {
                 tokio::time::sleep(delay).await;
-                if cn_cycle(&entries, &chart, &market, &sender, &clock)
+                if cn_cycle(&entries, &chart, &market, &sender, &clock, &cache, &cn)
                     .await
                     .is_err()
                 {
@@ -1138,47 +1150,92 @@ async fn poll_cn(
 
 /// One `CN` cycle: HiThink's one batched request when the operator chose it and
 /// the key still holds, R1's per-instrument Yahoo poll otherwise (§2.2).
+///
+/// Under HiThink the cycle is also the AE-9 execution loop (`a-share-engine`
+/// SPEC §2.5): each accepted item goes through [`cn::CnExec::observe`], whose
+/// [`cn::Plan`] is what the node is told — an idle book for an observation that
+/// qualifies nothing, a one-sided crossing book for the resting orders it
+/// releases, and the instrument's session gate. Yahoo CN keeps R1's synthesized
+/// two-sided quote and only gains that gate (§2.1: explicitly simplified).
 async fn cn_cycle(
     entries: &[(&'static Entry, InstrumentId)],
     chart: &ChartClient,
     market: &MarketState,
     sender: &UnboundedSender<DataEvent>,
     clock: &Rc<RefCell<dyn Clock>>,
+    cache: &CacheView,
+    cn: &Exec,
 ) -> Result<(), ()> {
-    if let Some(hithink) = market.hithink().cloned()
-        && hithink.a_share_feed() == AShareFeed::Hithink
-    {
-        hithink.refresh_calendar_if_due(now_ns()).await;
-        // A key rejected mid-run leaves the leg degraded with its last HiThink
-        // observation standing; the daemon never switches to Yahoo on its own.
-        if !hithink.feed_ready() {
-            for (entry, _) in entries {
-                market.mark_degraded(entry.instrument_id);
+    let now = || clock.borrow().timestamp_ns().as_u64();
+    let list: Vec<&'static Entry> = entries.iter().map(|(entry, _)| *entry).collect();
+    let hithink = market.hithink().cloned();
+    let feed = hithink
+        .as_ref()
+        .map_or(AShareFeed::Yahoo, |hithink| hithink.a_share_feed());
+    // A switch blocks execution and clears the stale executable state before the
+    // new provider's first observation is trusted (§5.3, F5).
+    if cn.borrow().feed != feed {
+        cn::switch_provider(cn, &list, feed, now());
+    }
+
+    let hithink = match hithink.filter(|_| feed == AShareFeed::Hithink) {
+        Some(hithink) => hithink,
+        None => {
+            // Yahoo CN: the confirmed trading day still gates it when a provider
+            // can answer for it; with no provider at all there is nothing to
+            // consult and the R6 behaviour stands.
+            let day = market
+                .hithink()
+                .map_or(Ok(()), |hithink| hithink.trading_day(now() as i64));
+            for (entry, instrument_id) in entries {
+                let at = now();
+                {
+                    let mut exec = cn.borrow_mut();
+                    exec.inst(*instrument_id).readiness = day;
+                    cn::gate(&mut exec, entry, at);
+                }
+                poll_once(entry, *instrument_id, chart, market, sender).await?;
             }
             return Ok(());
         }
-        for (entry, last, _received_at_ns) in feed::poll_hithink(&hithink, market).await {
-            // The batched reply carries no source time, so the event stamp is
-            // receipt — read from the **node clock**, the one time source the
-            // CN execution boundary judges against (feature SPEC
-            // `a-share-engine` §5.1). `received_at_ns` stays MarketRig's wall
-            // clock for the awareness row `feed::poll_hithink` already wrote.
-            let receipt = clock.borrow().timestamp_ns().as_u64() as i64;
-            let tick = synthesized(
-                entry,
-                InstrumentId::from(entry.instrument_id),
-                &last,
-                receipt,
-                receipt,
-            );
-            sender
-                .send(DataEvent::Data(Data::Quote(tick)))
-                .map_err(|_| ())?;
+    };
+
+    hithink.refresh_calendar_if_due(now() as i64).await;
+    // A key rejected mid-run leaves the leg degraded with its last HiThink
+    // observation standing; the daemon never switches to Yahoo on its own.
+    if !hithink.feed_ready() {
+        for entry in &list {
+            market.mark_degraded(entry.instrument_id);
         }
+        cn::feed_failed(cn, &list, crate::hithink::Reason::FeedLost, now());
         return Ok(());
     }
-    for (entry, instrument_id) in entries {
-        poll_once(entry, *instrument_id, chart, market, sender).await?;
+    let observed = match feed::poll_hithink_observed(&hithink, market).await {
+        Ok(observed) => observed,
+        Err(reason) => {
+            // §2.1: a failed snapshot blocks affected submissions *and* resting
+            // fills; recovery re-baselines before anything can match.
+            cn::feed_failed(cn, &list, reason, now());
+            return Ok(());
+        }
+    };
+    let day = hithink.trading_day(now() as i64);
+    for item in observed {
+        let evidence = match day {
+            Ok(()) => hithink.bar_evidence(item.entry, now() as i64).await,
+            Err(reason) => Err(reason),
+        };
+        // The resting set is read after every await and immediately before the
+        // rule runs, so an order admitted in between is baselined, not released.
+        let at = now();
+        let plan = {
+            let resting = cn::resting_limits(
+                &cache.borrow(),
+                InstrumentId::from(item.entry.instrument_id),
+            );
+            cn.borrow_mut().observe(&item, evidence, at, &resting)
+        };
+        cn::execute(item.entry, plan, cache, cn, at).await;
     }
     Ok(())
 }
@@ -1516,7 +1573,7 @@ pub(crate) fn publish(
 ) {
     let bid = (bid.0.parse::<Decimal>().unwrap(), Decimal::from(bid.1));
     let ask = (ask.0.parse::<Decimal>().unwrap(), Decimal::from(ask.1));
-    node.call(move |context| cn::publish_quote(context, entry, bid, ask, ts_ns))
+    node.call(move |_| cn::publish_quote(entry, bid, ask, ts_ns))
         .expect("the node answers");
     within(10, "the published book reaches the node", || {
         node.call(move |context| {
@@ -1851,8 +1908,8 @@ fn a_same_day_restart_keeps_the_order_resting() {
                 .map(|cached| cached.action)
         })
         .unwrap(),
-        Some(nautilus_model::enums::MarketStatusAction::Close),
-        "the lunch restart re-gates the instrument closed"
+        Some(nautilus_model::enums::MarketStatusAction::Pause),
+        "the lunch restart re-gates the instrument paused — the day is not over"
     );
     assert_eq!(
         reservation(&node, "XSHG", &desk_id),
@@ -1869,7 +1926,7 @@ fn a_same_day_restart_keeps_the_order_resting() {
             .cn
             .borrow_mut()
             .stamp(InstrumentId::from(moutai().instrument_id), afternoon);
-        cn::publish_status(context, moutai(), cn::status_for(afternoon), ts);
+        cn::publish_status(moutai(), cn::status_for(afternoon, true), ts);
     })
     .unwrap();
     publish(

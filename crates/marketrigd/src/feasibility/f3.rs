@@ -855,6 +855,23 @@ fn lunch_and_afternoon_restarts_fill_once() {
         advance(&node, CN_1145);
         advance(&node, restart_ns);
         clock::publish_quote(&node, moutai(), "1500.00", 100, restart_ns);
+
+        // F3 found the *sandbox* filling both, whatever the session. MarketRig
+        // now owns that gate: its own 11:30 boundary alert paused the instrument
+        // during the first advance, so the lunch restart's crossing quote
+        // matches nothing, and only the afternoon one — whose 13:00 alert
+        // re-gated it `Trading` — fills (slice 014 step 3).
+        if name == "f3-lunch" {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert_eq!(
+                status(&node, ORDER),
+                OrderStatus::Accepted,
+                "{name}: the lunch gate held the crossing quote"
+            );
+            assert_eq!(fills(&store), 0, "{name}");
+            registry.stop_all();
+            continue;
+        }
         within(10, "the restored order closes", || {
             status(&node, ORDER) != OrderStatus::Accepted
         });
@@ -862,7 +879,7 @@ fn lunch_and_afternoon_restarts_fill_once() {
         assert_eq!(
             status(&node, ORDER),
             OrderStatus::Filled,
-            "{name}: the sandbox fills whatever the session"
+            "{name}: the reopened afternoon session fills it"
         );
         let captured = chain(&store, &desk_id);
         assert_eq!(
@@ -1055,8 +1072,11 @@ fn a_closed_market_does_not_survive_a_restart() {
         "node start republished the session gate for the restart instant"
     );
 
-    advance(&node, CN_1530);
-    clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1530);
+    // …and the restored order fills on the next crossing quote inside a
+    // supported session. (F3 asked this at 15:30; MarketRig's own boundary alert
+    // now closes the instrument there, so the same question is asked at 13:05.)
+    advance(&node, CN_1305);
+    clock::publish_quote(&node, moutai(), "1500.00", 100, CN_1305);
     within(10, "the restored order closes", || {
         status(&node, ORDER) != OrderStatus::Accepted
     });
@@ -1150,18 +1170,23 @@ fn the_recommended_restart_order_terminates_once() {
             "side":"BUY","type":"LIMIT","quantity":"100","price":"1600.00"}"#,
         &trade::Source::Session,
     )
-    .expect_err("the closed engine refuses the order");
-    let crate::trade::TradeError::Rejected(reason) = &refused else {
-        panic!("expected a sandbox rejection, got {refused:?}");
+    .expect_err("the closed session refuses the order");
+    // F3 measured the *sandbox*'s own `Market … is CLOSED` refusal here. §5.1's
+    // admission check now runs first, so the order never reaches the engine
+    // (slice 014 step 3); the native refusal is still what a re-handed order
+    // would get, and `a_second_rehand_under_a_closed_market_is_a_no_op` keeps
+    // that evidence.
+    let crate::trade::TradeError::Invalid(what) = &refused else {
+        panic!("expected MarketRig's own session refusal, got {refused:?}");
     };
     assert_eq!(
-        reason, "Market 600519.XSHG is CLOSED, cannot accept order f3-after-close",
-        "the sandbox's own words — and what every re-handed order would get"
+        what,
+        "600519.XSHG is outside the supported session [09:30,11:30) and \
+         [13:00,14:57) Asia/Shanghai"
     );
-    assert_eq!(
-        kinds(&chain_of(&store, &desk_id, "f3-after-close")),
-        vec!["OrderInitialized", "OrderSubmitted", "OrderRejected"],
-        "one native terminal event, not a fabricated one"
+    assert!(
+        kinds(&chain_of(&store, &desk_id, "f3-after-close")).is_empty(),
+        "and nothing was handed to the sandbox"
     );
     registry.stop_all();
 }

@@ -38,7 +38,7 @@ use nautilus_common::factories::OrderFactory;
 use nautilus_common::messages::execution::{CancelOrder, SubmitOrder, TradingCommand};
 use nautilus_common::msgbus::{self, MessagingSwitchboard};
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::enums::{OrderSide, OrderStatus, TimeInForce};
+use nautilus_model::enums::{MarketStatusAction, OrderSide, OrderStatus, TimeInForce};
 use nautilus_model::events::OrderEventAny;
 use nautilus_model::identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId};
 use nautilus_model::orders::Order;
@@ -79,6 +79,30 @@ fn desk_at_0935(
             .unwrap()
     });
     (registry, handle, node)
+}
+
+/// Reopens the instrument's own session gate. Production now arms F2's
+/// recommendation itself — a kernel-clock alert that `Pause`s at 11:30 and
+/// `Close`s at 14:57 (`crate::cn::arm_session_alert`, slice 014 step 3) — so a
+/// test that asks what the *native* engine does past a boundary has to put the
+/// engine back into `Trading` first.
+fn reopen(node: &Node, ts_ns: u64) {
+    node.call(move |_| {
+        crate::cn::publish_status(moutai(), MarketStatusAction::Trading, ts_ns);
+    })
+    .expect("the node answers");
+    let instrument_id = InstrumentId::from(moutai().instrument_id);
+    within(10, "the instrument reopens", || {
+        node.call(move |context| {
+            context
+                .cache
+                .borrow()
+                .instrument_status(&instrument_id)
+                .map(|cached| cached.action)
+                == Some(MarketStatusAction::Trading)
+        })
+        .unwrap()
+    });
 }
 
 /// Places a LIMIT order the way [`crate::trade::place`] does — cache, publish
@@ -278,8 +302,9 @@ fn gtd_needs_a_tick_to_expire() {
     assert!(
         fired
             .iter()
-            .all(|name| name.ends_with("-sandbox-expiry-sweep")),
-        "the node's only timer is the sandbox engine sweep: {fired:?}"
+            .all(|name| name.ends_with("-sandbox-expiry-sweep") || name == "cn-session-boundary"),
+        "the node's only timers are the sandbox engine sweep and MarketRig's own \
+         session boundary: {fired:?}"
     );
     assert_eq!(
         status(&node, "f2-gtd-1"),
@@ -362,6 +387,9 @@ fn gtd_fills_at_the_boundary_before_it_expires() {
     // buy limit).
     let tick_at = CN_1457 + SECOND_NS;
     advance(&node, tick_at);
+    // MarketRig's own boundary alert has already closed the instrument by now;
+    // the question here is what the *native* engine does, so it is reopened.
+    reopen(&node, tick_at);
     publish_quote(&node, moutai(), "1500.00", 100, tick_at);
     within(10, "the order closes", || {
         matches!(

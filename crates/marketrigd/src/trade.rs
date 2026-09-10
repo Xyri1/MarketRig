@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::catalog::{self, Entry};
+use crate::cn;
 use crate::desk::{self, DeskError, append_event};
 use crate::node::{Node, NodeContext, NodeError, Registry};
 use crate::policy::{self, DecideError, Decision};
@@ -336,32 +337,99 @@ fn place_and_settle(
     form: Form,
 ) -> Result<Value, TradeError> {
     let client_order_id = ClientOrderId::from(action_id);
+    let mut sized = None;
     if form.entry.market == catalog::Market::Cn {
         // CN admission runs inside the node's own critical section: one closure
-        // that finds the instrument neither busy nor unready and hands the
-        // order, so an executable book can never stand between the check and
-        // the placement (feature SPEC `a-share-engine` §2.5, F8 item 2).
-        crate::cn::admit(
-            node,
-            InstrumentId::from(form.entry.instrument_id),
-            move |context| place(context, form, client_order_id),
-        )
-        .map_err(|reason| {
-            TradeError::Unavailable(format!(
-                "the desk cannot trade {} right now: {reason}",
-                form.entry.instrument_id
-            ))
-        })?;
+        // that finds the instrument neither busy nor unready, runs every
+        // execution-time check from the node cache, records the LIMIT baseline
+        // and hands the order — so an executable book can never stand between
+        // the check and the placement (feature SPEC `a-share-engine` §2.5,
+        // F8 item 2).
+        let entry = form.entry;
+        let instrument_id = InstrumentId::from(entry.instrument_id);
+        let intent = cn::Intent {
+            entry,
+            side: form.side,
+            quantity: form.quantity.as_decimal(),
+            price: form.price.map(|price| price.as_decimal()),
+        };
+        let admitted = cn::admit(node, instrument_id, move |context| {
+            cn::check(context, intent)?;
+            let now_ns = context.clock.borrow().timestamp_ns().as_u64();
+            // AE-9's MARKET exception publishes the observation the order
+            // executes against, sized for it and for every compatible resting
+            // LIMIT, and leaves the instrument busy until the idle book is back.
+            let sized = match intent.price {
+                None => cn::size_for_market(context, intent, now_ns),
+                Some(_) => None,
+            };
+            match sized {
+                Some(sent) => Ok(Some((cn::idle_last(context, entry), sent))),
+                None => {
+                    if intent.price.is_some() {
+                        context
+                            .cn
+                            .borrow_mut()
+                            .baseline(instrument_id, client_order_id);
+                    }
+                    place(context, form, client_order_id);
+                    Ok(None)
+                }
+            }
+        })
+        .map_err(|reason| unavailable(entry, reason))?;
+        match admitted {
+            Err(cn::Refusal::Unavailable(reason)) => return Err(unavailable(entry, reason)),
+            Err(cn::Refusal::Invalid(what)) => {
+                // §5.2: an eligibility refusal on an admitted attempt is
+                // terminal, and the row carries why.
+                finish(
+                    store,
+                    desk_id,
+                    action_id,
+                    &json!({ "failure_code": "ORDER_INVALID", "reason": what }),
+                )?;
+                return Err(TradeError::Invalid(what));
+            }
+            Ok(publication) => sized = publication,
+        }
+        if let Some((_, sent)) = sized {
+            // The sized book has to be *in* the engine before the MARKET is
+            // handed over; a publication that never lands leaves the instrument
+            // non-executable rather than filling against nothing.
+            if let Err(reason) = cn::confirm(node, instrument_id, sent) {
+                cn::mark_failed(node, entry, reason, sent);
+                return Err(unavailable(entry, reason));
+            }
+            node.call(move |context| place(context, form, client_order_id))?;
+        }
     } else {
         node.call(move |context| place(context, form, client_order_id))?;
     }
-    let settled = settle(node, client_order_id, settled_submit)?;
+    let settled = settle(node, client_order_id, settled_submit);
+    if let Some((idle, sent)) = sized {
+        // Whatever the sandbox answered — a fill, a denial, or nothing — the
+        // idle book goes back up and the instrument is released (§2.5). A
+        // denial does not roll back the resting orders the publication filled.
+        let idle = idle.unwrap_or_default();
+        let _ = cn::restore_idle(node, form.entry, idle, sent + 1);
+    }
+    let settled = settled?;
     finish(store, desk_id, action_id, &settled.projection)?;
 
     match settled.refusal {
         Some(reason) => Err(TradeError::Rejected(reason)),
         None => Ok(settled.projection),
     }
+}
+
+/// The `MARKET_UNAVAILABLE` a blocked CN instrument answers with, in MarketRig's
+/// own vocabulary (`a-share-engine` SPEC §2.1).
+fn unavailable(entry: &Entry, reason: crate::hithink::Reason) -> TradeError {
+    TradeError::Unavailable(format!(
+        "the desk cannot trade {} right now: {reason}",
+        entry.instrument_id
+    ))
 }
 
 /// `POST /desks/{desk_id}/orders/{client_order_id}/cancel` (§7).
@@ -478,6 +546,18 @@ pub fn decide(
         Decision::Deny => None,
     };
 
+    // §5.2: temporary execution unavailability leaves the action `PENDING`
+    // *without* recording a decision, so the availability half of the CN
+    // execution-time checks runs before the row is touched. The eligibility
+    // half runs inside the admission closure below and is terminal.
+    if let Some(node) = &node {
+        let (_, form) = validate(&request)?;
+        if form.entry.market == catalog::Market::Cn {
+            cn::admit(node, InstrumentId::from(form.entry.instrument_id), |_| ())
+                .map_err(|reason| unavailable(form.entry, reason))?;
+        }
+    }
+
     let approval = decision.decided();
     let outcome =
         matches!(decision, Decision::Deny).then(|| json!({ "failure_code": "DENIED" }).to_string());
@@ -512,7 +592,10 @@ pub fn decide(
     let Some(node) = node else { return Ok(()) };
     let (_, form) = validate(&request)?;
     match place_and_settle(store, &node, desk_id, &action_id, form) {
-        Ok(_) | Err(TradeError::Rejected(_)) => Ok(()),
+        // A sandbox refusal and an eligibility refusal are both terminal
+        // outcomes of an approved attempt, not failures of the decision
+        // (`a-share-engine` SPEC §5.2); each has already landed on the row.
+        Ok(_) | Err(TradeError::Rejected(_)) | Err(TradeError::Invalid(_)) => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
@@ -602,11 +685,38 @@ fn validate(body: &str) -> Result<(String, Form), TradeError> {
     let quantity: Decimal = body.quantity.parse().map_err(|_| {
         TradeError::Invalid(format!("quantity {:?} is not decimal text", body.quantity))
     })?;
-    if quantity <= Decimal::ZERO || quantity % lot != Decimal::ZERO {
+    // A CN SELL is exempt from the blanket lot rule: its own rule is the odd
+    // remainder of the *sellable* quantity, which only the node cache knows
+    // (`a-share-engine` SPEC §1.2, §3.1, per AE-4). Everything else, including
+    // every CN BUY, is a positive multiple of the instrument's lot.
+    let cn_sell = entry.board.is_some() && side == OrderSide::Sell;
+    if cn_sell && (quantity <= Decimal::ZERO || quantity.fract() != Decimal::ZERO) {
+        return Err(TradeError::Invalid(format!(
+            "quantity {:?} is not a positive whole number of shares of {}",
+            body.quantity, entry.instrument_id
+        )));
+    }
+    if !cn_sell && (quantity <= Decimal::ZERO || quantity % lot != Decimal::ZERO) {
         return Err(TradeError::Invalid(format!(
             "quantity {:?} is not a positive multiple of the {} lot of {}",
             body.quantity, entry.lot_size, entry.instrument_id
         )));
+    }
+    // The per-order share cap of the supported board (§3.2): at-cap passes.
+    if let Some(board) = entry.board {
+        let kind = match order_type {
+            OrderType::Limit => catalog::OrderKind::Limit,
+            _ => catalog::OrderKind::Market,
+        };
+        if crate::cn::over_cap(board, kind, quantity) {
+            return Err(TradeError::Invalid(format!(
+                "quantity {:?} exceeds the {} cap of {} shares for {}",
+                body.quantity,
+                body.order_type,
+                board.limit_cap(kind),
+                entry.instrument_id
+            )));
+        }
     }
     // The sandbox drops an order whose size precision disagrees with the
     // instrument, and an equity's size precision is zero, so the multiple above

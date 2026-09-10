@@ -56,7 +56,8 @@ use serde_json::Value;
 
 use crate::catalog::Entry;
 use crate::feasibility::clock::{
-    CN_0935, ClockHandle, SECOND_NS, advance, controlled_registry, publish_book, stored_events,
+    CN_0935, ClockHandle, DAY_NS, SECOND_NS, advance, controlled_registry, publish_book,
+    stored_events,
 };
 use crate::node::{Node, Registry, within};
 use crate::store::Store;
@@ -77,11 +78,13 @@ fn moutai() -> &'static Entry {
     crate::catalog::find("600519.XSHG").expect("the CN catalog entry")
 }
 
-/// A started desk on the controlled clock at 09:35 Asia/Shanghai, no feed, no
-/// book yet. Its XSHG account holds 500,000 CNY (`crate::node::seed` split
-/// across the two CN venues), which bounds every quantity used here.
+/// A started desk on the controlled clock at 09:35 Asia/Shanghai on day **D−1**,
+/// no feed, no book yet — so a test that needs inventory can buy it before
+/// today and §1.1's T+1 lock does not hold it (slice 014 step 3). Its XSHG
+/// account holds 500,000 CNY (`crate::node::seed` split across the two CN
+/// venues), which bounds every quantity used here.
 fn desk(store: &Store, name: &'static str) -> (Registry, ClockHandle, Arc<Node>) {
-    let (registry, handle) = controlled_registry(store, None, name, CN_0935);
+    let (registry, handle) = controlled_registry(store, None, name, CN_0935 - DAY_NS);
     let node = registry.ensure(handle.desk_id()).expect("the node starts");
     (registry, handle, node)
 }
@@ -258,9 +261,9 @@ fn zero_ask_blocks_buys_at_the_upper_limit() {
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = desk(&store, "f4-upper");
     let desk_id = handle.desk_id().to_owned();
-    let mut at = CN_0935 + SECOND_NS;
+    let mut at = CN_0935 - DAY_NS + SECOND_NS;
 
-    // Inside the band, both sides sized: an ordinary synthesized book.
+    // Day D−1, inside the band, both sides sized: an ordinary synthesized book.
     tick(&node, ("1200.00", LOT), ("1200.00", LOT), at);
     let seeded = submit(
         &store,
@@ -273,6 +276,7 @@ fn zero_ask_blocks_buys_at_the_upper_limit() {
     )
     .expect("the seeding market buy is accepted");
     assert_eq!(seeded["status"], "FILLED", "{seeded}");
+    at = CN_0935;
 
     // (b) An order resting from *before* the zeroing. A BUY whose limit is at
     //     1320.00 cannot be created here — against a sized 1200.00 ask it is
@@ -554,9 +558,9 @@ fn zero_bid_blocks_sells_at_the_lower_limit() {
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = desk(&store, "f4-lower");
     let desk_id = handle.desk_id().to_owned();
-    let mut at = CN_0935 + SECOND_NS;
+    let mut at = CN_0935 - DAY_NS + SECOND_NS;
 
-    // Three lots of inventory, bought inside the band in one fill.
+    // Three lots of inventory, bought inside the band in one fill, on day D−1.
     tick(&node, ("1100.00", 300), ("1100.00", 300), at);
     let seeded = submit(
         &store,
@@ -569,6 +573,7 @@ fn zero_bid_blocks_sells_at_the_lower_limit() {
     )
     .expect("the seeding market buy is accepted");
     assert_eq!(seeded["status"], "FILLED", "{seeded}");
+    at = CN_0935;
 
     // The market reaches the lower limit and MarketRig suppresses the bid.
     at += SECOND_NS;
@@ -657,8 +662,9 @@ fn market_sell_remainder_slips_into_the_band() {
     let (_dir, store) = crate::store::open_temp();
     let (registry, handle, node) = desk(&store, "f4-lower-rem");
     let desk_id = handle.desk_id().to_owned();
-    let mut at = CN_0935 + SECOND_NS;
+    let mut at = CN_0935 - DAY_NS + SECOND_NS;
 
+    // Day D−1, so the shares are sellable today.
     tick(&node, ("1100.00", 300), ("1100.00", 300), at);
     submit(
         &store,
@@ -670,6 +676,7 @@ fn market_sell_remainder_slips_into_the_band() {
         None,
     )
     .expect("the seeding market buy is accepted");
+    at = CN_0935;
 
     at += SECOND_NS;
     tick(&node, (OVER_DOWN, LOT), (OVER_DOWN, LOT), at);
