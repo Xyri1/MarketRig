@@ -1,8 +1,8 @@
 # A-share paper-trading engine — Feature SPEC
 
-**Status:** Revised proposal, 2026-09-09; feasibility pending, no implementation slice.
+**Status:** Product choices settled 2026-09-10; F8 fill-mechanism feasibility pending, no implementation slice.
 
-_Decision basis: per D4, D20, D38, D75, D76, D78, D84; proposed amendments AE-1–AE-8._
+_Decision basis: per D4, D20, D38, D75, D76, D78, D84; proposed amendments AE-1–AE-9._
 
 CN only; US and HK retain their existing contracts. This proposal changes CN's phase-independent execution, GTC lifetime, and form-only validation boundary. Root SDD remains the delivered contract until the feasibility result is resolved and these amendments are reconciled before implementation. [FEASIBILITY.md](FEASIBILITY.md) owns the outstanding check; [RESEARCH.md](RESEARCH.md) holds supporting evidence.
 
@@ -20,7 +20,7 @@ sellable_quantity = max(0, current position quantity - locked_quantity - reserve
 
 Read fills in the day's half-open nanosecond interval, parse their decimal text, and sum exactly; never use SQLite floating-point SUM over decimal text. Quantities and money stay decimal text externally. No new settlement ledger is required. Pending approvals are not outstanding sandbox orders and reserve nothing. A cancel request does not release shares until its terminal outcome is authoritative; partial fills reduce the reservation by filled quantity.
 
-Compute from a consistent node position/order state and its committed fill history. Serialize eligibility validation and submission on the same desk action boundary so two competing sells cannot pass against the same shares. A new request cannot overtake persistence of an earlier fill. The feasibility check must establish the existing ordering mechanism before specifying an implementation.
+Compute from the node cache’s positions, native BUY fill events, and all nonterminal SELL orders, including INITIALIZED orders. F6 proves that storage can lag this cache within dispatch. Read eligibility and place the order in the same Node::call so two competing sells cannot reserve the same shares; do not base admission on a lagging SQL projection.
 
 ### 1.2 Validation
 
@@ -42,19 +42,23 @@ Current CN positions gain decimal-text `sellable_quantity`, `locked_quantity`, a
 
 ### 2.1 Readiness and provenance
 
-For HiThink CN, matching and submission require a usable current-trading-day band: positive valid reference price, verified date attribution, verified ex-rights/ex-dividend reference semantics, confirmed calendar, and a healthy current feed observation. Missing/invalid reference, inconsistent price, uncertain date, feed failure, or node failure blocks execution with `MARKET_UNAVAILABLE` and a specific reason. No silent disabling of the band.
+For HiThink CN, readiness requires: a successful calendar response containing today (Asia/Shanghai); a successful unadjusted daily bar with date equal to today for the instrument; and a valid snapshot carrying positive `prev_price`, positive tick-aligned last price within the derived band, and nonnegative cumulative volume. No snapshot/bar price equality or tolerance is required. These establish a simulation assumption: the snapshot and `prev_price` describe that day. They do not independently certify it. `prev_price` reference behavior is observed, not a documented ex-rights guarantee. A local dividend-derived price must not override or gate it.
 
-How HiThink establishes the date and reference semantics is an explicit feasibility blocker. A successful HTTP request after midnight, receipt time, or a changed price triple is not proof. Determine the least additional authoritative evidence needed; do not invent provider fields. A valid reference may be retained within its proven trading date, but matching resumes only with a healthy usable observation. Day rollover invalidates readiness until the new day's evidence is established.
+At startup and day rollover, readiness starts unavailable. Obtain calendar and per-instrument bar evidence once for that day; retain successful evidence in memory during the day. A subsequent failed redundant calendar/bar refresh does not revoke successful same-day evidence; contradictory successful evidence does block readiness. Missing evidence is retried on the existing poll cadence with bounded backoff, not a tight loop. A changed `prev_price` during the day blocks that instrument until the next day; no automatic intraday rebasing. Never carry date evidence across rollover or persist it as permanently verified provenance.
 
-Yahoo CN remains explicitly simplified: band fields are null and the band/limit-fill policy is unavailable. T+1, quantity rules, confirmed-calendar requirement, session restriction, and day lifetime still apply. An unavailable confirmed calendar also blocks Yahoo CN execution. Never automatically fall back from HiThink to Yahoo.
+A failed snapshot request, malformed/missing instrument data, or node failure blocks affected submissions and resting fills with MARKET_UNAVAILABLE and a specific reason. Successful recovery installs coherent evidence and resets §2.5’s observation baseline before matching. A successful but unchanged snapshot is not itself an error. A stale snapshot that continues to return successfully may escape detection: source delay remains unknown, and no bounded source freshness is promised. Any displayed age is age since receipt, never market-data age.
 
-Expose execution availability and its reason separately from quote health/market phase, including when auction hours fall inside the existing phase envelope. Exact field/error-reason vocabulary and freshness bound are to be settled from feasibility evidence before an implementation slice; no client may infer eligibility from `health: LIVE` alone.
+Keep the existing batched per-node cadence: 10 seconds while any CN order/position is open, 30 seconds idle, with existing phase suppression and initial subscription read. This is not a provider quota. Back off on HTTP 429 or envelope 429/4001 using the existing three-attempt bound (500 ms then 1 second), and on existing retryable failures. After exhaustion, execution stays unavailable until a successful poll; no automatic order resubmission. Research traffic and other desk nodes share the key's unknown service limits.
+
+Yahoo CN retains its explicitly simplified native quote-matching model, with null bands and no AE-9 claim. T+1, quantities, confirmed calendar, sessions and scheduled cancellation still apply. Missing confirmed calendar blocks Yahoo CN execution as well. Never automatically fall back from HiThink to Yahoo.
+
+Expose execution availability/reason independently from health and phase, inferred band date, receipt age, source delay unknown, and the active fill policy. Auction fields do not authorize execution or detect halts. No client may infer eligibility from health: LIVE alone.
 
 ### 2.2 Calculation and catalog
 
 Catalog entries must identify the supported board sufficiently to derive band and order caps. Main board: 10%; ChiNext: 20%. STAR/Beijing and exceptional listing regimes are not admitted by adding a band field alone.
 
-With verified reference `prev`, tick `tick`, and percentage `band`:
+With provider reference `prev` accepted under §2.1, tick `tick`, and percentage `band`:
 
 ```text
 limit_up   = round_half_up(prev * (1 + band/100), tick)
@@ -68,15 +72,27 @@ Use exact decimal arithmetic. A last price outside the calculated band is incons
 
 ### 2.3 Observation and conservative policy
 
-CN quote/book resources carry `prev_close`, `limit_up`, `limit_down`, and the proven band date when available. Replace the draft `limit_struck` vocabulary with a price-condition field whose values are `AT_UPPER_LIMIT`, `AT_LOWER_LIMIT`, or null. Prices equal to a boundary describe a price condition, not counterparties. No fabricated source timestamp.
+CN quote/book resources carry `prev_close`, `limit_up`, `limit_down`, and the inferred band date when available. Replace the draft `limit_struck` vocabulary with a price-condition field whose values are `AT_UPPER_LIMIT`, `AT_LOWER_LIMIT`, or null. Prices equal to a boundary describe a price condition, not counterparties. No fabricated source timestamp.
 
-The active policy is explicit: with HiThink bands, no BUY fill at the upper limit and no SELL fill at the lower limit. The opposite direction may fill, subject to every other check. Inside the band, ordinary synthesized matching applies. This includes resting orders and partial fills. All resulting fill prices must be within the band.
+When the observed last price equals the upper limit, suppress BUY fills; at the lower limit, suppress SELL fills. The opposite direction may fill subject to every other check. A LIMIT fill at a boundary price is allowed when its triggering observation is inside the band. All fill prices remain within the band. This is a policy against the observed condition, not an assertion about the exchange queue.
 
-Zero-size opposite-side quotes are a candidate mechanism, not the contract. Prove book-to-core propagation and band-safe remainder behavior in FEASIBILITY. At a suppressed side, a new MARKET order is expected to receive the sandbox's own no-market rejection; preserve the actual event/reason and do not rename it exchange cancellation. LIMIT orders may rest until eligible liquidity returns or they expire. If the pinned integration cannot produce these outcomes, revise the proposal rather than implement post-fill correction.
+F4 proves zero-size side propagation, but does not prove the order-specific temporal rule in §2.5. At a suppressed side, MARKET receives native no-market rejection; LIMIT remains open until a qualifying observation or cancellation. Preserve actual events/reasons. F8 must enforce the combined policy without fabricated fills or post-fill correction.
 
 ### 2.4 Limit-price validation
 
-A LIMIT price outside the inclusive band answers `ORDER_INVALID`, naming the instrument, reference, date, and bounds. A valid crossing limit is eligible to fill, not guaranteed to rest. A valid non-crossing limit rests subject to lifecycle rules.
+A LIMIT price outside the inclusive band answers `ORDER_INVALID`, naming the instrument, reference, date, and bounds. Even a compatible LIMIT rests at submission: only §2.5’s later qualifying observation can trigger a fill.
+
+### 2.5 HiThink order-trigger and fill policy (AE-9)
+
+On execution-time admission (approval time for a pending action), record the node's latest accepted observation sequence and cumulative volume as the LIMIT baseline. Read that baseline and submit atomically with the eligibility checks. A snapshot already received before admission, including one still queued for delivery, cannot trigger this order. A subsequent accepted observation qualifies only when its volume exceeds both the order baseline and the preceding accepted observation's volume, and its last price is <= the BUY limit or >= the SELL limit. All session, readiness and direction gates must also hold. Increasing volume with an incompatible price advances the preceding-observation baseline; a later price-only change without more volume does not qualify. Equal-volume snapshots never trigger LIMIT fills.
+
+The first qualifying observation permits the full remaining quantity at the limit price, with native sufficiency checks. The observed volume increase is a trigger, not fillable quantity: it is not allocated among orders or desks, and queue priority, partial liquidity, price improvement and missed intrapoll trades are not modeled. No fill is backdated to an inferred transaction time. BUY 100 @ 10 submitted after a snapshot at 9.90/volume 1000 waits; 9.95/1001 may fill 100 @ 10. A SELL limit uses the reverse price comparison. Compatible price without increased volume does not fill.
+
+MARKET means immediate synthetic execution against the latest usable snapshot: full requested quantity at last price, no artificial spread or slippage, subject to native cash/holdings checks and all other gates. It does not assert that a real trade occurred after submission. At a suppressed direction it receives native no-market rejection. A MARKET is not parked awaiting future volume. The snapshot may have unknown source delay, as disclosed in §2.1.
+
+On restart, feed recovery, or provider switch, clear executable stale state and establish a first usable observation as baseline without filling restored LIMITs. They require a subsequent qualifying observation. On a same-day cumulative-volume decrease, pause, discard temporal baselines, and use the next valid observation only to re-establish them; no fill on reset. Day rollover cancels the previous day's orders. Ordinary lunch reopening can use the retained same-day baseline, but cannot fill until a new qualifying post-reopen observation arrives.
+
+These are required native-engine outcomes, not permission to implement a daemon matcher, delay orders in an unmodeled daemon queue, or fabricate fills. F8 must prove per-order timing, full-quantity prices and MARKET/LIMIT isolation using supported pinned-sandbox integration. Existing quote-crossing results do not establish this new policy.
 
 ## 3. Quantities and fees (AE-4, AE-5)
 
@@ -101,7 +117,7 @@ At-cap quantities pass this structural check; over-cap quantities fail with `ORD
 
 ## 4. Agent-visible contract (AE-6)
 
-New-desk constitution text must explain CN T+1, the three quantity projections, supported continuous sessions, expiry at 14:57, data-readiness blocks, HiThink bands, conservative no-fill-at-limit behavior, and simplified Yahoo mode. Also name synthetic spread/depth, unsupported auctions/halts/after-hours, approximate fees, and missing corporate-action accounting. US/HK behavior stays as declared today. Existing AGENTS.md is never rewritten.
+New-desk constitution text must explain CN T+1, the three quantity projections, supported continuous sessions, expiry at 14:57, data-readiness blocks, HiThink bands, conservative direction suppression, sampled LIMIT triggering, and immediate synthetic MARKET pricing, and simplified Yahoo mode. Also name inferred snapshot/reference date, unknown source delay, missed crossings, full-quantity synthetic liquidity, unsupported auctions/halts/after-hours, approximate fees, and missing corporate-action accounting. US/HK behavior stays as declared today. Existing AGENTS.md is never rewritten.
 
 Keep CLI, MCP, errors, and seed text English under both desktop locales. Quote/book/instrument resources expose the active execution restrictions and readiness for all desks, including those with older constitutions. The exact seeded paragraph follows the finalized contract after feasibility; do not claim an unproven capability in a byte-for-byte seed test now.
 
@@ -111,7 +127,7 @@ Keep CLI, MCP, errors, and seed text English under both desktop locales. Quote/b
 
 On a confirmed exchange trading day, permit execution only in [09:30,11:30) and [13:00,14:57) Asia/Shanghai. Outside those intervals new submissions fail `ORDER_INVALID` naming the supported session; resting orders cannot fill. No order is queued for the next session implicitly.
 
-Lunch suspends fills without expiring orders. At 14:57, all remaining CN orders terminate through a supported sandbox lifecycle path and release reservations. This simulator-day expiry deliberately precedes the unmodeled closing auction. Expose the actual native time-in-force and terminal events; do not merely label a GTC order DAY. Determine native DAY support versus supported scheduled cancellation in feasibility and record the chosen mapping before implementation.
+Lunch suspends fills without expiring orders. Native TIF is GTC. At 14:57, a kernel-clock alert dispatches CancelOrder for every remaining CN order; OrderCanceled releases reservations. This deliberately precedes the unmodeled closing auction. Expose GTC and OrderCanceled; never report DAY or OrderExpired. F2 establishes that native DAY/GTD does not provide the required pre-match deadline.
 
 Boundary transitions must run without a quote. Withholding the next poll is insufficient. At a boundary, timer, submission, data delivery, and matching must be ordered so no fill with an out-of-session instant can occur. Cancellation remains available while the session/data gate is closed, except existing pending-approval cancellation semantics remain unchanged.
 
@@ -127,23 +143,24 @@ After restart, reconcile the order's owning trading date and terminal deadline b
 
 Feed failure or loss of current-day reference suspends all affected resting fills, including those otherwise possible against cached quotes. Recovery establishes a coherent band/book for that desk before allowing matching. Provider switching first blocks CN execution and clears/reconciles stale executable state, then enables the explicitly selected mode. It must not create a transient unchecked fill. Both awareness and matching must use the same accepted reference; another desk's newer installation-wide observation cannot validate an order against a different local book.
 
-The mechanism for gating, expiry, and restoration is unresolved until FEASIBILITY passes. A saved snapshot or source-level API signature is not execution evidence.
+Use F1’s per-instrument InstrumentStatus Pause/Close/Trading for session/data gating and F2’s clock-driven cancellation. Hold the first feed publish, restore orders, call Portfolio::initialize_orders to rebuild native reservations (R1), cancel expired orders, establish current readiness/status, then release observations. Execution event times must be monotonic across provider switches (F5), without relabeling them as source times. Partial-fill restart history must preserve the native chain; R1’s duplicate-accept/history-loss regression is required before delivery. The new temporal fill gate still requires F8.
 
 ## 6. Required checks
 
 The implementation slice is created only after the feasibility record is resolved. Required tests use the real pinned sandbox at the integration boundary; pure arithmetic tests supplement them. A shared controlled clock must drive the actual node/lifecycle path for deterministic day transitions, not only a standalone sellability function. Its test-only mechanism must be proven first.
 
-| Check                      | Required evidence                                                                                                                                                                                                       |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A1 — T+1 and reservation   | Same-day buy/sell refusal; competing sells, partial fills, cancel confirmation, and approval revalidation; next-session sell succeeds. Exact decimal summation and Shanghai midnight boundaries.                        |
-| A2 — bands and quantities  | Main/ChiNext ratios, rounding corners, invalid references, each cap boundary, odd-lot accepted/refused cases. Buy limit 1856.80 against ask 1700 crosses; use a buy below 1700 for the resting case.                    |
-| A3 — limit-fill policy     | Upper and lower limits, both sides, MARKET and resting LIMIT; actual native rejection where applicable; resumed fills only when eligible; every fill within band, including quantities larger than displayed liquidity. |
-| A4 — session and expiry    | Lunch pause/resume; 14:57 terminal lifecycle without a quote; night/weekend/holiday blocked; no transient fills at exact boundaries.                                                                                    |
-| A5 — restart and data loss | Before/after deadline restarts, original IDs, terminal exactly once, no prior-day replay fill; missing/day-stale bands, feed failure/recovery, provider switch, different desk observation timing.                      |
-| Surface and seed           | CN-only eligibility fields; historical records unchanged; current execution availability distinct from phase/health; new seed describes final supported behavior, old seed unchanged; US/HK unaffected.                 |
+| Check                      | Required evidence                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1 — T+1 and reservation   | Same-day buy/sell refusal; competing sells, partial fills, cancel confirmation, and approval revalidation; next-session sell succeeds. Exact decimal summation and Shanghai midnight boundaries.                                                                                                                                                                          |
+| A2 — bands and quantities  | Main/ChiNext ratios, rounding corners, invalid references, each cap boundary, odd-lot accepted/refused cases. A buy limit 1856.80 does not fill on submission at last 1700; a later volume-increasing compatible observation triggers at 1856.80, provided the active band permits it.                                                                                    |
+| A3 — limit-fill policy     | Upper and lower limits, both sides, MARKET and resting LIMIT; actual native rejection where applicable; resumed fills only when eligible; every fill within band, including quantities larger than displayed liquidity.                                                                                                                                                   |
+| A4 — session and expiry    | Lunch pause/resume; 14:57 terminal lifecycle without a quote; night/weekend/holiday blocked; no transient fills at exact boundaries.                                                                                                                                                                                                                                      |
+| A5 — restart and data loss | Before/after deadline restarts, original IDs, terminal exactly once, no prior-day replay fill; missing/day-stale bands, feed failure/recovery, provider switch, different desk observation timing.                                                                                                                                                                        |
+| A6 — sampled execution     | Pre-admission queued observations excluded; compatible price with and without volume growth; incompatible-volume advance then equal-volume price crossing; multiple orders with different admission baselines; exact limit/full-quantity fills; immediate MARKET last-price fills without waking ineligible LIMITs; restart/reset baselines; native balances and history. |
+| Surface and seed           | CN-only eligibility fields; historical records unchanged; current execution availability distinct from phase/health; new seed describes final supported behavior, old seed unchanged; US/HK unaffected.                                                                                                                                                                   |
 
-Integrate A1–A5 after the existing HiThink gate scenarios once implementation begins. Existing CN scenarios that assume phase-independent trading or immediate round trips must be updated in that implementation slice; do not leave the gate dependent on wall-clock market hours.
+Integrate A1–A6 after the existing HiThink gate scenarios once implementation begins. Existing CN scenarios that assume phase-independent trading or immediate round trips must be updated in that implementation slice; do not leave the gate dependent on wall-clock market hours.
 
-E7: attended session reads real research and a verified current-day band, buys, observes the lock, and receives the same-day sell refusal. A later supported trading session sells, closes the native cycle, and queues evaluation. The first sitting alone is partial/inconclusive, never full completion. Hold over a corporate-action date only with the accounting limitation explicitly recorded; do not attribute omitted dividend effects to strategy performance.
+E7: attended session reads real research and a band under the disclosed provider-reference assumptions, buys, observes the lock, and receives the same-day sell refusal. A later supported trading session sells, closes the native cycle, and queues evaluation. The first sitting alone is partial/inconclusive, never full completion. Hold over a corporate-action date only with the accounting limitation explicitly recorded; do not attribute omitted dividend effects to strategy performance.
 
 Repository static/module checks apply to implementing changes. For this design-only revision, check local links, document consistency, and completeness of the feasibility handoff; no runtime pass is claimed.

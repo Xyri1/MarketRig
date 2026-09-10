@@ -1,0 +1,36 @@
+Done. Committed `73aad55`, copied to the main checkout.
+
+## Windows
+
+All six exist, none missing. Two are partial — the provider rate-limited them:
+
+| Window | Requests | Result |
+|---|---|---|
+| open-0931, open-0945, lunch-1259, lunch-1301 | 14 each | all 200 / code 0 |
+| pm-1430 | 13 | calendar refused **HTTP 429 / code 429** at 14:30:46; no auction read |
+| close-1457 | 12 | r3 `300750.SZ` bar refused **429/429** at 14:57:42; no calendar, no auction |
+
+81 requests, 79 successful. No key in any file.
+
+## The five answers
+
+**Current-day bar at open and lunch reopen, and intraday updates — yes to all.** A bar dated 2026-09-10 in all 52 successful historical reads, in every window; 600519.SH's bar volume went 46,300 → 1,866,122 across the day, strictly increasing. Discrepancies kept: snapshot and bar agree exactly on both fields in 31 of 53 pairs, and only 22 of 44 with the market open. Largest gaps 1.20 on price (≈9 bp) and 58,100 shares; the bar leads 13 times and lags 9. During the lunch break all 9 pairs matched exactly. An equality gate fails; no tolerance is derivable.
+
+**What dates things.** Two provider assertions: `calendar/trading-days` `max_date: 20260910` and the bar's `date_ms`. The snapshot has no date field at all — it is dated only by correlation with the separately requested bar, which today was imperfect. Its `data.timestamp` advanced 43 s through the frozen lunch break, so it dates the response, not the datum. `prev_price` is dated by nothing; it was byte-constant across 18 reads.
+
+**`prev_price` documentation** — cited, not redone: §R2.4, not documented (only 前收盘价); behaviour confirmed against SZSE in §R2.6.
+
+**Source timestamp / maximum delay** — cited §R2.5, §R2.9: none exists. The samples added two negative facts: the 43 s lunch advance, and all five codes returning identical price/volume/turnover 20 s apart at 14:57 *during continuous trading*. A frozen read no longer implies a pause.
+
+**Calendar re-establishment** — §R2.7 stands, positive path 4/4, one amendment forced: the 14:30 calendar read was refused 429 mid-session. A proven day must survive a refusal; only rollover revokes it. Otherwise one rate-limited request pauses execution on a day confirmed four times.
+
+## auction_phase / data_status at 12:59 vs 13:01
+
+`closed` / `final` at both, identical to 09:31, 09:45 and both after-hours reads — six observations, one value, with `auction_price` frozen at the 09:25 call-auction result. It tests the documented meaning partly: `final` = 竞价完成 is consistent, and it proves the field describes the *call auction*, not the session — it did not move when trading stopped at 11:30 or resumed at 13:00. It cannot gate a session or freshness. Halts remain untested; no sampled instrument was halted, and `stage=final` cannot return `live`/`not_ready`.
+
+## Recommendation
+
+The R2 blocker closes under the §R2.10 weaker ceiling, amended: drop snapshot/bar equality, withdraw `data_status` as a session/halt signal (session boundaries come from the confirmed day plus the engine's session clock — already the F1/F2 mechanism), and make a confirmed day durable against refusal. Six assumptions need explicit user acceptance: unbounded unknown source delay; unchanged reads meaning nothing; the snapshot dated by inference and the reference by nothing; `prev_price` undocumented and confirmed for cash events only; halts invisible; rate limiting real and self-inflicted. Nothing marked complete, no slice opened, no push.
+SessionEnd hook [node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionEnd] failed: /bin/sh: node: command not found
+
+exit=0
