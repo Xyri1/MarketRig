@@ -1,6 +1,6 @@
 # A-share engine feasibility check — handoff for Claude
 
-**Status:** F1–F7 and R1/R2 recorded; weaker provider ceiling accepted 2026-09-10 by delegated judgment. New AE-9 fill model awaits F8 (NOT RUN).  
+**Status:** F1–F7 and R1/R2 recorded; weaker provider ceiling accepted 2026-09-10 by delegated judgment. F8 DONE 2026-09-10 (macOS): items 1, 2, 4 PASS, item 3 resolved by AE-9 amendment (MARKET observation qualifies compatible LIMITs), item 5 envelope-429 gap recorded for the slice.  
 **Owner:** Claude, when the user starts this work  
 **Scope:** bounded evidence spike; no product implementation slice opened  
 **Blocks:** implementation readiness for the newly settled AE-9 fill mechanism
@@ -248,7 +248,7 @@ This records evidence and required corrections only. It does not mark the featur
 
 ## F8 — settled sampled-fill policy, native feasibility handoff (2026-09-10)
 
-**Status: NOT RUN. Product choices settled by the user’s delegated judgment; engineering feasibility remains open.** AE-8 accepts the weaker provider ceiling: unknown source delay, inferred snapshot/reference date, undocumented reference semantics, undetectable halts, missed intrapoll crossings and possible stale successful responses. No further ordinary market captures are required to decide those tradeoffs. This supersedes earlier wording that R2 awaits explicit acceptance. It is not a PASS of the revised matcher or permission for full feature implementation.
+**Status: DONE 2026-09-10 — see "F8 result" below; item 3 resolved the same day by the user: alternative 1 adopted into AE-9 / SPEC §2.5, and envelope 429 confirmed as rate limiting for the retryable set.** Original handoff text follows. AE-8 accepts the weaker provider ceiling: unknown source delay, inferred snapshot/reference date, undocumented reference semantics, undetectable halts, missed intrapoll crossings and possible stale successful responses. No further ordinary market captures are required to decide those tradeoffs. This supersedes earlier wording that R2 awaits explicit acceptance. It is not a PASS of the revised matcher or permission for full feature implementation.
 
 Read the updated PRD → DECISIONS → SPEC first. AE-9 settles HiThink LIMITs as later increased-volume/compatible-price triggers, full remaining quantity at the limit price; MARKETs as immediate full-quantity synthetic fills at the latest usable last price. No synthetic spread/slippage. Yahoo remains its explicitly simplified model. The 10/30-second cadence remains; the observed 429s do not identify a numerical quota or prove that these captures alone caused throttling. Do not describe 14:57 as continuous trading: it is the excluded closing-auction boundary in this feature.
 
@@ -335,3 +335,7 @@ AE-9 / SPEC §2.5, one point: adopt alternative 1 — a MARKET's observation als
 #### Not established
 
 Windows; a ChiNext name; partial-fill interaction with AE-9 (every AE-9 fill is full quantity by construction; the retained R1 history defect stays open); the daemon's restart-time and session "now" are still wall clock (F0's session-clock seam remains required for deterministic acceptance); envelope-only 429 has not been observed from the real service; the queued-quote-versus-`Node::call` ordering is a race and was not stressed.
+
+#### Resolution — 2026-09-10
+
+User decision: item 3 takes alternative 1. AE-9 and SPEC §2.5 now say a MARKET's observation qualifies every compatible resting LIMIT on that instrument regardless of volume; those LIMITs fill first at their own limit price, then the MARKET at last. Envelope `code: 429` is confirmed as rate limiting and belongs in the retryable set with `4001`; the one-line change stays with the implementation slice. Every F8 item is now resolved on macOS evidence; Windows, the session-clock seam, and the partial-fill history defect remain as recorded under "Not established".
