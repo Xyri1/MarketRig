@@ -483,7 +483,7 @@ impl Registry {
             node.stop_and_join();
             return Err(e);
         }
-        if let Err(e) = reconcile_cn(&node, &self.market) {
+        if let Err(e) = reconcile_cn(desk_id, &node, &self.market) {
             node.stop_and_join();
             return Err(e);
         }
@@ -528,8 +528,12 @@ impl Registry {
 /// The cancel is the same `TradingCommand::CancelOrder` [`trade::cancel`] sends,
 /// stamped by the node clock, and it goes out before any quote exists — which is
 /// what makes it beat the first crossing observation (F3 (1a), (2)).
-fn reconcile_cn(node: &Node, market: &MarketState) -> Result<(), NodeError> {
+fn reconcile_cn(desk_id: &str, node: &Node, market: &MarketState) -> Result<(), NodeError> {
     let now_ns = node.now_ns()?;
+    #[cfg(test)]
+    let assume_calendar = calendared(desk_id);
+    #[cfg(not(test))]
+    let _ = desk_id;
     let feed = market
         .hithink()
         .map_or(AShareFeed::Yahoo, |hithink| hithink.a_share_feed());
@@ -561,19 +565,19 @@ fn reconcile_cn(node: &Node, market: &MarketState) -> Result<(), NodeError> {
 
     // The session gate is per-`OrderMatchingEngine` in-memory state that no
     // snapshot carries (F3 (8)), so every CN instrument is re-gated on every
-    // start, whatever the phase. Under HiThink readiness starts unavailable
-    // (feature SPEC §2.1): only the first successful cycle can open it.
+    // start, whatever the phase. Readiness starts unavailable under *either*
+    // feed (feature SPEC §2.1, AE-7): Yahoo CN needs the same confirmed
+    // calendar, so only the first successful cycle can open it.
     node.call(move |context| {
         {
             let mut exec = context.cn.borrow_mut();
             exec.reset();
             exec.feed = feed;
-            if feed == AShareFeed::Hithink {
-                for entry in feed::cn_entries() {
-                    exec.inst(InstrumentId::from(entry.instrument_id)).readiness =
-                        Err(crate::hithink::Reason::NoCalendar);
-                }
+            #[cfg(test)]
+            {
+                exec.assume_calendar = assume_calendar;
             }
+            cn::block(&mut exec);
             for entry in feed::cn_entries() {
                 cn::republish_status(&mut exec, entry, now_ns);
             }
@@ -1178,19 +1182,30 @@ async fn cn_cycle(
         cn::switch_provider(cn, &list, feed, now());
     }
 
+    // The trading-day list is the *provider's* answer, not the feed's: it gates
+    // CN execution under Yahoo exactly as under HiThink (§2.1, AE-7), so it is
+    // refreshed before the feed branch, whichever one this cycle takes.
+    if let Some(hithink) = &hithink {
+        hithink.refresh_calendar_if_due(now() as i64).await;
+    }
+
     let hithink = match hithink.filter(|_| feed == AShareFeed::Hithink) {
         Some(hithink) => hithink,
         None => {
-            // Yahoo CN: the confirmed trading day still gates it when a provider
-            // can answer for it; with no provider at all there is nothing to
-            // consult and the R6 behaviour stands.
+            // Yahoo CN is explicitly simplified, but it is not ungated: the
+            // confirmed trading day still decides (§2.1). A desk with no
+            // provider at all has no calendar to consult and stays
+            // `NO_CALENDAR` — awareness keeps working, execution does not.
             let day = market
                 .hithink()
-                .map_or(Ok(()), |hithink| hithink.trading_day(now() as i64));
+                .map_or(Err(crate::hithink::Reason::NoCalendar), |hithink| {
+                    hithink.trading_day(now() as i64)
+                });
             for (entry, instrument_id) in entries {
                 let at = now();
                 {
                     let mut exec = cn.borrow_mut();
+                    let day = exec.calendar_verdict(day);
                     exec.inst(*instrument_id).readiness = day;
                     cn::gate(&mut exec, entry, at);
                 }
@@ -1200,7 +1215,6 @@ async fn cn_cycle(
         }
     };
 
-    hithink.refresh_calendar_if_due(now() as i64).await;
     // A key rejected mid-run leaves the leg degraded with its last HiThink
     // observation standing; the daemon never switches to Yahoo on its own.
     if !hithink.feed_ready() {
@@ -1366,8 +1380,29 @@ impl Drop for ClockHandle {
 /// — the in-process form of the [`TEST_CLOCK_ENV`] seam, so one module check
 /// controls one desk. The desk row is seeded here; the node starts on the first
 /// [`Registry::ensure`].
+/// Its desk also assumes today's confirmed trading calendar, because nothing in
+/// a module check could install one: see [`cn::CnExec::assume_calendar`]. Use
+/// [`controlled_registry_uncalendared`] for the AE-7 checks.
 #[cfg(test)]
 pub(crate) fn controlled_registry(
+    store: &Store,
+    feed_base: Option<FeedBase>,
+    desk_name: &'static str,
+    start_ns: u64,
+) -> (Registry, ClockHandle) {
+    let (registry, handle) =
+        controlled_registry_uncalendared(store, feed_base, desk_name, start_ns);
+    CALENDARED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(handle.desk_id.clone());
+    (registry, handle)
+}
+
+/// The same desk with the production calendar rule: CN execution is unavailable
+/// until a confirmed same-day trading calendar opens it (§2.1, AE-7).
+#[cfg(test)]
+pub(crate) fn controlled_registry_uncalendared(
     store: &Store,
     feed_base: Option<FeedBase>,
     desk_name: &'static str,
@@ -1377,6 +1412,20 @@ pub(crate) fn controlled_registry(
     register_controlled(&desk_id, start_ns);
     let registry = Registry::new(store.clone(), Arc::new(MarketState::new()), feed_base);
     (registry, ClockHandle { desk_id })
+}
+
+/// The desks [`controlled_registry`] speaks for. A restart builds a fresh
+/// `Registry` over the same desk id, so the flag lives with the desk.
+#[cfg(test)]
+static CALENDARED: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+fn calendared(desk_id: &str) -> bool {
+    CALENDARED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(desk_id)
 }
 
 /// [`Node::advance_to`], panicking — the spike's own vocabulary.

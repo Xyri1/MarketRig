@@ -300,6 +300,10 @@ pub struct Inst {
     /// strictly monotonic (F5: a stamp below the book's own skips the update).
     pub ts_last: u64,
     /// `Err` leaves the instrument non-executable until a recovery clears it.
+    /// A node start and a provider switch both put it back to
+    /// `Err(NoCalendar)` under *either* feed — see [`block`] — because only a
+    /// confirmed same-day trading calendar opens CN execution, Yahoo CN
+    /// included (§2.1, AE-7).
     pub readiness: Result<(), Reason>,
     /// The day's accepted reference and band, present exactly while readiness
     /// holds under HiThink.
@@ -367,6 +371,15 @@ pub struct CnExec {
     /// (§5.3), and it is what decides whether MARKET takes AE-9's sized
     /// publication or Yahoo's native two-sided quote.
     pub feed: AShareFeed,
+    /// A module-check seam, and only that. The checks in this crate drive a bare
+    /// node with no HiThink provider and no polling task, publishing onto the
+    /// data path by hand, so nothing in them could install the confirmed
+    /// calendar a real cycle installs. Such a desk assumes today's, or every one
+    /// of them would be asserting AE-7's block instead of the node mechanics it
+    /// is about. `crate::node::controlled_registry` sets it; the AE-7 checks use
+    /// `controlled_registry_uncalendared` and get the production default back.
+    #[cfg(test)]
+    pub assume_calendar: bool,
     per: HashMap<InstrumentId, Inst>,
 }
 
@@ -375,6 +388,8 @@ impl Default for CnExec {
         CnExec {
             released: false,
             feed: AShareFeed::Yahoo,
+            #[cfg(test)]
+            assume_calendar: false,
             per: HashMap::new(),
         }
     }
@@ -383,6 +398,16 @@ impl Default for CnExec {
 impl CnExec {
     pub fn new() -> CnExec {
         CnExec::default()
+    }
+
+    /// A calendar verdict as this node reads it — the production answer, except
+    /// on a module-check desk that [`CnExec::assume_calendar`] speaks for.
+    pub fn calendar_verdict(&self, day: Result<(), Reason>) -> Result<(), Reason> {
+        #[cfg(test)]
+        if self.assume_calendar {
+            return Ok(());
+        }
+        day
     }
 
     pub fn inst(&mut self, instrument_id: InstrumentId) -> &mut Inst {
@@ -762,6 +787,21 @@ pub fn switch_provider(exec: &Exec, entries: &[&'static Entry], feed: AShareFeed
     }
     exec.reset();
     exec.feed = feed;
+    block(&mut exec);
+}
+
+/// Readiness starts unavailable, under either feed (§2.1, AE-7): only a
+/// confirmed same-day calendar — which Yahoo CN needs exactly as HiThink does —
+/// can open CN execution, and only the next successful cycle can install one.
+/// A node start and a provider switch both come through here.
+pub fn block(exec: &mut CnExec) {
+    #[cfg(test)]
+    if exec.assume_calendar {
+        return;
+    }
+    for entry in crate::feed::cn_entries() {
+        exec.inst(InstrumentId::from(entry.instrument_id)).readiness = Err(Reason::NoCalendar);
+    }
 }
 
 /// Publishes what one observation planned, on the node thread, from the polling
@@ -1091,6 +1131,129 @@ pub fn size_for_market(context: &NodeContext, intent: Intent, ts_ns: u64) -> Opt
     };
     publish_quote(entry, (last, bid), (last, ask), sent);
     Some(sent)
+}
+
+// ---------------------------------------------------------------------------
+// The desk's execution view of a CN instrument (§2.1, §2.3)
+// ---------------------------------------------------------------------------
+
+/// What one desk may do with one CN instrument *right now*, as the desk-scoped
+/// quote and book resources carry it (§2.1: "expose execution
+/// availability/reason independently from health and phase").
+///
+/// This is deliberately not `health` and not `market_phase`: `health: LIVE` says
+/// an observation arrived, the phase says what the market calendar calls the
+/// hour, and neither authorizes an order. `availability` is the only field that
+/// answers whether this desk's node would admit one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Execution {
+    /// `OPEN`, `PAUSED`, `CLOSED` or `UNAVAILABLE`.
+    pub availability: &'static str,
+    /// Why it is `UNAVAILABLE`; `null` otherwise.
+    pub reason: Option<Reason>,
+    /// The Shanghai date the band is *inferred* to describe — receipt, never a
+    /// source timestamp (§2.1). `null` under Yahoo CN, which has no band.
+    pub band_date: Option<String>,
+    /// Always true: the date above is inferred from receipt and is not certified
+    /// by the provider (§2.1).
+    pub band_date_inferred: bool,
+    /// Age since the observation was **received**, never market-data age
+    /// (§2.1). `null` while nothing was ever observed.
+    pub receipt_age_ms: Option<i64>,
+    /// Always `UNKNOWN`: no bounded source freshness is promised (§2.1).
+    pub source_delay: &'static str,
+    /// `HITHINK_SAMPLED` or `YAHOO_SIMPLIFIED` (§2.1, §2.5).
+    pub fill_policy: &'static str,
+}
+
+pub const OPEN: &str = "OPEN";
+pub const PAUSED: &str = "PAUSED";
+pub const CLOSED: &str = "CLOSED";
+pub const UNAVAILABLE: &str = "UNAVAILABLE";
+pub const HITHINK_SAMPLED: &str = "HITHINK_SAMPLED";
+pub const YAHOO_SIMPLIFIED: &str = "YAHOO_SIMPLIFIED";
+
+impl Execution {
+    /// The view of a desk whose node could not be reached at all: no node, no
+    /// admission, whatever the installation-wide observation says.
+    fn unreachable() -> Execution {
+        Execution {
+            availability: UNAVAILABLE,
+            reason: Some(Reason::NodeNotStarted),
+            band_date: None,
+            band_date_inferred: true,
+            receipt_age_ms: None,
+            source_delay: "UNKNOWN",
+            fill_policy: YAHOO_SIMPLIFIED,
+        }
+    }
+}
+
+/// Every CN instrument's execution view for this desk, in one node call.
+///
+/// This *reads* the node; it never starts one. The caller has already decided
+/// whether the desk's node exists — a read is not a reason to start it — and a
+/// node that cannot be reached answers `UNAVAILABLE` / `NODE_NOT_STARTED`.
+pub fn executions(node: &Node) -> HashMap<&'static str, Execution> {
+    node.call(|context| {
+        let now_ns = context.clock.borrow().timestamp_ns().as_u64();
+        let mut exec = context.cn.borrow_mut();
+        let fill_policy = if exec.feed == AShareFeed::Hithink {
+            HITHINK_SAMPLED
+        } else {
+            YAHOO_SIMPLIFIED
+        };
+        crate::feed::cn_entries()
+            .map(|entry| {
+                let inst = exec.inst(InstrumentId::from(entry.instrument_id));
+                let (availability, reason) = match inst.readiness {
+                    Err(reason) => (UNAVAILABLE, Some(reason)),
+                    Ok(()) => {
+                        let status = inst.status.unwrap_or_else(|| status_for(now_ns, true));
+                        let label = match status {
+                            MarketStatusAction::Trading => OPEN,
+                            MarketStatusAction::Pause => PAUSED,
+                            _ => CLOSED,
+                        };
+                        (label, None)
+                    }
+                };
+                let view = Execution {
+                    availability,
+                    reason,
+                    band_date: inst.ready.as_ref().map(|ready| ready.band_date.clone()),
+                    band_date_inferred: true,
+                    receipt_age_ms: None,
+                    source_delay: "UNKNOWN",
+                    fill_policy,
+                };
+                (entry.instrument_id, view)
+            })
+            .collect()
+    })
+    .unwrap_or_else(|_| {
+        crate::feed::cn_entries()
+            .map(|entry| (entry.instrument_id, Execution::unreachable()))
+            .collect()
+    })
+}
+
+/// Merges [`executions`] into a desk-scoped market read. US and HK entries are
+/// untouched: they carry no `execution` object at all (§2.1).
+pub fn attach<'a>(
+    node: &Node,
+    observations: impl IntoIterator<Item = &'a mut crate::feed::Observation>,
+) {
+    let views = executions(node);
+    for observation in observations {
+        if let Some(view) = views.get(observation.instrument_id) {
+            let mut view = view.clone();
+            // Receipt age, not market-data age — the observation already
+            // counts it from `received_at_ns` (§2.1).
+            view.receipt_age_ms = observation.age_ms;
+            observation.execution = Some(view);
+        }
+    }
 }
 
 /// The last accepted observation's price, which the idle book is restored to.
@@ -2758,4 +2921,259 @@ fn no_fill_is_stamped_at_or_after_a_boundary() {
     assert!(fired.iter().any(|name| name == ALERT), "{fired:?}");
     assert_eq!(fill_count(&store), 1);
     registry.stop_all();
+}
+
+// ---------------------------------------------------------------------------
+// The surface (feature SPEC `a-share-engine` §1.3, §2.1, §2.3, §4 —
+// "Surface and seed"): the CN-only eligibility fields, the per-desk execution
+// object, and AE-7's calendar gate under the Yahoo feed.
+// ---------------------------------------------------------------------------
+
+/// A desk on the production calendar rule (AE-7): CN execution is unavailable
+/// until a confirmed same-day trading calendar opens it.
+#[cfg(test)]
+fn uncalendared_desk(
+    store: &Store,
+    name: &'static str,
+    start_ns: u64,
+) -> (Registry, crate::node::ClockHandle, Arc<Node>) {
+    let (registry, handle) =
+        crate::node::controlled_registry_uncalendared(store, None, name, start_ns);
+    let node = registry.ensure(handle.desk_id()).expect("the node starts");
+    (registry, handle, node)
+}
+
+/// What a first successful poll cycle installs: the confirmed trading day, and
+/// the session gate that follows from it. The status and the book go down the
+/// same data channel, so a book that has landed proves the status ahead of it
+/// was processed.
+#[cfg(test)]
+fn confirm_calendar(node: &Node, entry: &'static Entry, price: &str, at_ns: u64) {
+    let instrument_id = InstrumentId::from(entry.instrument_id);
+    node.call(move |context| {
+        let mut exec = context.cn.borrow_mut();
+        exec.inst(instrument_id).readiness = Ok(());
+        gate(&mut exec, entry, at_ns);
+    })
+    .expect("the node answers");
+    publish(node, entry, (price, 300), (price, 300), at_ns + 1);
+}
+
+/// AE-7: Yahoo CN is explicitly simplified, not ungated. A desk with no HiThink
+/// provider has no confirmed trading day to read, so CN execution stays
+/// `NO_CALENDAR` — while awareness keeps working — and the confirmed calendar a
+/// poll cycle installs is what opens it.
+#[cfg(test)]
+#[test]
+fn yahoo_cn_needs_the_confirmed_calendar_too() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = uncalendared_desk(&store, "cn-no-calendar", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let instrument_id = InstrumentId::from(pingan().instrument_id);
+    publish(&node, pingan(), ("9.90", 300), ("9.90", 300), CN_0935);
+
+    // Awareness is untouched: the book is there to read.
+    assert!(
+        node.call(move |context| context.cache.borrow().quote(&instrument_id).is_some())
+            .unwrap(),
+        "the quote still reaches the desk"
+    );
+    assert_eq!(
+        order(
+            &store,
+            &registry,
+            &desk_id,
+            "cn-nocal-1",
+            "000001.XSHE",
+            "BUY",
+            100,
+            None,
+        )
+        .expect_err("no calendar, no execution")
+        .to_string(),
+        "The desk's market plane is unavailable: the desk cannot trade 000001.XSHE \
+         right now: NO_CALENDAR."
+    );
+
+    // What `cn_cycle`'s Yahoo branch assigns from `Hithink::trading_day` once
+    // the provider has confirmed today. The session is open, so the same order
+    // is now admitted.
+    confirm_calendar(&node, pingan(), "9.90", CN_0935 + SECOND_NS);
+    let placed = order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-nocal-2",
+        "000001.XSHE",
+        "BUY",
+        100,
+        None,
+    )
+    .expect("the confirmed trading day admits it");
+    assert_eq!(placed["status"], "FILLED", "{placed}");
+    registry.stop_all();
+}
+
+/// §1.3: a **current** CN position carries the three share-eligibility
+/// projections; US omits them, and no historical record gains them.
+#[cfg(test)]
+#[test]
+fn current_cn_positions_carry_the_eligibility_projections() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = desk(&store, "cn-projection", CN_0935);
+    let desk_id = handle.desk_id().to_owned();
+    let apple = crate::catalog::find("AAPL.XNAS").expect("the US catalog entry");
+
+    publish(&node, pingan(), ("10.00", 300), ("10.00", 300), CN_0935);
+    publish(&node, apple, ("200.00", 10), ("200.00", 10), CN_0935);
+    for (action, instrument, quantity) in [
+        ("cn-proj-buy", "000001.XSHE", 300u32),
+        ("us-proj-buy", "AAPL.XNAS", 10),
+    ] {
+        let filled = order(
+            &store, &registry, &desk_id, action, instrument, "BUY", quantity, None,
+        )
+        .expect("the market buy fills");
+        assert_eq!(filled["status"], "FILLED", "{filled}");
+    }
+
+    let positions = trade::open_positions(&node).expect("the positions read");
+    let of = |instrument: &str| {
+        positions
+            .iter()
+            .find(|p| p["instrument_id"] == instrument)
+            .unwrap_or_else(|| panic!("a position in {instrument}"))
+            .clone()
+    };
+    let cn = of("000001.XSHE");
+    assert_eq!(cn["sellable_quantity"], "0", "{cn}");
+    assert_eq!(cn["locked_quantity"], "300", "{cn}");
+    assert_eq!(cn["reserved_quantity"], "0", "{cn}");
+    let us = of("AAPL.XNAS");
+    for field in ["sellable_quantity", "locked_quantity", "reserved_quantity"] {
+        assert!(us.get(field).is_none(), "US carries no {field}: {us}");
+    }
+
+    // A resting SELL reserves; the projection moves with it, and the history
+    // does not gain a field.
+    let rested = order(
+        &store,
+        &registry,
+        &desk_id,
+        "cn-proj-sell",
+        "000001.XSHE",
+        "SELL",
+        100,
+        Some("11.00"),
+    );
+    assert!(rested.is_err(), "today's buy is locked: {rested:?}");
+    for fill in trade::history_fills(&store, &desk_id).expect("the fills read") {
+        for field in ["sellable_quantity", "locked_quantity", "reserved_quantity"] {
+            assert!(
+                fill.get(field).is_none(),
+                "a fill carries no {field}: {fill}"
+            );
+        }
+    }
+    registry.stop_all();
+}
+
+/// §2.1, §2.3: a CN quote carries this desk's own execution view — availability
+/// and reason, independent of health and phase — and US carries none.
+#[cfg(test)]
+#[test]
+fn cn_quotes_carry_this_desks_execution_view() {
+    let (_dir, store) = crate::store::open_temp();
+    let (registry, handle, node) = uncalendared_desk(&store, "cn-execution", CN_0935);
+    let _ = handle;
+    node.call(|context| context.cn.borrow_mut().feed = AShareFeed::Hithink)
+        .expect("the node answers");
+    let market = crate::feed::MarketState::new();
+    let received_at_ns = CN_0935 as i64;
+    for (entry, price) in [
+        (pingan(), "9.90"),
+        (
+            crate::catalog::find("AAPL.XNAS").expect("the US catalog entry"),
+            "200.00",
+        ),
+    ] {
+        market.accept(
+            entry,
+            &crate::feed::ChartQuote {
+                price: price.parse().expect("decimal text"),
+                currency: entry.currency.to_owned(),
+                source_time_ns: received_at_ns,
+            },
+            received_at_ns,
+        );
+    }
+    let read = |node: &Node| {
+        let mut quotes = market.read_all(received_at_ns + 2_000_000_000);
+        attach(node, &mut quotes);
+        quotes
+    };
+    let view = |quotes: &[crate::feed::Observation], id: &str| {
+        quotes
+            .iter()
+            .find(|o| o.instrument_id == id)
+            .expect("a catalog entry")
+            .execution
+            .clone()
+    };
+
+    // Before any accepted observation the instrument is unready: `UNAVAILABLE`
+    // with the reason, whatever the phase and whatever `health` says.
+    let quotes = read(&node);
+    let cn = view(&quotes, "000001.XSHE").expect("a CN entry carries one");
+    assert_eq!(cn.availability, UNAVAILABLE);
+    assert_eq!(cn.reason, Some(Reason::NoCalendar));
+    assert_eq!(cn.fill_policy, HITHINK_SAMPLED);
+    assert_eq!(cn.source_delay, "UNKNOWN");
+    assert!(cn.band_date_inferred);
+    assert_eq!(
+        cn.receipt_age_ms,
+        Some(2_000),
+        "the age counts from receipt, never from a source timestamp"
+    );
+    assert!(
+        view(&quotes, "AAPL.XNAS").is_none(),
+        "US carries no execution object"
+    );
+
+    // One accepted observation inside the session opens it.
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1_000),
+        Ok(()),
+        CN_0935,
+    );
+    let open = view(&read(&node), "000001.XSHE").expect("a CN entry carries one");
+    assert_eq!(open.availability, OPEN);
+    assert_eq!(open.reason, None);
+    assert_eq!(
+        open.band_date.as_deref(),
+        Some(shanghai_date(CN_0935).as_str())
+    );
+
+    // The midday break pauses it without ending the day.
+    let lunch = CN_0935 + 7_500 * SECOND_NS;
+    assert!(in_lunch(lunch), "11:40 Asia/Shanghai");
+    observe_on_node(
+        &node,
+        snapshot(pingan(), "9.90", "10.00", 1_000),
+        Ok(()),
+        lunch,
+    );
+    assert_eq!(
+        view(&read(&node), "000001.XSHE")
+            .expect("a CN entry carries one")
+            .availability,
+        PAUSED
+    );
+
+    // A desk whose node is gone answers `NODE_NOT_STARTED` rather than guessing.
+    registry.stop_all();
+    let gone = view(&read(&node), "000001.XSHE").expect("a CN entry carries one");
+    assert_eq!(gone.availability, UNAVAILABLE);
+    assert_eq!(gone.reason, Some(Reason::NodeNotStarted));
 }

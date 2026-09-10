@@ -1722,9 +1722,30 @@ async fn instruments(
     Path(desk_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, TradeError> {
     trade::require_ready(&state.store, &desk_id)?;
-    Ok(Json(
-        serde_json::json!({ "instruments": crate::catalog::ENTRIES }),
-    ))
+    let instruments: Vec<serde_json::Value> = crate::catalog::ENTRIES
+        .iter()
+        .map(|entry| {
+            let mut value = serde_json::to_value(entry).expect("a catalog entry serializes");
+            // A CN entry's band and caps follow from its board alone
+            // (`a-share-engine` SPEC §2.2, §3.2), so the agent reads them
+            // rather than deriving them from a percentage it has to know.
+            if let Some(board) = entry.board {
+                value["band_percent"] = serde_json::json!(board.band_percent());
+                value["limit_order_cap"] = serde_json::json!(
+                    board
+                        .limit_cap(crate::catalog::OrderKind::Limit)
+                        .to_string()
+                );
+                value["market_order_cap"] = serde_json::json!(
+                    board
+                        .limit_cap(crate::catalog::OrderKind::Market)
+                        .to_string()
+                );
+            }
+            value
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "instruments": instruments })))
 }
 
 #[utoipa::path(
@@ -1743,8 +1764,9 @@ async fn quotes(
     Path(desk_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, TradeError> {
     trade::require_ready(&state.store, &desk_id)?;
-    state.registry.ensure(&desk_id)?;
-    let quotes = state.registry.market().read_all(store::now_ns());
+    let node = state.registry.ensure(&desk_id)?;
+    let mut quotes = state.registry.market().read_all(store::now_ns());
+    crate::cn::attach(&node, &mut quotes);
     Ok(Json(serde_json::json!({ "quotes": quotes })))
 }
 
@@ -1764,8 +1786,9 @@ async fn book(
     Path(desk_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, TradeError> {
     trade::require_ready(&state.store, &desk_id)?;
-    state.registry.ensure(&desk_id)?;
-    let book = state.registry.market().book_all(store::now_ns());
+    let node = state.registry.ensure(&desk_id)?;
+    let mut book = state.registry.market().book_all(store::now_ns());
+    crate::cn::attach(&node, book.iter_mut().map(|top| &mut top.observation));
     Ok(Json(serde_json::json!({ "book": book })))
 }
 

@@ -351,6 +351,14 @@ pub struct Observation {
     /// The snapshot's cumulative volume, decimal text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<String>,
+    /// What *this desk* may do with the instrument right now
+    /// (`a-share-engine` SPEC §2.1) — availability, reason, inferred band date,
+    /// receipt age, source delay, fill policy. Held by the CN entries of a
+    /// desk-scoped read alone: [`MarketState`] is installation-wide and knows no
+    /// desk, so the desk's routes merge it in through [`crate::cn::attach`].
+    /// US and HK never carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::cn::Execution>,
 }
 
 /// The two §2.3 price conditions.
@@ -376,6 +384,12 @@ pub struct BookTop {
 }
 
 impl BookTop {
+    /// Both sizes are **one lot**, from the catalog — a synthesis, flagged as
+    /// one by `book_synthesized: true`, and never a claim about liquidity. The
+    /// CN HiThink sizes that AE-9 publishes to the sandbox (the crossing and
+    /// idle books of `crate::cn`) are an execution mechanism and deliberately
+    /// do not reach this resource: surfacing them here would read as depth
+    /// that nobody is offering (`a-share-engine` SPEC §2.5).
     fn of(observation: Observation, entry: &Entry) -> BookTop {
         let size = observation
             .last
@@ -581,6 +595,7 @@ impl MarketState {
             volume: observed
                 .filter(|o| !o.volume.is_empty())
                 .map(|o| o.volume.clone()),
+            execution: None,
         }
     }
 
@@ -1476,6 +1491,7 @@ async fn cn_phase_from_trading_days() {
         (200, crate::hithink::provider::envelope(0, "null")),
         (200, days(&["20260304", "20260305"])),
         (200, days(&["20260306"])),
+        (200, days(&["20260306"])),
     ]);
     let (_dir, hithink) = configured(&base).await;
 
@@ -1515,20 +1531,23 @@ async fn cn_phase_from_trading_days() {
         (Phase::Closed, crate::hithink::Calendar::Hithink)
     );
 
-    // Under Yahoo no list applies at all, whatever was fetched (§3).
+    // Under Yahoo no list labels the *phase* — that stays R1's weekday rule
+    // (§3) — but the calendar is still the provider's answer and is still
+    // fetched, because Yahoo CN execution needs the same confirmed trading day
+    // (`a-share-engine` SPEC §2.1, AE-7).
     hithink.patch(crate::hithink::AShareFeed::Yahoo).unwrap();
     assert_eq!(
         hithink.cn_phase(thursday),
         (Phase::Open, crate::hithink::Calendar::Weekday)
     );
-    hithink
-        .refresh_calendar_if_due(at(sh, 2026, 3, 6, 10, 0, 0))
-        .await;
+    let friday = at(sh, 2026, 3, 6, 10, 0, 0);
+    hithink.refresh_calendar_if_due(friday).await;
     assert_eq!(
         seen.lock().unwrap().len(),
-        3,
-        "and nothing is fetched under it"
+        4,
+        "the Yahoo feed still refreshes the execution calendar"
     );
+    assert_eq!(hithink.trading_day(friday), Ok(()));
 }
 
 /// One poll, item by item (`a-share-engine` SPEC §2.1): the raw fields parsed

@@ -180,8 +180,7 @@ pub struct TradingDays {
 /// can surface `CALENDAR_REFUSED` rather than guess from a phase label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalendarRefresh {
-    /// Not under HiThink, or the key is gone: the calendar is not this
-    /// provider's to fetch.
+    /// No provider is available: there is no calendar to fetch.
     NotDue,
     /// Today's evidence already stands; no request was issued, so no refusal
     /// could revoke it.
@@ -812,9 +811,12 @@ impl Hithink {
         }
     }
 
-    /// Fetches the trading-day list on the first `CN` cycle under HiThink and
+    /// Fetches the trading-day list on the first `CN` cycle of the day and
     /// again on the first cycle past Shanghai midnight (§3, `a-share-engine`
-    /// SPEC §2.1). Today's adopted list is held for the day, so no redundant
+    /// SPEC §2.1). The calendar is the *provider's* answer, not the feed's: it
+    /// is fetched whenever the provider row is `AVAILABLE`, whichever feed the
+    /// operator chose, because Yahoo CN execution needs the same confirmed
+    /// trading day (§2.1, AE-7). Today's adopted list is held for the day, so no redundant
     /// read is issued and no refusal can revoke it; a refusal on a day with no
     /// list is remembered as `CALENDAR_REFUSED` and retried next cycle; a
     /// successful list always replaces whatever was held, including a
@@ -823,7 +825,7 @@ impl Hithink {
         let today = shanghai_date(at_ns);
         {
             let mut live = self.lock();
-            if live.feed != AShareFeed::Hithink || !live.available {
+            if !live.available {
                 return CalendarRefresh::NotDue;
             }
             // The rollover carries no evidence: a list, a refusal and every bar
@@ -1558,13 +1560,35 @@ mod readiness {
         );
     }
 
-    /// Under Yahoo the calendar is not this provider's to fetch, and nothing is
-    /// asked (§3).
+    /// The calendar is the provider's answer, not the feed's: an available
+    /// provider on the Yahoo feed still fetches it, because Yahoo CN execution
+    /// needs the same confirmed trading day (`a-share-engine` SPEC §2.1, AE-7).
+    /// Only the *phase* label stays R1's weekday rule under Yahoo (§3).
     #[tokio::test]
-    async fn yahoo_asks_for_no_calendar() {
+    async fn the_yahoo_feed_still_confirms_the_trading_day() {
         let wednesday = at(2026, 3, 4, 10);
         let (_dir, hithink, seen) = standin(vec![days(&["20260304"])]).await;
         hithink.patch(AShareFeed::Yahoo).unwrap();
+        assert_eq!(
+            hithink.refresh_calendar_if_due(wednesday).await,
+            CalendarRefresh::Adopted
+        );
+        assert_eq!(asked(&seen).len(), 1);
+        assert_eq!(hithink.trading_day(wednesday), Ok(()));
+        assert_eq!(
+            hithink.cn_phase(wednesday),
+            (Phase::Open, Calendar::Weekday),
+            "the phase label is awareness and stays WEEKDAY under Yahoo"
+        );
+    }
+
+    /// With no provider row available at all there is nothing to ask, and CN
+    /// execution stays `NO_CALENDAR` under either feed (§2.1, AE-7).
+    #[tokio::test]
+    async fn no_provider_means_no_calendar() {
+        let wednesday = at(2026, 3, 4, 10);
+        let (_dir, hithink, seen) = standin(vec![days(&["20260304"])]).await;
+        hithink.delete().unwrap();
         assert_eq!(
             hithink.refresh_calendar_if_due(wednesday).await,
             CalendarRefresh::NotDue

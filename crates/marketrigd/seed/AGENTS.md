@@ -33,9 +33,51 @@ decided for you: MarketRig never says what to buy, what evidence matters, or wha
 
 Paper only, on a NautilusTrader sandbox with a cash account per desk: no shorting, no leverage,
 `MARKET` and `LIMIT` orders good till cancelled, realized P&L in each instrument's own currency, fees
-at each market's declared per-side rate. Not simulated: T+1 settlement, daily price limits, trading
-halts, opening and closing auctions, and holiday calendars — a quote may read stale on a holiday. A
-position cycle (open to flat in one instrument) is the unit of realized P&L and of evaluation.
+at each market's declared per-side rate. A position cycle (open to flat in one instrument) is the
+unit of realized P&L and of evaluation. For `US` and `HK`, not simulated: T+1 settlement, daily price
+limits, trading halts, opening and closing auctions, and holiday calendars — a quote may read stale
+on a holiday.
+
+`CN` is modelled further. Every `CN` quote and book entry carries an `execution` object —
+`availability` of `OPEN`, `PAUSED`, `CLOSED` or `UNAVAILABLE`, a `reason` when it is unavailable, the
+inferred `band_date`, `receipt_age_ms`, `source_delay: "UNKNOWN"`, and the active `fill_policy`.
+Read it before you order: `health` and the market phase authorize nothing.
+
+- **T+1.** Shares bought today cannot be sold today. A current `CN` position carries
+  `sellable_quantity`, `locked_quantity` (bought today) and `reserved_quantity` (held by your own
+  outstanding sells). A `BUY` is a multiple of 100; a `SELL` is a multiple of 100 or exactly the odd
+  remainder of `sellable_quantity`. Per-order caps are 1,000,000 shares on the main board and
+  300,000 (`LIMIT`) or 150,000 (`MARKET`) on ChiNext.
+- **Sessions.** Execution is supported only in [09:30,11:30) and [13:00,14:57) Asia/Shanghai on a
+  confirmed exchange trading day. Lunch suspends fills without ending an order. Orders are `GTC`;
+  at 14:57 every remaining `CN` order is canceled and reports `OrderCanceled`, deliberately before
+  the closing auction, which is not modelled. Nothing is queued for the next session.
+- **Readiness.** Execution needs a confirmed trading day for today, a current-day daily bar for the
+  instrument, and a valid snapshot. Until all three hold, `availability` is `UNAVAILABLE` with a
+  `reason` — `NO_CALENDAR`, `NOT_TRADING_DAY`, `DATE_UNPROVEN`, `NO_REFERENCE`, `REFERENCE_CHANGED`,
+  `FEED_LOST` and the like — and an order is refused rather than parked.
+- **Bands (HiThink feed).** The daily band is 10% of the provider reference on the main board and 20%
+  on ChiNext; a quote carries `prev_close`, `limit_up`, `limit_down` and `band_date`. A `LIMIT` price
+  outside the inclusive band is refused. At the upper limit no `BUY` fills, at the lower limit no
+  `SELL` fills; the other direction still may. `price_condition` names that condition, not a
+  counterparty.
+- **Fills (HiThink feed).** A `LIMIT` rests at submission, even at a compatible price. It triggers on
+  a later snapshot whose cumulative volume has risen and whose last price is at or through your
+  limit, and the whole remainder then fills at your limit price; equal volume never triggers a fill.
+  A `MARKET` executes immediately against the latest snapshot — the full quantity at the last price,
+  no spread and no slippage. That same publication first fills every compatible resting `LIMIT` at
+  its own limit price whatever the volume, so a `MARKET` can move your other orders, and a `MARKET`
+  the sandbox then denies does not undo them.
+- **Yahoo `CN` feed.** Explicitly simplified: no bands, no volume rule, native quote matching alone.
+  T+1, the sessions, the quantity rules, `GTC` and the 14:57 cancel still apply, and it still needs
+  the confirmed calendar.
+
+What `CN` does not model: the snapshot and its reference date are inferred from receipt, never
+certified; source delay is unknown and no freshness is promised; trades between polls are missed;
+the liquidity an order fills against is synthetic and always sufficient; opening, closing and
+volatility auctions, halts and after-hours trading are unsupported; fees are a flat 3 bp per side
+rather than real stamp duty and commission; and dividends, splits and other corporate actions are
+not accounted for anywhere.
 
 The user may require approval of paper orders and of trigger code. A gated order answers
 `approval: PENDING` with no order and reaches the sandbox only once approved in the MarketRig

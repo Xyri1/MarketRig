@@ -808,14 +808,32 @@ pub fn open_orders(node: &Node) -> Result<Vec<Value>, NodeError> {
 }
 
 /// `GET /desks/{desk_id}/positions` (§7): the desk's open positions, live.
+///
+/// A **current** CN position also carries §1.3's three share-eligibility
+/// projections, computed here from the same cache borrow and the node clock so
+/// they describe the same instant the position does. They are read-time
+/// projections, not stored trading facts: US and HK omit them entirely, and no
+/// historical record ever gains them (`a-share-engine` SPEC §1.3).
 pub fn open_positions(node: &Node) -> Result<Vec<Value>, NodeError> {
     node.call(|context| {
-        context
-            .cache
-            .borrow()
+        let now_ns = context.clock.borrow().timestamp_ns().as_u64();
+        let cache = context.cache.borrow();
+        cache
             .positions_open(None, None, None, None, None)
             .iter()
-            .map(|position| position_projection(position))
+            .map(|position| {
+                let mut value = position_projection(position);
+                let cn = crate::catalog::find(position.instrument_id.to_string().as_str())
+                    .is_some_and(|entry| entry.market == crate::catalog::Market::Cn);
+                if cn {
+                    let eligibility = crate::cn::sellable(&cache, position.instrument_id, now_ns);
+                    let text = |d: Decimal| json!(d.normalize().to_string());
+                    value["sellable_quantity"] = text(eligibility.sellable);
+                    value["locked_quantity"] = text(eligibility.locked);
+                    value["reserved_quantity"] = text(eligibility.reserved);
+                }
+                value
+            })
             .collect()
     })
 }

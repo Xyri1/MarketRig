@@ -833,9 +833,10 @@ fn sections(text: &str) -> std::collections::BTreeMap<String, String> {
 }
 
 /// Check 8: the constitution is the R4 §5.1 block with the three sections
-/// `openviking-continuity` §5.4 rewrites and the one `hithink-a-share` §5.3
-/// rewrites over that, and the seeded skills are the seed files themselves —
-/// creation and the uploads use them unchanged apart from `<name>`.
+/// `openviking-continuity` §5.4 rewrites, the one `hithink-a-share` §5.3
+/// rewrites, and the one `a-share-engine` §4.1 rewrites over those, and the
+/// seeded skills are the seed files themselves — creation and the uploads use
+/// them unchanged apart from `<name>`.
 #[cfg(test)]
 #[test]
 fn seeds_are_the_spec_blocks() {
@@ -849,12 +850,18 @@ fn seeds_are_the_spec_blocks() {
         "### 5.4 The constitution",
     ));
     let research = sections(&spec_block("hithink-a-share/SPEC.md", "### 5.3 Seeding"));
+    let ashare = sections(&spec_block(
+        "a-share-engine/SPEC.md",
+        "### 4.1 The seeded constitution",
+    ));
     assert_eq!(rewritten.len(), 3, "§5.4 rewrites exactly three sections");
     assert_eq!(research.len(), 1, "§5.3 rewrites Surfaces alone");
+    assert_eq!(ashare.len(), 1, "§4.1 rewrites The paper environment alone");
     assert_eq!(seed.len(), r4.len(), "no section is added or dropped");
     for (heading, body) in &seed {
-        let expected = research
+        let expected = ashare
             .get(heading)
+            .or_else(|| research.get(heading))
             .or_else(|| rewritten.get(heading))
             .or_else(|| r4.get(heading))
             .unwrap_or_else(|| panic!("{heading} is in no SPEC block"));
