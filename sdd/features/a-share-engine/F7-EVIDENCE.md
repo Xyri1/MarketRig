@@ -357,7 +357,7 @@ the initial run, key from the operator's `.env` in an environment variable, pass
 
 | Part | Status |
 | --- | --- |
-| Session samples (open, lunch reopen, afternoon, close) | **NOT RUN** — windows pending, listed in §R2.3 |
+| Session samples (open, lunch reopen, afternoon, close) | **DONE 2026-09-10** — all six §R2.3 windows captured; see "R2 — session samples 2026-09-10" at the end of this file. (This row read "NOT RUN — windows pending" while they were.) |
 | Bounded capture script, dry-run proven end to end | **DONE** — `f7/capture-intraday.sh`, §R2.2 |
 | Is `prev_price` documented as the ex-rights/ex-dividend reference? | **ANSWERED — not documented** (§R2.4) |
 | Documented source-observation timestamp or maximum delay? | **ANSWERED — none exists** (§R2.5) |
@@ -697,6 +697,10 @@ storage cost, at the price of N + 1 requests after every restart.
 
 ## R2.8 Confirmed provider facts versus assumptions
 
+*Rows 5, 8, 9, 10, 11, 14, 15 and 16 below are superseded by "R2.8 updated" in the
+"R2 — session samples 2026-09-10" section at the end of this file. The table is left as
+written.*
+
 | # | Statement | Standing | Basis |
 | --- | --- | --- | --- |
 | 1 | `prev_price` equals the exchange's published ex-dividend reference | **Confirmed**, 16/16, one of them against SZSE's own announcement | §4.4, §R2.6 |
@@ -847,3 +851,397 @@ after the 13:00 reopen; whether the snapshot's `data.timestamp` freezes during t
 break while `volume` stops; whether `data_status` ever leaves `"final"`; whether the
 snapshot/bar gap seen in (b) narrows once the open settles; whether a halted name appears
 in any window. The §R2.10 recommendation stays withheld.
+
+
+## R2 — opening and lunch review, 2026-09-10 14:09 Asia/Shanghai
+
+**Conclusion: the bounded provider experiment has enough observations to conclude; the current readiness design does not receive an unconditional PASS.** Opening and lunch-reopening coverage requested by the follow-up now exists. The 14:30 and 14:57 captures are supplementary to this provider question; the schedule and the 15:05 Claude review remain unchanged. This conclusion supersedes earlier statements that every scheduled window is required before any recommendation can be made. It does not mark engine implementation, acceptance, or the feature design complete.
+
+Evidence (existing scheduled captures, inspected locally; no new provider requests):
+
+- [open-0931-20260910T093103+0800.json](f7/intraday/open-0931-20260910T093103+0800.json)
+- [open-0945-20260910T094505+0800.json](f7/intraday/open-0945-20260910T094505+0800.json)
+- [lunch-1259-20260910T125901+0800.json](f7/intraday/lunch-1259-20260910T125901+0800.json)
+- [lunch-1301-20260910T130100+0800.json](f7/intraday/lunch-1301-20260910T130100+0800.json)
+
+All four captures completed with 14/14 HTTP 200 / envelope code 0 responses each: **56/56 successful requests**, no early stop. Both lunch launchd jobs ran once and exited 0.
+
+| Observation | Result | Consequence |
+| --- | --- | --- |
+| Current-day daily bars | All 36 historical reads across the four windows carried a newest bar dated 2026-09-10. | Availability at opening and after lunch is observed for the three sampled bar codes. |
+| Lunch break, 12:59 | All five snapshots' prices, volumes and turnovers were unchanged across three rounds. The snapshot envelope timestamp nevertheless advanced by 43 seconds. | The envelope timestamp cannot certify market-data freshness or indicate trading activity. |
+| Reopening, 13:01 | All five snapshot volumes and turnovers increased across the three rounds; current-day bars updated again. | Intraday movement resumes in the sampled instruments. This does not establish a maximum source delay. |
+| Separate snapshot/bar requests | Opening price discrepancies recur after lunch: 300750.SZ snapshot/bar prices were 339.55/339.54 and 339.38/339.42 in rounds 2 and 3. Volume differences also occur with equal prices. | Exact price equality is unsuitable as a readiness gate; these samples do not justify an arbitrary tolerance either. |
+| Auction status | Both lunch captures returned `auction_phase: closed`, `data_status: final`, as did the opening capture. | These sampled auction fields do not distinguish lunch from continuous trading. No halted instrument was tested. |
+
+**Recommendation and remaining design work.** Conclude the data-collection question with the above limitations. Before declaring design readiness, revise the feature contract to remove snapshot/bar equality as proof of snapshot date, avoid auction status as a session gate, and explicitly disclose unknown source delay. A dated bar supports current-day data availability; it does not uniquely date a separately returned snapshot or its `prev_price`. A replacement readiness rule must state that assumption or obtain stronger provider evidence; do not silently replace equality with a sampled tolerance. Use the confirmed exchange day and the engine's session clock for scheduled breaks; receipt age must remain named as receipt age.
+
+**Still unproven:** halt detection, a source-delay bound, general ex-rights/reference guarantees beyond the recorded samples, and actual engine session/cancellation behavior in this provider capture. The R1 macOS cash-recovery result is unchanged; the partial-fill restart history defect remains separate and unresolved. Further ordinary snapshots cannot establish a missing provider guarantee.
+
+Historical notes above are retained as evidence. In particular, the opening report's “16 minutes into continuous trading” is a timing typo: 09:31:46 is 1 minute 46 seconds after 09:30. It does not affect the observed status-field conclusion.
+
+
+## R2 — session samples 2026-09-10
+
+Written at 15:05 Asia/Shanghai from the six launchd captures. No provider request was
+issued by this session; every number below is read from the committed files. Nothing was
+re-created after hours.
+
+### Windows sampled and missing
+
+**No window is missing.** All six §R2.3 windows ran and wrote a file. Two runs were cut
+short by the provider's rate limit; the script's stop-early rule fired and the partial
+files were kept.
+
+| Window | Started → ended (Asia/Shanghai) | Requests issued | HTTP 200 + code 0 | Rate-limited | Not issued |
+| --- | --- | ---: | ---: | --- | --- |
+| `open-0931` | 09:31:03 → 09:31:46 | 14 | 14 | — | — |
+| `open-0945` | 09:45:05 → 09:45:47 | 14 | 14 | — | — |
+| `lunch-1259` | 12:59:01 → 12:59:43 | 14 | 14 | — | — |
+| `lunch-1301` | 13:01:00 → 13:01:43 | 14 | 14 | — | — |
+| `pm-1430` | 14:30:04 → 14:30:46 | 13 | 12 | calendar, 14:30:46, HTTP **429** / code **429** | auction |
+| `close-1457` | 14:57:00 → 14:57:42 | 12 | 11 | round-3 `300750.SZ` bar, 14:57:42, HTTP **429** / code **429** | calendar, auction |
+
+81 requests issued, 79 successful, 2 rate-limited. Files, all under
+`sdd/features/a-share-engine/f7/intraday/`:
+[open-0931](f7/intraday/open-0931-20260910T093103+0800.json),
+[open-0945](f7/intraday/open-0945-20260910T094505+0800.json),
+[lunch-1259](f7/intraday/lunch-1259-20260910T125901+0800.json),
+[lunch-1301](f7/intraday/lunch-1301-20260910T130100+0800.json),
+[pm-1430](f7/intraday/pm-1430-20260910T143004+0800.json),
+[close-1457](f7/intraday/close-1457-20260910T145700+0800.json),
+plus one `launchd-<label>.log` each, every one containing only the written file's path.
+Key check: `grep -c "$HITHINK_API_KEY"` over the whole `f7/intraday/` directory → no match.
+
+**The rate limit's HTTP status is now captured: 429, alongside envelope `code: 429`.** This
+closes §R2.8 #16. `hithink.rs:469` returns `Once::Retry` on HTTP 429 before it parses the
+body, so today's shape is retried correctly; the envelope constant `RATE_LIMITED` is `4001`
+(`hithink.rs:47`) and `429` is still not in `RETRYABLE_SERVER` (`5001..=5003`), so an
+envelope-only `429` under a non-429 HTTP status remains untested and unhandled. 81 requests
+across one day, at the §R2.3 volume, was enough to trigger the limit twice.
+
+### Per-window reads — the three bar codes
+
+Each window is three rounds ~20 s apart. Every round is one batched snapshot (5 codes) then
+three `historical?interval=1d&adjust=none` reads. All reads below are HTTP 200 / code 0
+unless marked. The bar shown is the newest bar in the response; its own envelope
+`data.timestamp` was `1788969600000` = 2026-09-10 00:00 +0800 in **all 52 successful
+historical reads**, in every window.
+
+**`open-0931`** — snapshot `data.timestamp` 09:31:02 / 09:31:21 / 09:31:40.
+
+| Round (request start) | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 09:31:03 | 600519.SH | 1294.00 / 41200 | 2026-09-10 / 1292.80 / 46300 |
+| r1 | 000001.SZ | 11.72 / 3128159 | 2026-09-10 / 11.72 / 3128159 |
+| r1 | 300750.SZ | 334.00 / 1117801 | 2026-09-10 / 333.94 / 1098201 |
+| r2 09:31:24 | 600519.SH | 1290.49 / 64400 | 2026-09-10 / 1291.29 / 78200 |
+| r2 | 000001.SZ | 11.70 / 3338859 | 2026-09-10 / 11.71 / 3361459 |
+| r2 | 300750.SZ | 333.33 / 1226601 | 2026-09-10 / 333.33 / 1226601 |
+| r3 09:31:45 | 600519.SH | 1290.80 / 81600 | 2026-09-10 / 1290.28 / 84700 |
+| r3 | 000001.SZ | 11.69 / 3851059 | 2026-09-10 / 11.70 / 3824559 |
+| r3 | 300750.SZ | 332.99 / 1373201 | 2026-09-10 / 332.99 / 1373201 |
+
+**`open-0945`** — snapshot `data.timestamp` 09:45:04 / 09:45:24 / 09:45:44.
+
+| Round | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 09:45:05 | 600519.SH | 1286.06 / 459324 | 2026-09-10 / 1286.06 / 459324 |
+| r1 | 000001.SZ | 11.71 / 12560194 | 2026-09-10 / 11.70 / 12613794 |
+| r1 | 300750.SZ | 333.50 / 5114239 | 2026-09-10 / 333.39 / 5133239 |
+| r2 09:45:25 | 600519.SH | 1286.13 / 464024 | 2026-09-10 / 1285.59 / 463724 |
+| r2 | 000001.SZ | 11.71 / 12661694 | 2026-09-10 / 11.71 / 12719794 |
+| r2 | 300750.SZ | 333.34 / 5141339 | 2026-09-10 / 333.40 / 5159939 |
+| r3 09:45:46 | 600519.SH | 1286.68 / 469424 | 2026-09-10 / 1286.68 / 469424 |
+| r3 | 000001.SZ | 11.71 / 12897894 | 2026-09-10 / 11.71 / 12897894 |
+| r3 | 300750.SZ | 333.64 / 5195341 | 2026-09-10 / 333.61 / 5197641 |
+
+**`lunch-1259`** (inside the 11:30–13:00 break) — snapshot `data.timestamp` 12:58:59 /
+12:59:21 / 12:59:42. **All three rounds returned identical values on all five snapshot
+codes and all three bars**, so one row per code covers r1, r2 and r3.
+
+| Round | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 12:59:01 = r2 12:59:22 = r3 12:59:43 | 600519.SH | 1283.98 / 1070092 | 2026-09-10 / 1283.98 / 1070092 |
+| " | 000001.SZ | 11.79 / 46608341 | 2026-09-10 / 11.79 / 46608341 |
+| " | 300750.SZ | 339.68 / 16583816 | 2026-09-10 / 339.68 / 16583816 |
+
+**`lunch-1301`** (2 minutes after the reopen) — snapshot `data.timestamp` 13:01:00 /
+13:01:21 / 13:01:39.
+
+| Round | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 13:01:00 | 600519.SH | 1284.32 / 1082792 | 2026-09-10 / 1284.32 / 1082792 |
+| r1 | 000001.SZ | 11.80 / 47790431 | 2026-09-10 / 11.80 / 47790431 |
+| r1 | 300750.SZ | 339.35 / 17047216 | 2026-09-10 / 339.35 / 17047216 |
+| r2 13:01:21 | 600519.SH | 1284.40 / 1085492 | 2026-09-10 / 1284.40 / 1085092 |
+| r2 | 000001.SZ | 11.79 / 47796231 | 2026-09-10 / 11.79 / 47795331 |
+| r2 | 300750.SZ | 339.55 / 17084616 | 2026-09-10 / 339.54 / 17081516 |
+| r3 13:01:42 | 600519.SH | 1284.40 / 1086192 | 2026-09-10 / 1284.40 / 1086192 |
+| r3 | 000001.SZ | 11.79 / 47953331 | 2026-09-10 / 11.79 / 47953331 |
+| r3 | 300750.SZ | 339.38 / 17134416 | 2026-09-10 / 339.42 / 17136916 |
+
+**`pm-1430`** — snapshot `data.timestamp` 14:30:03 / 14:30:22 / 14:30:45.
+
+| Round | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 14:30:04 | 600519.SH | 1284.23 / 1608192 | 2026-09-10 / 1284.23 / 1608192 |
+| r1 | 000001.SZ | 11.82 / 71073853 | 2026-09-10 / 11.81 / 71081653 |
+| r1 | 300750.SZ | 340.03 / 24269254 | 2026-09-10 / 340.03 / 24269254 |
+| r2 14:30:25 | 600519.SH | 1284.25 / 1609992 | 2026-09-10 / 1284.25 / 1609992 |
+| r2 | 000001.SZ | 11.81 / 71112153 | 2026-09-10 / 11.81 / 71112153 |
+| r2 | 300750.SZ | 340.09 / 24309754 | 2026-09-10 / 340.09 / 24309754 |
+| r3 14:30:45 | 600519.SH | 1284.40 / 1612492 | 2026-09-10 / 1284.40 / 1612392 |
+| r3 | 000001.SZ | 11.81 / 71142433 | 2026-09-10 / 11.81 / 71140133 |
+| r3 | 300750.SZ | 340.36 / 24382267 | 2026-09-10 / 340.36 / 24382267 |
+
+**`close-1457`** — snapshot `data.timestamp` 14:57:00 / 14:57:18 / 14:57:41.
+
+| Round | Code | snapshot `last_price` / `volume` | bar `date` / `close_price` / `volume` |
+| --- | --- | --- | --- |
+| r1 14:57:00 | 600519.SH | 1284.79 / 1865922 | 2026-09-10 / 1284.78 / 1865022 |
+| r1 | 000001.SZ | 11.84 / 85637522 | 2026-09-10 / 11.84 / 85649122 |
+| r1 | 300750.SZ | 338.26 / 28672894 | 2026-09-10 / 338.23 / 28684094 |
+| r2 14:57:21 | 600519.SH | 1284.79 / 1866122 | 2026-09-10 / 1284.79 / 1866122 |
+| r2 | 000001.SZ | 11.84 / 85662122 | 2026-09-10 / 11.84 / 85662122 |
+| r2 | 300750.SZ | 338.27 / 28685294 | 2026-09-10 / 338.27 / 28685294 |
+| r3 14:57:41 | 600519.SH | 1284.79 / 1866122 | 2026-09-10 / 1284.79 / 1866122 |
+| r3 | 000001.SZ | 11.84 / 85662122 | 2026-09-10 / 11.84 / 85662122 |
+| r3 | 300750.SZ | 338.27 / 28685294 | **HTTP 429 / code 429**, no bars |
+
+### The two snapshot-only codes, and `prev_price`
+
+`601318.SH` and `000858.SZ` have no bar read. Round 1 → round 3 `last_price` / `volume`:
+
+| Window | 601318.SH | 000858.SZ |
+| --- | --- | --- |
+| `open-0931` | 55.65 / 2224460 → 55.53 / 3279160 | 71.13 / 241400 → 70.92 / 497100 |
+| `open-0945` | 55.35 / 10744793 → 55.44 / 10964693 | 70.71 / 3821100 → 70.69 / 3983100 |
+| `lunch-1259` | 55.24 / 29498794 → unchanged | 70.53 / 15384997 → unchanged |
+| `lunch-1301` | 55.29 / 29823863 → 55.29 / 29888763 | 70.55 / 15596297 → 70.57 / 15652097 |
+| `pm-1430` | 55.28 / 39261461 → 55.31 / 39347561 | 70.46 / 19753637 → 70.47 / 19781342 |
+| `close-1457` | 55.44 / 43919765 → 55.44 / 44027165 (r2 = r3) | 70.47 / 22094887 → 70.47 / 22100387 (r2 = r3) |
+
+`prev_price` was byte-constant in all **18** snapshot reads across the whole session:
+600519.SH 1290.88, 601318.SH 55.28, 000001.SZ 11.70, 000858.SZ 71.16, 300750.SZ 336.84.
+Each equals that code's 2026-09-09 unadjusted bar close and each auction read's
+`pre_close_price` (5/5 in each of the four auction reads). No ex-date fell on these five.
+
+### Calendar and auction reads
+
+| Window | `calendar/trading-days` | `auction/snapshot?stage=final` |
+| --- | --- | --- |
+| `open-0931` | 09:31:45, 200 / 0, `count: 243`, `max_date: 20260910` | 09:31:46, 200 / 0, `closed` / `final` |
+| `open-0945` | 09:45:47, 200 / 0, `count: 243`, `max_date: 20260910` | 09:45:47, 200 / 0, `closed` / `final` |
+| `lunch-1259` | 12:59:43, 200 / 0, `count: 243`, `max_date: 20260910` | 12:59:43, 200 / 0, `closed` / `final` |
+| `lunch-1301` | 13:01:42, 200 / 0, `count: 243`, `max_date: 20260910` | 13:01:42, 200 / 0, `closed` / `final` |
+| `pm-1430` | 14:30:46, **429 / 429**, no list | not issued |
+| `close-1457` | not issued | not issued |
+
+Auction per-item, `pre_close_price` / `auction_price` / `last_price`:
+
+| Code | 12:59:43 (break) | 13:01:42 (reopened) |
+| --- | --- | --- |
+| 600519.SH | 1290.88 / 1291.00 / 1283.98 | 1290.88 / 1291.00 / 1284.32 |
+| 601318.SH | 55.28 / 55.50 / 55.24 | 55.28 / 55.50 / 55.31 |
+| 000001.SZ | 11.70 / 11.68 / 11.79 | 11.70 / 11.68 / 11.80 |
+| 000858.SZ | 71.16 / 71.08 / 70.53 | 71.16 / 71.08 / 70.54 |
+| 300750.SZ | 336.84 / 335.90 / 339.68 | 336.84 / 335.90 / 339.54 |
+
+`auction_price` is identical in all four session reads and both after-hours reads — it is
+the 09:25 opening call auction result, frozen for the day. The auction `last_price` equalled
+the frozen snapshot 5/5 during the break and disagreed with the same-second snapshot 5/5
+after the reopen, matching earlier rounds instead (600519.SH 1284.32 = the 13:01:00
+snapshot; 000001.SZ 11.80 = the 13:01:00 snapshot).
+
+### Answers
+
+**a) Is there a current-day bar at the open and at the lunch reopen, and does it update
+intraday? — Yes to all three, and snapshot/bar disagreement is real and kept.**
+
+Every one of the 52 successful historical reads carried a newest bar dated 2026-09-10:
+present at 09:31 and 09:45 (open), at 12:59 (break), at 13:01 (reopen), at 14:30 and 14:57.
+It updates intraday — 600519.SH's bar went 1292.80 / 46300 at 09:31 → 1286.68 / 469424 at
+09:45 → 1283.98 / 1070092 at 12:59 → 1284.40 / 1086192 at 13:01 → 1284.40 / 1612392 at
+14:30 → 1284.79 / 1866122 at 14:57, volume strictly increasing at every step, and the same
+for the other two codes.
+
+Snapshot and bar are separate requests 0–1 s apart, so they race. Across the 53 valid pairs
+(the 54th was rate-limited):
+
+| | Count |
+| --- | ---: |
+| Both `close_price == last_price` and `volume == volume` | 31 / 53 |
+| Price equal, volume different | 6 / 53 |
+| Volume equal, price different | 0 / 53 |
+| Both different | 16 / 53 |
+
+Excluding the 9 lunch-break pairs, where nothing was moving and all 9 matched exactly:
+22 / 44 exact, 22 / 44 not. Largest gaps: `close_price` 1.20 (600519.SH, 09:31 r1, 1294.00
+vs 1292.80 ≈ 9 bp) and `volume` 58,100 (000001.SZ, 09:45 r2). Neither side leads
+consistently: on the 22 volume-differing pairs the bar is ahead of the snapshot 13 times and
+behind it 9 times. **An equality rule fails 22 times in 44 open-market pairs, and no
+tolerance is derivable from 53 samples.** §R2.10 assumption 5 holds only in the loose sense
+that the two move together.
+
+One correction to the interim opening report above: it counted "4 of 9" exactly-equal pairs
+at 09:31; the file has 3 (r1 000001.SZ, r2 300750.SZ, r3 300750.SZ). Its "never one alone"
+also does not generalise — 6 pairs across the later windows have equal prices and different
+volumes. Neither changes that report's conclusion.
+
+**b) What attributes the reference and the observation to a date? — Two provider
+assertions, and for the snapshot nothing but correlation.**
+
+Direct provider assertions:
+
+1. `calendar/trading-days` `max_date: 20260910` — the provider asserting today is a trading
+   day. Returned four times today (§4.2's rule).
+2. `historical` newest bar `date_ms: 1788969600000` = 2026-09-10 00:00 +0800 — the provider
+   labelling that bar with a date, in all 52 successful reads.
+3. That response's envelope `data.timestamp`, also `1788969600000` in all 52 reads: the one
+   documented 上游有效时间 (`endpoints-prices.md:107`), at **daily** granularity. It dates
+   the bar; it cannot date an observation inside the day.
+
+Correlation only:
+
+4. **The snapshot carries no date field at all** — not on the response, not per item. What
+   attributes it to today is only its agreement with the dated bar, which today was exact on
+   both fields in 31 / 53 pairs and not in 22. So the snapshot is dated by *inference from a
+   separate request*, and the inference is measurably imperfect while the market moves.
+5. The snapshot's `data.timestamp` is a response-side clock: across the 18 reads it trailed
+   the request start by 0–5 s (per window: 1/3/5, 1/1/2, 2/1/1, 0/0/3, 1/3/0, 0/3/0). The
+   interim report's "gap grew 1 → 3 → 5 s" did not repeat in any of the five later windows,
+   so that was jitter, not drift. Decisively: **during the lunch break it advanced 43 s
+   (12:58:59 → 12:59:42) while every price, volume and turnover stayed frozen.** It dates
+   the response, never the datum.
+6. `prev_price` likewise carries no date. Its evidence today is stability (18 identical
+   reads) and cross-endpoint agreement (auction `pre_close_price` 5/5 in four reads; the
+   prior day's unadjusted bar close 3/3). Both are correlation.
+
+**c) Is `prev_price` documented as the exchange-adjusted reference? — No. Already answered;
+not re-run.** §R2.4: the entire documented contract is 前收盘价 at `endpoints-prices.md:57`,
+at commit `44b7aa34dd504675f3ddaa15b3d478ea16f97884`, which is also HEAD. §R2.6 confirms the
+*behaviour* against SZSE's own 2026-09-03 announcement for 002322.SZ (12.71 − 0.3251058 =
+12.38, `prev_price` exact, 16/16 for the day) and withdraws §4.4's one-cent explanation.
+Today's samples add no documentation and were not used to revisit this; they add only the
+stability observation in (b6).
+
+**d) Is there a source-observation timestamp or a documented maximum delay? — No. Already
+answered; the samples cannot create one.** §R2.5: no per-item observation time, no upstream
+quote time, no stated maximum age, no SLA anywhere in the provider repository; the auction
+doc (`endpoints-auction.md:23`) names an 上游行情时间 as the thing that would judge freshness
+and does not return it. §R2.9: unknown, unbounded, unmeasurable by MarketRig. Today's
+windows add two facts, both negative:
+
+- the snapshot's envelope clock advanced 43 s through a frozen lunch break (b5), so it
+  cannot be read as a data time;
+- **at 14:57, in continuous trading, all five codes returned identical `last_price`,
+  `volume` and `turnover` at 14:57:21 and again at 14:57:41.** A frozen 20 s triple occurs
+  with the market open. So an unchanged read is not evidence of a pause, and §R2.10
+  assumption 2 is weaker than it was written: movement is one-directional evidence only.
+
+**Source delay remains unknown, and no sampling can close it.**
+
+**e) Can calendar readiness be re-established conservatively after startup? — Yes, §R2.7
+stands, with one amendment today's evidence forces.** The positive path held 4/4 (`code: 0`,
+`count: 243`, `max_date` == the Shanghai date, at 09:31, 09:45, 12:59 and 13:01), with no
+storage. The new datum is the failure path §R2.7 rule 3 did not anticipate: the 14:30
+calendar read was refused **HTTP 429 / code 429** — the provider refused the calendar
+mid-session, caused by our own request volume, not by a holiday and not by staleness.
+
+Amendment: **a positive calendar response for today stays valid for the remainder of that
+Shanghai day; a later refusal must not revoke it.** Only a day rollover (§R2.7 rule 4)
+revokes. As §R2.7 rule 3 reads, a transient 429 would drop CN execution to `UNAVAILABLE`
+mid-session with the day already proven — a self-inflicted pause. The holiday-vs-stale
+discrimination in rule 3 still applies, but only to a response that actually returned a
+list (`code == 0`); a refusal (`429`, transport error) is neither, and gets reason
+`CALENDAR_REFUSED` with the proven day retained.
+
+**f) `auction_phase` / `data_status` at 12:59 vs 13:01, and does it test the documented
+meaning? — `closed` / `final` on both sides of the reopen. It tests the documented meaning
+partly, and rules the field out as a session signal.**
+
+12:59:43, inside the break: `auction_phase: "closed"`, `data_status: "final"`.
+13:01:42, two minutes into the reopened session: `auction_phase: "closed"`,
+`data_status: "final"` — identical, and identical to 09:31:46, 09:45:47, and both
+after-hours reads. Six observations, one value. `auction_price` was also identical in all of
+them.
+
+What that does test: `endpoints-auction.md:23` documents `data_status` as distinguishing
+数据尚未就绪 / 竞价完成 / 停牌. `final` = 竞价完成, and the opening call auction did complete
+at 09:25 and stayed complete. So the observation is **consistent with the documented
+meaning** — and it demonstrates the field describes the *call auction*, not the continuous
+session: it did not move when trading actually stopped at 11:30 and did not move when it
+resumed at 13:00. **It cannot gate a session, a break or freshness.**
+
+What it does not test: 停牌 — none of the five was halted at any point today, so the halt
+value was never produced; and `live` / `not_ready`, which exist only before 09:25 and were
+in any case excluded by the capture's own `stage=final` query. Halt detection through this
+endpoint is still entirely untested.
+
+### R2.8 updated — confirmed provider facts versus assumptions
+
+New and changed rows only; every unlisted §R2.8 row stands as written.
+
+| # | Statement | Standing after the session samples | Basis |
+| --- | --- | --- | --- |
+| 5 | The current-day bar's `close_price` equals the snapshot's `last_price` | **False as an equality.** 31 / 53 exact intraday, 22 / 44 exact with the market open, max gap 1.20 (≈ 9 bp) and 58,100 shares; neither side leads consistently | (a) |
+| 5b | The current-day bar exists and updates during the session | **Confirmed** — 52 / 52 successful reads dated 2026-09-10, volume strictly increasing across all six windows | (a) |
+| 8 | The snapshot's `data.timestamp` is a data time | **False, now decisively** — advanced 43 s through a frozen lunch break | (b5) |
+| 9 | The snapshot's `data.timestamp` is exactly the response-assembly clock | **Still unproven, and it is not a monotonic offset either** — trails the request 0–5 s with no pattern across 18 reads | (b5) |
+| 10 | `auction_phase` / `data_status` distinguish the lunch break, continuous trading and a halt | **False for the break-vs-trading half** — `closed` / `final` at 12:59 and at 13:01, and in all six observations. **Untested for halts** — no halted instrument was sampled, and `stage=final` cannot return `live` / `not_ready` | (f) |
+| 11 | Monotonic `volume` proves the observation is of the current session | **Weaker than assumed.** Volume did increase in every open window, but all five codes were frozen for 20 s at 14:57 during continuous trading, so an unchanged read proves nothing about the session state | (d) |
+| 14 | Any documented maximum source delay exists | **False — unchanged, and unchangeable by sampling** | §R2.5, (d) |
+| 15 | Today's bar exists and moves during the session | **RUN — confirmed**, superseding NOT RUN | (a) |
+| 16 | Rate limiting answers `code: 429`; its HTTP status | **Both confirmed: HTTP 429 with envelope `code: 429`**, twice, at 14:30:46 and 14:57:42. `hithink.rs:469` retries on the HTTP status; envelope `429` is still outside `RETRYABLE_SERVER` (`5001..=5003`) and `RATE_LIMITED` (`4001`), so an envelope-only 429 stays untested | Windows table |
+| 17 | A positive calendar response is durable for the day | **New: it must be made so by us.** The provider refused the calendar mid-session with 429 on a day it had already confirmed four times | (e) |
+| 18 | `prev_price` is stable within a trading day | **Confirmed** — byte-identical in 18 reads across 5 h 26 min, matching each auction `pre_close_price` and the prior-day unadjusted close | Table above |
+
+### Recommendation on §R2.10
+
+**The R2 blocker closes under the weaker ceiling, with three amendments to the ceiling as
+§R2.10 states it.** This is a recommendation for the user's acceptance decision, not an
+acceptance, and it opens nothing.
+
+Amendments required before the ceiling is accurate:
+
+1. **Drop snapshot/bar agreement from clause (b).** §R2.10 (b) asks that "each instrument's
+   current-day bar `date_ms` is today **and its `close_price` agrees with the snapshot's
+   `last_price`**". The second half is disproved (a): it fails 22 of 44 open-market pairs.
+   The clause becomes: the current-day bar's `date_ms` is today — a provider assertion — and
+   the snapshot is attributed to that day **by inference**, disclosed as an inference. Do
+   not substitute a tolerance; these samples cannot define one.
+2. **Withdraw `data_status` as a session or halt signal** (§R2.10 assumption 3). It reports
+   the opening call auction and is constant all day (f). Session and break boundaries come
+   from the confirmed exchange day plus the engine's own session clock — which is already
+   the F1/F2 mechanism (`InstrumentStatus` + scheduled `CancelOrder`), so nothing new is
+   needed. Halt visibility drops to **none**, and the ceiling must say so.
+3. **Make the confirmed day durable for its day** (e), and treat provider rate limiting as a
+   normal, observed condition rather than an outage.
+
+Remaining assumptions, each of which the product would rely on without proof, for explicit
+user acceptance:
+
+1. **Source delay is unknown and unbounded.** A CN fill may be simulated against a price of
+   any age. MarketRig cannot detect, bound or display it; every age it shows is age since
+   receipt and must be named so.
+2. **An unchanged read means nothing.** Frozen for 20 s in continuous trading at 14:57;
+   frozen for the whole lunch break. A quiet name, a halted name and a stalled feed are
+   indistinguishable.
+3. **The snapshot is dated only by inference** from a separately requested dated bar, exact
+   in 31 of 53 pairs today. The reference (`prev_price`) is dated by nothing at all — only
+   by being stable and agreeing with two other endpoints.
+4. **`prev_price` is undocumented behaviour** (§R2.4), confirmed against an exchange for
+   pure-cash events only (§R2.6); 送股 / 配股 untested, and no local cross-check may gate
+   (§R2.8 #12).
+5. **Halts are invisible.** No sampled instrument was halted; the only endpoint that names
+   停牌 was constant all day.
+6. **Rate limiting is real and self-inflicted.** 81 requests in one day triggered HTTP 429
+   twice, once on the calendar. Any production cadence must be budgeted, and a refusal must
+   never revoke a proven day.
+
+What the samples did **not** establish, stated plainly: any source-delay bound; halt
+detection; behaviour on a holiday, a suspension, an ex-date, or a limit-up/limit-down name;
+`live` / `not_ready` auction states; behaviour on any instrument outside the five-code CN
+catalog; behaviour on any day but 2026-09-10; and anything at all about the engine's session
+or cancellation behaviour, which this capture does not touch.

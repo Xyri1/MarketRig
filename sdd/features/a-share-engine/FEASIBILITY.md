@@ -1,6 +1,6 @@
 # A-share engine feasibility check — handoff for Claude
 
-**Status:** Initial spike DONE; follow-up R1 DONE (PASS), R2 prepared with session samples scheduled for 2026-09-10 — see Follow-up result. Initial run 2026-09-09 (macOS arm64).  
+**Status:** Initial spike DONE; follow-up R1 DONE (PASS); R2 DONE 2026-09-10 — all six session windows captured, blocker closes only under an amended weaker data ceiling awaiting user acceptance. See Follow-up result. Initial run 2026-09-09 (macOS arm64).  
 **Owner:** Claude, when the user starts this work  
 **Scope:** bounded evidence spike; no product implementation slice opened  
 **Blocks:** declaring the revised feature design complete and starting implementation
@@ -125,7 +125,7 @@ F7 live reads: GET-only against the real HiThink service with the key from the o
 
 ## Follow-up handoff — cash recovery and intraday provider evidence
 
-**Status:** R1 DONE (PASS), R2 preparation DONE with session samples scheduled for 2026-09-10 — see Follow-up result below. Requested 2026-09-09.  
+**Status:** R1 DONE (PASS); R2 DONE 2026-09-10, all six session windows captured — see Follow-up result below. Requested 2026-09-09.  
 **Scope:** Run the two bounded follow-ups below on the existing feasibility branch/worktree. Do not implement the full feature or open an implementation slice.
 
 ### Review correction and intended outcome
@@ -197,3 +197,52 @@ No automatic product implementation, root decision changes, merge, or declaratio
 - **Design consequence:** the "stranded `balances_locked` ceiling" in revision 3 of the Result is withdrawn; §5.3 should require `initialize_orders` after restoration instead. R1 closes the cash-recovery blocker on macOS evidence.
 
 **R2 — intraday readiness: NOT RUN for session samples; preparation DONE** (`F7-EVIDENCE.md` R2.1–R2.10, commit `c120e4a`). The capture script (`f7/capture-intraday.sh`) dry-ran after hours 14/14 OK with no key leak. Documented answers: `prev_price` is not documented as the exchange reference (R2.4); no source-observation timestamp or maximum delay exists anywhere in the provider's docs (R2.5, R2.9); SZSE's own 2026-09-03 announcement for 002322.SZ gives 0.3251058 per share (buy-back account excluded from the distribution, not from the reference base), so `prev_price` was 16/16 exact and the initial "one cent high" explanation is withdrawn — a locally derived cross-check must not gate (R2.6); calendar readiness re-establishes conservatively with no storage: start UNAVAILABLE, require `max(date) == today`, revalidate on rollover (R2.7). The session windows for 2026-09-10 (09:31, 09:45, 12:59, 13:01, 14:30, 14:57) are scheduled through `f7/launchd/install.sh` with two fresh Claude sessions (09:32 interim, 15:05 result); the R2 block here is appended by the 15:05 session. The recommendation on the weaker product ceiling (R2.10) is withheld until those samples exist.
+
+
+### R2 review — 2026-09-10 14:09 Asia/Shanghai
+
+**Session observations COMPLETE for the bounded opening/lunch question; readiness design NEEDS REVISION.** The 09:31, 09:45, 12:59 and 13:01 scheduled captures produced 56/56 successful requests. Today's bars existed in all 36 historical reads; snapshots were unchanged at lunch while their envelope timestamps advanced, then volumes and turnovers increased again after reopening. Snapshot/bar discrepancies persist, and auction status remained `closed / final` on both sides of reopening.
+
+The detailed findings and four raw evidence links are in [F7-EVIDENCE.md](F7-EVIDENCE.md#r2--opening-and-lunch-review-2026-09-10-1409-asiashanghai). This review supersedes the earlier “session samples NOT RUN” status and the requirement to wait for every scheduled window to reach a conclusion. The later captures are supplementary; their jobs and Claude's 15:05 review remain scheduled.
+
+**Recommendation:** conclude the provider experiment with explicit limitations, rather than mark the existing design PASS. Remove exact snapshot/bar equality from the proposed readiness gate; do not invent a tolerance from these samples. A current-day bar corroborates availability but does not uniquely date a separate snapshot/reference. The readiness contract must explicitly address that assumption, use exchange-calendar/session-clock gating, and disclose unknown source delay and unproven halt detection. This records required design corrections, not their implementation or acceptance. R1 remains PASS on macOS evidence; the partial-fill restart history defect remains open. No root SDD changes or feature-completion declaration.
+
+### Follow-up result — R2, 2026-09-10 15:05 Asia/Shanghai
+
+Written by the scheduled 15:05 session from the six committed captures. No provider request was issued by this session. The R1 text above is untouched.
+
+**Status per sub-question**
+
+| Sub-question | Status |
+| --- | --- |
+| Session samples exist for the required windows | **PASS** — all six captured, none missing, two partial (rate limit) |
+| Current-day bar at the open, at the lunch reopen, and updating intraday | **PASS** — present and updating in all six windows |
+| What dates the reference and the observation | **PASS as an answer / FAIL for the SPEC's rule** — the bar and the calendar assert a date; the snapshot has none and is dated only by inference, and the snapshot/bar equality gate is disproved |
+| `prev_price` documented as the exchange reference | **ANSWERED — not documented** (F7-EVIDENCE §R2.4; behaviour confirmed §R2.6). Not re-run |
+| Source-observation timestamp / maximum delay | **FAIL — none exists** (§R2.5, §R2.9), and no sampling can create one |
+| Conservative calendar re-establishment | **PASS with one amendment** (§R2.7 plus the observed mid-session 429) |
+| `auction/snapshot` `data_status` as a session or halt signal | **FAIL for session/break; NOT RUN for halts** |
+
+**Reproducible record.** Branch `codex/a-share-feasibility`, worktree `.worktrees/a-share-feasibility/`, parent commit `d17cb93`; platform macOS arm64. No code was built or run, so no test commands or exit codes. Evidence, all under `sdd/features/a-share-engine/f7/intraday/`: `open-0931-20260910T093103+0800.json`, `open-0945-20260910T094505+0800.json`, `lunch-1259-20260910T125901+0800.json`, `lunch-1301-20260910T130100+0800.json`, `pm-1430-20260910T143004+0800.json`, `close-1457-20260910T145700+0800.json`, plus one `launchd-<label>.log` each. Full per-read tables and the answers are in F7-EVIDENCE.md, section "R2 — session samples 2026-09-10". A grep for the key over the whole directory finds no match.
+
+**Windows sampled / missing.** All six §R2.3 windows ran; **none missing**. 81 requests issued, 79 HTTP 200 with envelope `code: 0`, 2 refused **HTTP 429 with envelope `code: 429`** — the `pm-1430` calendar read at 14:30:46, so that window has no auction read, and the `close-1457` round-3 `300750.SZ` bar read at 14:57:42, so that window has no calendar and no auction read. The script's stop-early rule fired both times; nothing was retried, and nothing was re-created after hours.
+
+**Facts versus assumptions.**
+
+- *Facts.* A bar dated 2026-09-10 in all 52 successful historical reads, in every window including 09:31 and 13:01, volume strictly increasing through the day. `calendar/trading-days` `max_date: 20260910`, `count: 243`, four times. `prev_price` byte-constant across 18 snapshot reads, equal to each auction `pre_close_price` and to the prior-day unadjusted close. Rate limiting is HTTP 429 *and* envelope 429, which closes the last open row of §R2.8.
+- *Disproved.* Snapshot/bar equality: exact on both fields in 31 of 53 pairs, and only 22 of 44 with the market open; largest gaps 1.20 on price (≈ 9 bp) and 58,100 shares; the bar leads 13 times and lags 9. The snapshot's `data.timestamp` as a data time: it advanced 43 s through the frozen lunch break. `data_status` as a session signal: `closed` / `final` at 12:59 *and* at 13:01, and in all six observations, with `auction_price` frozen at the 09:25 call-auction result — the field describes the call auction, not the session.
+- *Assumption, and now weaker.* "Volume moves, therefore the data is current": at 14:57, in continuous trading, all five codes returned identical `last_price`, `volume` and `turnover` 20 s apart. An unchanged read proves nothing.
+- *Unknown, permanently.* Source delay. No per-item observation time, no upstream quote time, no maximum age, no SLA.
+- *Untested.* Halts; 送股 / 配股 references; `live` / `not_ready` auction states; any day but 2026-09-10; any instrument outside the five-code CN catalog; and engine session and cancellation behaviour, which this capture does not touch.
+
+**Smallest design corrections.**
+
+1. Remove snapshot/bar `close_price` equality from the readiness gate. Keep the bar's `date_ms == today`, which is a provider assertion; state that the snapshot is dated by inference from it, and label it an inference. Do not substitute a tolerance — these samples cannot define one.
+2. Do not use `auction/snapshot`'s `auction_phase` / `data_status` as a session, break or freshness gate. Session boundaries come from the confirmed exchange day plus the engine's own session clock, which is already the F1/F2 mechanism (`InstrumentStatus` + scheduled `CancelOrder`), so no new mechanism is needed. Record that halts are not detectable.
+3. Amend §R2.7 rule 3: a positive calendar for today stays valid for the rest of that Shanghai day; a refusal (429, transport) must **not** revoke it — only a day rollover does. Give a refusal its own reason (`CALENDAR_REFUSED`), distinct from `NO_CALENDAR` and `MARKET_CLOSED_HOLIDAY`. Without this, one rate-limited request pauses CN execution on a day already proven four times.
+4. Budget the provider cadence: 81 requests in one day hit the limit twice. `hithink.rs:469` already retries HTTP 429; envelope `429` is outside `RATE_LIMITED` (`4001`) and `RETRYABLE_SERVER` (`5001..=5003`), so an envelope-only 429 remains unhandled and untested.
+5. Any age shown to the agent or the UI is age since receipt and must be named as such, per §R2.9.
+
+**Recommendation.** **The R2 blocker closes under the weaker ceiling of §R2.10, amended by corrections 1–3, and only with the user's explicit acceptance of six named assumptions**: unknown and unbounded source delay; an unchanged read meaning nothing; the snapshot dated only by inference and the reference dated by nothing; `prev_price` as undocumented behaviour confirmed for pure-cash events only; halts invisible; rate limiting real and self-inflicted. The six are set out in F7-EVIDENCE.md under "Recommendation on §R2.10". The bounded provider experiment is complete and should not be extended — further ordinary sampling cannot supply a guarantee the provider does not publish.
+
+This records evidence and required corrections only. It does not mark the feature design complete, open a slice, change root decisions, merge or push. R1 remains PASS on macOS evidence; the partial-fill restart history defect remains open.

@@ -1,0 +1,525 @@
+{
+  "label": "open-0945",
+  "note": "session sample",
+  "base_url": "https://fuyao.aicubes.cn",
+  "started_at": "2026-09-10T09:45:05+0800",
+  "ended_at": "2026-09-10T09:45:47+0800",
+  "requests_issued": 14,
+  "stopped_early": null,
+  "snapshot_codes": "600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ",
+  "bar_codes": "600519.SH 000001.SZ 300750.SZ",
+  "rounds": 3,
+  "interval_s": 20,
+  "requests": [
+    {
+      "kind": "snapshot",
+      "path": "/api/a-share/prices/snapshot",
+      "query": "thscodes=600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ",
+      "started_at": "2026-09-10T09:45:05+0800",
+      "ended_at": "2026-09-10T09:45:05+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1789004704000,
+        "item": [
+          {
+            "thscode": "600519.SH",
+            "last_price": 1286.06,
+            "volume": 459324,
+            "turnover": 590879800,
+            "prev_price": 1290.88,
+            "price_change": -4.82
+          },
+          {
+            "thscode": "601318.SH",
+            "last_price": 55.35,
+            "volume": 10744793,
+            "turnover": 594563570,
+            "prev_price": 55.28,
+            "price_change": 0.07
+          },
+          {
+            "thscode": "000001.SZ",
+            "last_price": 11.71,
+            "volume": 12560194,
+            "turnover": 146925520,
+            "prev_price": 11.7,
+            "price_change": 0.01
+          },
+          {
+            "thscode": "000858.SZ",
+            "last_price": 70.71,
+            "volume": 3821100,
+            "turnover": 270538160,
+            "prev_price": 71.16,
+            "price_change": -0.45
+          },
+          {
+            "thscode": "300750.SZ",
+            "last_price": 333.5,
+            "volume": 5114239,
+            "turnover": 1704444800,
+            "prev_price": 336.84,
+            "price_change": -3.34
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=600519.SH&interval=1d&start=1788140705000&end=1789004705000&adjust=none",
+      "started_at": "2026-09-10T09:45:05+0800",
+      "ended_at": "2026-09-10T09:45:05+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 1309.3,
+            "volume": 1753404.0
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 1290.88,
+            "volume": 3222611.0
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 1286.06,
+            "volume": 459324.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=000001.SZ&interval=1d&start=1788140705000&end=1789004705000&adjust=none",
+      "started_at": "2026-09-10T09:45:05+0800",
+      "ended_at": "2026-09-10T09:45:05+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 11.78,
+            "volume": 74051597
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 11.7,
+            "volume": 58230598
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 11.7,
+            "volume": 12613794
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=300750.SZ&interval=1d&start=1788140705000&end=1789004705000&adjust=none",
+      "started_at": "2026-09-10T09:45:05+0800",
+      "ended_at": "2026-09-10T09:45:05+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 335.49,
+            "volume": 51955096
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 336.84,
+            "volume": 3.9024E+7
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 333.39,
+            "volume": 5133239.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "snapshot",
+      "path": "/api/a-share/prices/snapshot",
+      "query": "thscodes=600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ",
+      "started_at": "2026-09-10T09:45:25+0800",
+      "ended_at": "2026-09-10T09:45:25+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1789004724000,
+        "item": [
+          {
+            "thscode": "600519.SH",
+            "last_price": 1286.13,
+            "volume": 464024,
+            "turnover": 596924620,
+            "prev_price": 1290.88,
+            "price_change": -4.75
+          },
+          {
+            "thscode": "601318.SH",
+            "last_price": 55.41,
+            "volume": 10915893,
+            "turnover": 604036140,
+            "prev_price": 55.28,
+            "price_change": 0.13
+          },
+          {
+            "thscode": "000001.SZ",
+            "last_price": 11.71,
+            "volume": 12661694,
+            "turnover": 148113750,
+            "prev_price": 11.7,
+            "price_change": 0.01
+          },
+          {
+            "thscode": "000858.SZ",
+            "last_price": 70.7,
+            "volume": 3861900,
+            "turnover": 273423070,
+            "prev_price": 71.16,
+            "price_change": -0.46
+          },
+          {
+            "thscode": "300750.SZ",
+            "last_price": 333.34,
+            "volume": 5141339,
+            "turnover": 1713480800,
+            "prev_price": 336.84,
+            "price_change": -3.5
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=600519.SH&interval=1d&start=1788140725000&end=1789004725000&adjust=none",
+      "started_at": "2026-09-10T09:45:25+0800",
+      "ended_at": "2026-09-10T09:45:26+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 1309.3,
+            "volume": 1753404.0
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 1290.88,
+            "volume": 3222611.0
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 1285.59,
+            "volume": 463724.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=000001.SZ&interval=1d&start=1788140725000&end=1789004725000&adjust=none",
+      "started_at": "2026-09-10T09:45:26+0800",
+      "ended_at": "2026-09-10T09:45:26+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 11.78,
+            "volume": 74051597
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 11.7,
+            "volume": 58230598
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 11.71,
+            "volume": 12719794
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=300750.SZ&interval=1d&start=1788140725000&end=1789004725000&adjust=none",
+      "started_at": "2026-09-10T09:45:26+0800",
+      "ended_at": "2026-09-10T09:45:26+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 335.49,
+            "volume": 51955096
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 336.84,
+            "volume": 3.9024E+7
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 333.4,
+            "volume": 5159939.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "snapshot",
+      "path": "/api/a-share/prices/snapshot",
+      "query": "thscodes=600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ",
+      "started_at": "2026-09-10T09:45:46+0800",
+      "ended_at": "2026-09-10T09:45:46+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1789004744000,
+        "item": [
+          {
+            "thscode": "600519.SH",
+            "last_price": 1286.68,
+            "volume": 469424,
+            "turnover": 603872580,
+            "prev_price": 1290.88,
+            "price_change": -4.2
+          },
+          {
+            "thscode": "601318.SH",
+            "last_price": 55.44,
+            "volume": 10964693,
+            "turnover": 606740870,
+            "prev_price": 55.28,
+            "price_change": 0.16
+          },
+          {
+            "thscode": "000001.SZ",
+            "last_price": 11.71,
+            "volume": 12897894,
+            "turnover": 150879340,
+            "prev_price": 11.7,
+            "price_change": 0.01
+          },
+          {
+            "thscode": "000858.SZ",
+            "last_price": 70.69,
+            "volume": 3983100,
+            "turnover": 281989960,
+            "prev_price": 71.16,
+            "price_change": -0.47
+          },
+          {
+            "thscode": "300750.SZ",
+            "last_price": 333.64,
+            "volume": 5195341,
+            "turnover": 1731491000,
+            "prev_price": 336.84,
+            "price_change": -3.2
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=600519.SH&interval=1d&start=1788140746000&end=1789004746000&adjust=none",
+      "started_at": "2026-09-10T09:45:46+0800",
+      "ended_at": "2026-09-10T09:45:46+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 1309.3,
+            "volume": 1753404.0
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 1290.88,
+            "volume": 3222611.0
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 1286.68,
+            "volume": 469424.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=000001.SZ&interval=1d&start=1788140746000&end=1789004746000&adjust=none",
+      "started_at": "2026-09-10T09:45:46+0800",
+      "ended_at": "2026-09-10T09:45:46+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 11.78,
+            "volume": 74051597
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 11.7,
+            "volume": 58230598
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 11.71,
+            "volume": 12897894
+          }
+        ]
+      }
+    },
+    {
+      "kind": "historical",
+      "path": "/api/a-share/prices/historical",
+      "query": "thscode=300750.SZ&interval=1d&start=1788140746000&end=1789004746000&adjust=none",
+      "started_at": "2026-09-10T09:45:46+0800",
+      "ended_at": "2026-09-10T09:45:47+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1788969600000,
+        "bars": [
+          {
+            "date_ms": 1788796800000,
+            "date": "2026-09-08",
+            "close_price": 335.49,
+            "volume": 51955096
+          },
+          {
+            "date_ms": 1788883200000,
+            "date": "2026-09-09",
+            "close_price": 336.84,
+            "volume": 3.9024E+7
+          },
+          {
+            "date_ms": 1788969600000,
+            "date": "2026-09-10",
+            "close_price": 333.61,
+            "volume": 5197641.0
+          }
+        ]
+      }
+    },
+    {
+      "kind": "calendar",
+      "path": "/api/a-share/calendar/trading-days",
+      "query": "",
+      "started_at": "2026-09-10T09:45:47+0800",
+      "ended_at": "2026-09-10T09:45:47+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1789004747316,
+        "count": 243,
+        "max_date": "20260910"
+      }
+    },
+    {
+      "kind": "auction",
+      "path": "/api/a-share/auction/snapshot",
+      "query": "thscodes=600519.SH,601318.SH,000001.SZ,000858.SZ,300750.SZ&stage=final",
+      "started_at": "2026-09-10T09:45:47+0800",
+      "ended_at": "2026-09-10T09:45:47+0800",
+      "http_status": 200,
+      "envelope_code": 0,
+      "extract": {
+        "envelope_timestamp": 1789004747465,
+        "auction_phase": "closed",
+        "data_status": "final",
+        "item": [
+          {
+            "thscode": "600519.SH",
+            "pre_close_price": 1290.88,
+            "auction_price": 1291.0,
+            "last_price": 1285.92
+          },
+          {
+            "thscode": "601318.SH",
+            "pre_close_price": 55.28,
+            "auction_price": 55.5,
+            "last_price": 55.39
+          },
+          {
+            "thscode": "000001.SZ",
+            "pre_close_price": 11.7,
+            "auction_price": 11.68,
+            "last_price": 11.7
+          },
+          {
+            "thscode": "000858.SZ",
+            "pre_close_price": 71.16,
+            "auction_price": 71.08,
+            "last_price": 70.68
+          },
+          {
+            "thscode": "300750.SZ",
+            "pre_close_price": 336.84,
+            "auction_price": 335.9,
+            "last_price": 333.49
+          }
+        ]
+      }
+    }
+  ]
+}

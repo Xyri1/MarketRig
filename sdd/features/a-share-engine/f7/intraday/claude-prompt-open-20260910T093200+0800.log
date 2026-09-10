@@ -1,0 +1,18 @@
+Done. Commit `d17cb93`.
+
+**Calendar:** `max_date: "20260910"`, `count: 243` — today is a trading day. The windows stand.
+
+**Sample:** `sdd/features/a-share-engine/f7/intraday/open-0931-20260910T093103+0800.json`, 14/14 requests HTTP 200 / envelope `code: 0`, `stopped_early: null`.
+
+Answers for the opening window:
+
+- **Today's bar at 09:31:** exists. `date_ms 1788969600000` = 2026-09-10, newest bar, in all 3 rounds for all 3 bar codes.
+- **`close_price` vs snapshot `last_price`:** moves with it, not equal. 4 of 9 pairs exactly equal (price and volume together); the other 5 differ in both directions — bar ahead of snapshot 4×, behind 2×. Largest gap 600519.SH round 1: −1.20 on price, 5100 shares. Discrepancies kept.
+- **Volume/turnover:** strictly increasing across the three reads for all five snapshot codes on both fields; the bar's own volume increases too.
+- **`auction_phase` / `data_status`:** `"closed"` / `"final"` at 09:31:46, i.e. 16 minutes into continuous trading — same `data_status` the after-hours dry run saw. Its `pre_close_price` matched snapshot `prev_price` 5/5; its `last_price` was stale vs the round-3 snapshot 5/5. No halted name in the set, so the halt claim is untested.
+- **`data.timestamp`:** three behaviours. Snapshot = whole seconds, behind request start by 1 s, 3 s, 5 s. Historical = the trading day's 00:00:00, not a clock. Calendar and auction = the response instant with milliseconds. Response-side field either way; source delay stays unknown.
+
+Remaining: `open-0945`, `lunch-1259`, `lunch-1301`, `pm-1430`, `close-1457`. §R2.10 recommendation still withheld.
+SessionEnd hook [node "${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.mjs" SessionEnd] failed: /bin/sh: node: command not found
+
+exit=0
