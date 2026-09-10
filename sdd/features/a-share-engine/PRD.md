@@ -1,8 +1,10 @@
 # A-share paper-trading engine — Feature PRD
 
-**Slice:** none yet  
-**Status:** Product choices settled 2026-09-10 — revised fill mechanism requires F8 feasibility before implementation  
-**Next work:** [FEASIBILITY.md](FEASIBILITY.md) F8; earlier F1–F7 and R1/R2 evidence is recorded.
+**Slice:** [014 — A-share paper-trading engine](../../slices/014-a-share-engine.md)
+
+**Status:** Design complete 2026-09-10; native feasibility established on macOS with the AE-9 MARKET exception. Implementation planned, not delivered.
+
+**Next work:** Slice 014; production integration, Windows checks, and attended acceptance remain outstanding. [FEASIBILITY.md](FEASIBILITY.md) records the evidence and known defects.
 
 ## 1. Motivation
 
@@ -10,16 +12,16 @@ _Decision basis: per D4, D20, D38, D75, D76, D78, D84; proposed amendments AE-1�
 
 An A-share desk should not learn from a same-day round trip in shares bought that day, a fill outside its supported session, or a fill beyond the daily band. MarketRig keeps NautilusTrader as the sole producer of fills, fees, balances, and realized P&L, and enforces the supported venue restrictions around it.
 
-This is a proposal to narrow D76's physics gaps and amend D78's form-only, phase-independent GTC contract for CN. It also refines the approval execution boundary in root SPEC §12.3. Those root contracts remain the delivered truth until feasibility passes and the changes are reconciled before implementation. US and Hong Kong are unchanged. Evidence and source links are in [RESEARCH.md](RESEARCH.md).
+This is a proposal to narrow D76's physics gaps and amend D78's form-only, phase-independent GTC contract for CN. It also refines the approval execution boundary in root SPEC §12.3. AE-1–AE-9 record the intended amendments for slice 014; root contracts remain delivered truth until its exit checks pass and durable changes are merged back. US and Hong Kong are unchanged. Evidence and source links are in [RESEARCH.md](RESEARCH.md).
 
 ## 2. Outcome
 
-The supported CN catalog trades only in continuous sessions on exchange trading days. Positions expose today's locked shares and unreserved sellable shares. Orders last for the supported trading day. HiThink execution requires a band based on the provider reference under the disclosed date-attribution assumption, and fills stay inside it. Limit orders wait for a later volume-increasing snapshot with a compatible price and fill at their limit price; market orders use the latest usable snapshot price immediately. Both simulate full remaining quantity without real queue or liquidity evidence. At a daily limit, the simulator conservatively forbids fills toward the limit; this is an explicit assumption, not an observed empty order queue.
+The supported CN catalog trades only in continuous sessions on exchange trading days. Positions expose today's locked shares and unreserved sellable shares. Orders last for the supported trading day. HiThink execution requires a band based on the provider reference under the disclosed date-attribution assumption, and fills stay inside it. Limit orders normally wait for a later volume-increasing snapshot with a compatible price and fill at their limit price. A MARKET publication is an explicit exception: it may fill compatible resting LIMITs first regardless of volume; the MARKET then uses the latest usable snapshot price. Both simulate full remaining quantity without real queue or liquidity evidence. At a daily limit, the simulator conservatively forbids fills toward the limit; this is an explicit assumption, not an observed empty order queue.
 
 ## 3. Scope
 
 1. T+1 sell eligibility from existing fills, with outstanding sells reserved and validation serialized with submission. Sale proceeds remain reusable; cash withdrawal settlement is not modeled.
-2. Continuous-session execution: 09:30–11:30 and 13:00–14:57 Asia/Shanghai, on confirmed exchange trading days. Both new submissions and resting fills obey the session. CN orders expire at 14:57, the end of this simulator's supported day, rather than entering the unmodeled closing auction.
+2. Continuous-session execution: 09:30–11:30 and 13:00–14:57 Asia/Shanghai, on confirmed exchange trading days. Both new submissions and resting fills obey the session. CN GTC orders are canceled at 14:57, the end of this simulator's supported day, rather than entering the unmodeled closing auction.
 3. Daily price bands on HiThink, using a positive provider reference, today’s dated bar, and confirmed calendar. Snapshot/reference date attribution is an accepted inference, not verified provenance. Missing prerequisites block execution.
 4. Correct whole-lot buys, whole odd-remainder sells, and board/type-specific caps for main-board and ChiNext instruments.
 5. Approval-time revalidation, restart ordering, and safe suspension across unavailable data or provider changes.
@@ -40,9 +42,9 @@ The supported CN catalog trades only in continuous sessions on exchange trading 
 ## 5. Success criteria
 
 - A same-day sell of newly bought shares is refused; a next-trading-session sell succeeds and produces the authoritative cycle and evaluation. Friday-to-weekend and holiday boundaries never permit an out-of-session fill.
-- A LIMIT never fills from a pre-submission observation. A later increased-volume snapshot with last price at or better than its limit permits the whole remainder at the limit price. MARKET fills the whole quantity at the latest usable last price, subject to native sufficiency and direction suppression. All fills under an active band remain within it, including restored orders.
+- A LIMIT cannot fill on its own admission. A later increased-volume snapshot with last price at or better than its limit permits the whole remainder at the limit price. A subsequent MARKET publication may instead trigger compatible resting LIMITs regardless of volume, including against a previously received last price. MARKET fills the whole quantity at the latest usable last price, subject to native sufficiency and direction suppression. All fills under an active band remain within it, including restored orders.
 - HiThink data loss or missing required reference/date evidence blocks new submissions and resting fills; recovery cannot match against a stale cached book.
 - A sellable 250-share balance permits 50, 100, 150, 200, and 250, but not 125. Main-board and ChiNext caps differ as specified.
 - Native GTC orders are canceled at the simulator’s day deadline without a new quote and cannot execute after restart on a later day. Reservations release through authoritative terminal order events.
 - Pending approvals reserve nothing and rerun execution checks when approved; competing sells cannot reserve the same shares.
-- Feasibility checks pass before implementation planning. An attended same-day refusal alone is partial evidence; full E7 completion requires the later close.
+- The macOS feasibility record supports implementation planning; defect-reproduction tests do not establish production fixes. An attended same-day refusal alone is partial evidence; full E7 completion requires the later close.

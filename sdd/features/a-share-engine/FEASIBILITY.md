@@ -1,9 +1,12 @@
 # A-share engine feasibility check — handoff for Claude
 
-**Status:** F1–F7 and R1/R2 recorded; weaker provider ceiling accepted 2026-09-10 by delegated judgment. F8 DONE 2026-09-10 (macOS): items 1, 2, 4 PASS, item 3 resolved by AE-9 amendment (MARKET observation qualifies compatible LIMITs), item 5 envelope-429 gap recorded for the slice.  
-**Owner:** Claude, when the user starts this work  
-**Scope:** bounded evidence spike; no product implementation slice opened  
-**Blocks:** implementation readiness for the newly settled AE-9 fill mechanism
+**Status:** F1–F8 and R1/R2 reviewed; native feasibility established on macOS with AE-9’s accepted MARKET exception. Design reconciled; slice 014 planned, not implemented.
+
+**Owner:** Claude, when the user starts this work
+
+**Scope:** bounded evidence spike; no product implementation slice opened
+
+**Remaining:** production fixes, serialized integration and session-clock coverage, Windows verification, and attended acceptance in slice 014
 
 ## Task
 
@@ -339,3 +342,11 @@ Windows; a ChiNext name; partial-fill interaction with AE-9 (every AE-9 fill is 
 #### Resolution — 2026-09-10
 
 User decision: item 3 takes alternative 1. AE-9 and SPEC §2.5 now say a MARKET's observation qualifies every compatible resting LIMIT on that instrument regardless of volume; those LIMITs fill first at their own limit price, then the MARKET at last. Envelope `code: 429` is confirmed as rate limiting and belongs in the retryable set with `4001`; the one-line change stays with the implementation slice. Every F8 item is now resolved on macOS evidence; Windows, the session-clock seam, and the partial-fill history defect remain as recorded under "Not established".
+
+### Design reconciliation — 2026-09-10
+
+Reviewed through `61cb178`; independently reran `cargo test -p marketrigd --lib feasibility::f8` with `CARGO_TARGET_DIR=<repo>/target`: **35 passed, 0 failed**, macOS. This is a native-mechanism check, not a production or cross-platform pass. Several green checks reproduce defects (envelope-only 429, partial-fill history loss, unsafe publication ordering).
+
+PRD, AE-9, SPEC §2.4–§2.5 and A6 now consistently include the accepted MARKET exception. The ordinary feed-volume rule does not apply to a MARKET publication; readiness, session, direction and native sufficiency still do. Explicit integration requirements include confirmed idle restoration before admission, both-side sizing/suppression, failure handling, and authoritative outcomes when a MARKET denial follows resting-order fills. These edge cases join the production checks; the isolated spike did not stress all of them.
+
+[Slice 014](../../slices/014-a-share-engine.md) owns implementation and the remaining fixes. Root delivered contracts remain unchanged until its exit checks pass. Historical handoff/status paragraphs above describe their recorded point in time; this section and the current feature SPEC govern next work. No new provider calls, implementation, merge or push occurred in this reconciliation.
