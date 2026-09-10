@@ -467,6 +467,11 @@ pub struct Harness {
     /// Keeps the daemon off the public feed (root SPEC §17). Set in the gate,
     /// cleared by [`Harness::real_feed`].
     no_trading: bool,
+    /// The controlled-clock seam (`a-share-engine` feature SPEC §6), honored
+    /// only alongside the data root: every node the next daemon starts takes a
+    /// `TestClock` seeded at this instant, and [`Harness::advance_clock`] moves
+    /// them all. `None` leaves the daemon on the ordinary live clock.
+    clock_ns: Option<u64>,
     /// The stand-in runtime's script (R3 feature SPEC §9.1). It is one file per
     /// run, set on the daemon's own environment and inherited by every child it
     /// launches, which is how a launch that the daemon spawns with an exact
@@ -518,6 +523,7 @@ impl Harness {
             quote_url: None,
             hithink_url: None,
             no_trading: true,
+            clock_ns: None,
             standin_script: None,
         }
     }
@@ -546,6 +552,33 @@ impl Harness {
         self.hithink_url = Some(base.to_owned());
     }
 
+    /// Seeds every node the next daemon starts with a controlled clock at
+    /// `now_ns` (`a-share-engine` feature SPEC §6). Like the two feed seams it
+    /// is honored only alongside the data root. A restart takes whatever
+    /// instant is set when [`Harness::spawn`] runs, which is how a scenario
+    /// stops a daemon before a deadline and brings it back after one.
+    pub fn standin_clock(&mut self, now_ns: u64) {
+        self.clock_ns = Some(now_ns);
+    }
+
+    /// Moves every started node's clock to `now_ns` through the seam's own
+    /// route and dispatches the time events that releases — the gate's only way
+    /// to cross a session boundary, since no scenario may wait on wall-clock
+    /// market hours (feature SPEC §6).
+    #[track_caller]
+    pub fn advance_clock(&mut self, scenario: &str, endpoint: &Endpoint, now_ns: u64) {
+        let (status, answered) = self.api(
+            scenario,
+            endpoint,
+            "PUT",
+            "/test/clock",
+            Some(&json!({ "now_ns": now_ns }).to_string()),
+        );
+        assert_eq!(status, 200, "the clock seam answered: {answered}");
+        assert_eq!(answered["now_ns"], json!(now_ns));
+        self.clock_ns = Some(now_ns);
+    }
+
     /// The attended experiment's feed: real Yahoo, so neither seam is set — only
     /// the data root, which both modes always relocate (root SPEC §17).
     pub fn real_feed(&mut self) {
@@ -556,6 +589,15 @@ impl Harness {
     /// One greppable JSON line per step; the harness deletes nothing.
     pub fn note(&mut self, scenario: &str, note: &str, data: Value) {
         self.record(scenario, "OK", note, data);
+    }
+
+    /// A cell whose mechanics all held but whose scenario is not finished yet —
+    /// E7's first sitting, which can buy and watch the T+1 refusal but cannot
+    /// close the cycle until a later supported session (`a-share-engine`
+    /// feature SPEC §6). Never a pass, never a failure.
+    pub fn partial(&mut self, scenario: &str, note: &str, data: Value) {
+        eprintln!("PARTIAL {scenario}: {note}");
+        self.record(scenario, "PARTIAL", note, data);
     }
 
     /// An aspect that waits on the agent and did not happen: evidence, not a
@@ -611,6 +653,10 @@ impl Harness {
         match &self.hithink_url {
             Some(url) => command.env("MARKETRIG_TEST_HITHINK_URL", url),
             None => command.env_remove("MARKETRIG_TEST_HITHINK_URL"),
+        };
+        match &self.clock_ns {
+            Some(now_ns) => command.env("MARKETRIG_TEST_CLOCK_NS", now_ns.to_string()),
+            None => command.env_remove("MARKETRIG_TEST_CLOCK_NS"),
         };
         match &self.standin_script {
             Some(path) => command.env("MARKETRIG_STANDIN_SCRIPT", path),
@@ -800,6 +846,7 @@ impl Harness {
                 "quote_url": self.quote_url,
                 "hithink_url": self.hithink_url,
                 "no_trading": self.no_trading,
+                "clock_ns": self.clock_ns,
             }),
         );
         Daemon {

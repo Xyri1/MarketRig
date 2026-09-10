@@ -1519,6 +1519,13 @@ fn e7_claude_code() {
 /// through `marketrig research hithink` leaves no durable trace at all — the
 /// passthrough writes no row and no event (§4.1) — so that aspect is
 /// inconclusive by construction, as E1's two quote reads are.
+///
+/// One sitting cannot complete this cell: A-share T+1 locks today's buy until
+/// the next trading day (`a-share-engine` SPEC §1.1), so a first sitting that
+/// buys and watches the same-day sell refused is recorded `PARTIAL`, and the
+/// cell is complete only when a later supported session sells that lot and the
+/// native cycle closes. The bundle also records what this cell cannot prove:
+/// the provider's unknown source delay and the unadjusted corporate action.
 fn a_share(scenario: &str, cell: &str, runtime: &str) {
     if std::env::var(CELL).unwrap_or_default() != cell {
         eprintln!(
@@ -1695,15 +1702,40 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
          \x20  writes no row and no event, so the harness records this aspect\n\
          \x20  INCONCLUSIVE by construction — only you can judge what came back.\n\
          \n\
-         3. Ask the session to buy one lot — 100 shares — of {instrument} through\n\
-         \x20  `submit_order`, and then to sell that same lot. That closes one\n\
-         \x20  position cycle and MarketRig queues its EVALUATION prompt. Inside\n\
-         \x20  the Shanghai session (09:30-11:30, 13:00-15:00 Asia/Shanghai) the\n\
-         \x20  leg keeps polling and the round trip fills against a fresh price.\n\
+         3. Ask the session to read {instrument}'s own band before it trades: the\n\
+         \x20  desk's `market/quotes` resource carries `prev_close`, `limit_up`,\n\
+         \x20  `limit_down` and `band_date`, and the `execution` object beside\n\
+         \x20  them says `band_date_inferred: true`, `source_delay: UNKNOWN` and\n\
+         \x20  `fill_policy: HITHINK_SAMPLED`. The reference is the provider's,\n\
+         \x20  the date is inferred from receipt, and neither is certified: that\n\
+         \x20  is the disclosed assumption every order below rests on.\n\
          \n\
-         4. Nothing else. The harness then removes the key from the credential\n\
+         4. Ask the session to buy one lot — 100 shares — of {instrument} through\n\
+         \x20  `submit_order`, inside a supported session (09:30-11:30 and\n\
+         \x20  13:00-14:57 Asia/Shanghai).\n\
+         \n\
+         5. Ask it to sell that same lot **today**. It must be refused: the\n\
+         \x20  A-share T+1 rule locks today's buy until the next trading day, and\n\
+         \x20  the refusal says so. That refusal is the point of the sitting, not\n\
+         \x20  a fault.\n\
+         \n\
+         6. **The sitting ends PARTIAL here.** A cell is complete only when a\n\
+         \x20  later supported session sells that lot, closing the native cycle\n\
+         \x20  and queueing its EVALUATION prompt. Rerun this cell against the\n\
+         \x20  same bundle on the next trading day — `MARKETRIG_ACCEPTANCE_OUT`\n\
+         \x20  set to this directory — and ask the resumed session to sell. Do\n\
+         \x20  not record the first sitting as a pass.\n\
+         \n\
+         7. Nothing else. The harness then removes the key from the credential\n\
          \x20  store and greps the whole bundle for it, so a later research read\n\
          \x20  answers RESEARCH_UNCONFIGURED: that is the cell ending, not a fault.\n\
+         \n\
+         Two limitations this cell cannot remove, and records instead: the\n\
+         provider publishes no source timestamp, so every observation's delay is\n\
+         UNKNOWN and no fill may be read as a claim about market time; and a\n\
+         holding carried across a corporate action is not adjusted here, so a\n\
+         dividend or split date inside the hold makes the realized figure\n\
+         incomparable — never attribute the difference to strategy.\n\
          \n\
          The harness waits up to {patience} minutes per step. While this console is\n\
          \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
@@ -1744,16 +1776,48 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
             "the launch never reached readiness — the operator may not have answered its first-launch questions",
             json!({ "waited_secs": PATIENCE.as_secs() }),
         );
-    } else if !waited(PATIENCE, "the session to close one position cycle", || {
+    } else if !waited(PATIENCE, "the session's buy to fill", || {
         g.scalar::<i64>(
-            "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+            "SELECT count(*) FROM fills WHERE desk_id = ?1 AND side = 'BUY'",
             &[&desk_id],
         ) >= 1
     }) {
         g.inconclusive(
             scenario,
-            "no position cycle was closed within the cell's patience",
+            "the session bought nothing within the cell's patience",
             json!({ "prompts": prompt_states(&g, &desk_id) }),
+        );
+    } else if g.scalar::<i64>(
+        "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
+        &[&desk_id],
+    ) == 0
+    {
+        // The buy filled, so the sitting's own claim is the T+1 refusal: a
+        // same-day sell is terminal on the action row, with no order behind it
+        // (`a-share-engine` SPEC §1.2, §5.2). The cycle belongs to a later
+        // supported session, so this sitting is PARTIAL, never a pass.
+        let refused: i64 = g.scalar(
+            "SELECT count(*) FROM trading_actions WHERE desk_id = ?1 \
+             AND outcome LIKE '%ORDER_INVALID%' AND request LIKE '%SELL%'",
+            &[&desk_id],
+        );
+        if refused == 0 {
+            g.inconclusive(
+                scenario,
+                "the session never asked for the same-day sell the T+1 rule must refuse",
+                json!({ "prompts": prompt_states(&g, &desk_id) }),
+            );
+        } else {
+            g.note(
+                scenario,
+                "today's buy filled and the same-day sell was refused terminally by the T+1 rule, with no order behind it",
+                json!({ "refused_sells": refused }),
+            );
+        }
+        g.partial(
+            scenario,
+            "the sitting bought and observed the T+1 refusal; the cell completes only when a later supported session sells the lot, closes the native cycle and queues its evaluation",
+            json!({ "instrument": A_SHARE, "prompts": prompt_states(&g, &desk_id) }),
         );
     } else {
         // The cycle exists, so the rest is the daemon's own: its evaluation is
@@ -1773,10 +1837,21 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
         );
         g.note(
             scenario,
-            "the session's round trip on the A-share closed a cycle and MarketRig queued its evaluation",
+            "a later supported session sold the lot bought on an earlier day: the native cycle closed and MarketRig queued its evaluation",
             json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
         );
     }
+
+    // The two limitations the cell cannot remove, recorded in the bundle rather
+    // than argued away (`a-share-engine` SPEC §2.1, §6).
+    g.note(
+        scenario,
+        "limitations of this cell, recorded with its evidence",
+        json!({
+            "source_delay": "UNKNOWN — the provider publishes no source timestamp, so no fill here is a claim about market time",
+            "corporate_actions": "a holding carried across a dividend or split date is not adjusted, so its realized figure is incomparable and must never be attributed to strategy",
+        }),
+    );
 
     g.inconclusive(
         scenario,

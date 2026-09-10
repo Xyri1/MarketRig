@@ -126,6 +126,160 @@ fn amount(text: &str) -> f64 {
         .unwrap_or_else(|| panic!("{text:?} is not an amount"))
 }
 
+// ---------------------------------------------------------------------------
+// The controlled exchange calendar (`a-share-engine` feature SPEC §6)
+// ---------------------------------------------------------------------------
+//
+// Every CN scenario runs on the node clock the `MARKETRIG_TEST_CLOCK_NS` seam
+// seeds and `PUT /test/clock` advances, so nothing in the gate depends on the
+// wall-clock hour or on the real exchange calendar. Asia/Shanghai has had no
+// DST since 1991, so each scripted day is one constant: its own midnight, as a
+// Unix second.
+
+/// Wednesday 2026-03-04 and Thursday 2026-03-05 — the H-scenarios' two days.
+const H_DAY1: i64 = 1_772_553_600;
+const H_DAY2: i64 = 1_772_640_000;
+/// Wednesday 2026-03-11, Thursday 2026-03-12 and Monday 2026-03-16 — the
+/// A-scenarios' trading days, with Friday 2026-03-13 deliberately left out of
+/// the stand-in's list (a holiday) and Saturday 2026-03-14 between them.
+const A_DAY1: i64 = 1_773_158_400;
+const A_DAY2: i64 = 1_773_244_800;
+const A_HOLIDAY: i64 = 1_773_331_200;
+const A_SATURDAY: i64 = 1_773_417_600;
+const A_DAY3: i64 = 1_773_590_400;
+/// Tuesday 2026-03-17 — A6's own session, after A5's second restart.
+const A_DAY4: i64 = 1_773_676_800;
+
+/// Every day the stand-in's trading-day list must carry for the controlled
+/// clock to find a confirmed session. `A_HOLIDAY` is absent on purpose.
+const SCRIPTED_TRADING_DAYS: [i64; 6] = [H_DAY1, H_DAY2, A_DAY1, A_DAY2, A_DAY3, A_DAY4];
+
+/// `hh:mm` Asia/Shanghai on one scripted day, in nanoseconds.
+fn sh(midnight_s: i64, hour: i64, minute: i64) -> u64 {
+    ((midnight_s + hour * 3_600 + minute * 60) * 1_000_000_000) as u64
+}
+
+/// One scripted day as the provider's calendar spells it, `yyyyMMdd`.
+fn day(midnight_s: i64) -> String {
+    standin::shanghai_date(midnight_s + 12 * 3_600)
+}
+
+/// One CN instrument's desk-scoped execution view (`a-share-engine` §2.1).
+#[track_caller]
+fn execution(
+    g: &Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk: &str,
+    id: &str,
+) -> Value {
+    let (_, quotes) = g.call(
+        endpoint,
+        "GET",
+        &format!("/desks/{desk}/market/quotes"),
+        None,
+    );
+    quote_of(&quotes, id)["execution"].clone()
+}
+
+/// Waits until this desk's node has both re-opened the instrument and
+/// re-established the day's band for it. A session boundary flips the status
+/// from the kernel clock alone (`a-share-engine` SPEC §5.1), so `OPEN` on its
+/// own can still be carrying the previous day's inferred band date; every wait
+/// that follows a clock advance across midnight uses this instead.
+#[track_caller]
+fn await_trading_day(
+    g: &Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk: &str,
+    id: &str,
+    midnight_s: i64,
+) {
+    within(
+        Duration::from_secs(120),
+        &format!("{id} to be executable on {}", day(midnight_s)),
+        || {
+            let view = execution(g, endpoint, desk, id);
+            view["availability"] == "OPEN" && view["band_date"] == day(midnight_s).as_str()
+        },
+    );
+}
+
+/// One CN position's T+1 projections (`a-share-engine` §1.1), or `None` when the
+/// desk holds nothing in the instrument.
+fn eligibility(
+    g: &Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk: &str,
+    id: &str,
+) -> Option<Value> {
+    let (_, positions) = g.call(endpoint, "GET", &format!("/desks/{desk}/positions"), None);
+    positions["positions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|position| position["instrument_id"] == id)
+        .cloned()
+}
+
+/// Serves one exact CN observation and waits until this daemon's node has taken
+/// it — the gate's substitute for counting poll cycles, since the cadence is
+/// wall-clock and the decisions are not. Answers nothing; the effect the
+/// scenario is about is asserted after it.
+#[track_caller]
+fn observe(
+    g: &Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk: &str,
+    instrument: (&str, &str),
+    feed: &standin::Feed,
+    last: &str,
+    volume: i64,
+) {
+    let (id, thscode) = instrument;
+    feed.hithink_quote(thscode, last, volume);
+    let path = format!("/desks/{desk}/market/quotes");
+    within(
+        Duration::from_secs(90),
+        &format!("{id} to be observed at {last}/{volume}"),
+        || {
+            let quote = quote_of(&g.call(endpoint, "GET", &path, None).1, id);
+            quote["last"] == last && quote["volume"] == volume.to_string().as_str()
+        },
+    );
+}
+
+/// One order's current status out of the desk's open orders, or its terminal
+/// status out of the history when it is no longer open.
+fn order_status(
+    g: &Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    desk: &str,
+    client_order_id: &str,
+) -> Value {
+    let (_, open) = g.call(endpoint, "GET", &format!("/desks/{desk}/orders"), None);
+    if let Some(found) = open["orders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|order| order["client_order_id"] == client_order_id)
+    {
+        return found.clone();
+    }
+    let (_, history) = g.call(
+        endpoint,
+        "GET",
+        &format!("/desks/{desk}/history/orders"),
+        None,
+    );
+    history["orders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|order| order["client_order_id"] == client_order_id)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
 /// One order body (R1 §4.2).
 fn order(action_id: &str, instrument_id: &str, side: &str, kind: &str, quantity: &str) -> String {
     json!({
@@ -1579,16 +1733,15 @@ fn gate() {
     );
 
     // --- G16 — refusals -----------------------------------------------------
-    for instrument in ["600519.XSHG", "000001.XSHE"] {
-        within(
-            Duration::from_secs(30),
-            &format!("{instrument}'s observation"),
-            || {
-                quote_of(&g.call(&endpoint, "GET", &quotes_path, None).1, instrument)["health"]
-                    == "LIVE"
-            },
-        );
-    }
+    // The two sandbox refusals are asked of AAPL, not of a `CN` instrument: a CN
+    // order is now decided by this desk's own execution boundary, and a desk
+    // with no HiThink provider has no confirmed trading day, so it would answer
+    // `MARKET_UNAVAILABLE` / `NO_CALENDAR` long before the sandbox saw anything
+    // (`a-share-engine` SPEC §2.1, AE-7). What G16 is about — the sandbox's own
+    // reason inside the documented envelope — is unchanged.
+    within(Duration::from_secs(30), "AAPL.XNAS's observation", || {
+        quote_of(&g.call(&endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["health"] == "LIVE"
+    });
     let refusals: [(&str, String, u16, &str, &str); 4] = [
         (
             "g16-unknown",
@@ -1605,17 +1758,17 @@ fn gate() {
             "",
         ),
         (
-            // Far beyond the 500,000 CNY seeded at XSHG (§4.1).
+            // Far beyond the 100,000 USD seeded at XNAS (§4.1).
             "g16-too-big",
-            order("g16-too-big", "600519.XSHG", "BUY", "MARKET", "50000"),
+            order("g16-too-big", "AAPL.XNAS", "BUY", "MARKET", "50000"),
             409,
             "ORDER_REJECTED",
             "FREE_BALANCE",
         ),
         (
-            // Flat, so this sells beyond the held quantity.
+            // Flat in AAPL since G14, so this sells beyond the held quantity.
             "g16-short",
-            order("g16-short", "000001.XSHE", "SELL", "MARKET", "100"),
+            order("g16-short", "AAPL.XNAS", "SELL", "MARKET", "100"),
             409,
             "ORDER_REJECTED",
             "Short selling",
@@ -5400,16 +5553,17 @@ fn gate() {
     let delta_orders = format!("/desks/{delta_id}/orders");
     let (status, quotes) = g.api("O9", &endpoint, "GET", &delta_quotes, None);
     assert_eq!(status, 200, "{quotes}");
-    for instrument in ["AAPL.XNAS", "600519.XSHG"] {
-        within(
-            Duration::from_secs(60),
-            &format!("delta's {instrument} observation"),
-            || {
-                quote_of(&g.call(&endpoint, "GET", &delta_quotes, None).1, instrument)["health"]
-                    == "LIVE"
-            },
-        );
-    }
+    within(
+        Duration::from_secs(60),
+        "delta's AAPL.XNAS observation",
+        || {
+            quote_of(
+                &g.call(&endpoint, "GET", &delta_quotes, None).1,
+                "AAPL.XNAS",
+            )["health"]
+                == "LIVE"
+        },
+    );
 
     let desk_name = delta.clone();
     let mcp = g.mcp.clone();
@@ -5643,13 +5797,15 @@ fn gate() {
         ordering_firing.as_str()
     );
 
-    // Refused after approval is still a record (§3.3): far beyond the 500,000
-    // CNY seeded at XSHG.
+    // Refused after approval is still a record (§3.3): far beyond the 100,000
+    // USD seeded at XNAS. A `CN` instrument would answer this desk's own
+    // execution boundary instead of the sandbox's (`a-share-engine` §2.1), and
+    // what O9 is about is a sandbox refusal surviving an approval.
     let (errored, too_big) = submit(
         "o9-too-big",
         "BUY",
         "MARKET",
-        "600519.XSHG",
+        "AAPL.XNAS",
         "50000",
         Value::Null,
     );
@@ -5933,6 +6089,14 @@ fn gate() {
     // seeded skill in a new desk's projection.
     // ======================================================================
     g.standin_hithink(&feed.hithink_base());
+    // Every scenario from here on decides CN session, trading date, deadline and
+    // T+1 under the controlled node clock, so none of them depends on the hour
+    // the gate happens to run at (`a-share-engine` SPEC §6). The stand-in's
+    // calendar carries the scripted days on top of the wall-clock weekdays it
+    // already serves, so the `CN` awareness phase H2 asserts is unaffected.
+    for midnight in SCRIPTED_TRADING_DAYS {
+        feed.hithink_trading_day(&day(midnight), true);
+    }
     let mu = format!("mu-{stamp}");
     let daemon20 = g.spawn("H1");
     endpoint = daemon20.endpoint.clone();
@@ -6162,9 +6326,23 @@ fn gate() {
         || quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["provider"] == "hithink",
     );
 
-    // R1's G15 shape on the new feed: one CN round trip, settled in CNY at the
-    // 3 bp A-share rate. O10 left both policies gating, so orders go back on
-    // Always allow first.
+    // The round trip runs on a second daemon, on the controlled clock: A-share
+    // T+1 forbids closing a position the day it was opened, and no scenario may
+    // wait for a Shanghai session to open (`a-share-engine` SPEC §1.1, §6). The
+    // awareness half above stays on the wall clock on purpose — the CN market
+    // phase and the calendar label that names its rule are installation-wide and
+    // read the wall clock, while every execution decision reads the node's own
+    // (§5.1) — so the two halves cannot share one daemon.
+    g.stop("H2", daemon20);
+    g.standin_clock(sh(H_DAY1, 9, 35));
+    let daemon20b = g.spawn("H2");
+    endpoint = daemon20b.endpoint.clone();
+
+    // R1's G15 shape on the new feed, under the controlled clock and the T+1
+    // rule: a buy in one confirmed session, a same-day sell refused, and the
+    // round trip closed in the *next* supported session (`a-share-engine` SPEC
+    // §1.1, §5.1). O10 left both policies gating, so orders go back on Always
+    // allow first.
     let (status, ungated) = g.api(
         "H2",
         &endpoint,
@@ -6173,6 +6351,11 @@ fn gate() {
         Some(r#"{"paper_order_policy":"ALWAYS_ALLOW"}"#),
     );
     assert_eq!(status, 200, "{ungated}");
+    within(
+        Duration::from_secs(90),
+        "600519.XSHG to be executable on the controlled day",
+        || execution(&g, &endpoint, &mu_id, moutai)["availability"] == "OPEN",
+    );
     let (status, bought) = g.api(
         "H2",
         &endpoint,
@@ -6187,15 +6370,62 @@ fn gate() {
         .expect("average price")
         .to_owned();
 
+    // Today's buy is locked: the position says so, and a same-day sell is
+    // refused before the sandbox is asked (§1.1, §1.2).
+    let held = eligibility(&g, &endpoint, &mu_id, moutai).expect("the CN position");
+    assert_eq!(held["quantity"], "100");
+    assert_eq!(held["sellable_quantity"], "0", "{held}");
+    assert_eq!(held["locked_quantity"], "100", "{held}");
+    assert_eq!(held["reserved_quantity"], "0", "{held}");
+    let (status, same_day) = g.api(
+        "H2",
+        &endpoint,
+        "POST",
+        &mu_orders,
+        Some(&order("h2-sell-same-day", moutai, "SELL", "MARKET", "100")),
+    );
+    assert_eq!(status, 400, "{same_day}");
+    assert_eq!(same_day["code"], "ORDER_INVALID");
+    let message = same_day["message"].as_str().expect("a message");
+    assert!(
+        message.contains("exceeds sellable 0")
+            && message.contains("100 bought today are locked by T+1"),
+        "the refusal names the T+1 term (§1.2): {message}"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
+            &[&mu_id, &"h2-sell-same-day"],
+        ),
+        0,
+        "a T+1 refusal never reaches the sandbox"
+    );
+
+    // The next supported session, reached by moving the clock rather than by
+    // waiting for one (§6). The calendar carries both days and the stand-in
+    // dates its bar by the window the daemon asks for, so readiness is
+    // re-established for the new day before anything is admitted.
     let cn_tick = feed.hithink_tick("600519.SH");
+    g.advance_clock("H2", &endpoint, sh(H_DAY2, 9, 35));
     within(
-        Duration::from_secs(60),
+        Duration::from_secs(90),
+        "600519.XSHG to be executable on the next trading day",
+        || {
+            let view = execution(&g, &endpoint, &mu_id, moutai);
+            view["availability"] == "OPEN" && view["band_date"] == day(H_DAY2).as_str()
+        },
+    );
+    within(
+        Duration::from_secs(90),
         "the ticked HiThink price to reach the book",
         || {
             quote_of(&g.call(&endpoint, "GET", &mu_quotes, None).1, moutai)["last"]
                 == cn_tick.as_str()
         },
     );
+    let unlocked = eligibility(&g, &endpoint, &mu_id, moutai).expect("the CN position");
+    assert_eq!(unlocked["sellable_quantity"], "100", "{unlocked}");
+    assert_eq!(unlocked["locked_quantity"], "0", "{unlocked}");
     let (status, sold) = g.api(
         "H2",
         &endpoint,
@@ -6244,9 +6474,25 @@ fn gate() {
         format!("{:.2}", (amount(&cn_sell) - amount(&cn_buy)) * 100.0 - fees),
         "net of both sides' fees (root §12.4)"
     );
+    // The closing fill's cycle was born with its evaluation prompt, exactly as
+    // an equity cycle is (R1 §6) — the loop the MVP is about does not change
+    // because the close is a day later.
+    within(
+        Duration::from_secs(30),
+        "the CNY cycle's queued evaluation prompt",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM position_cycles c JOIN prompts p \
+                   ON p.desk_id = c.desk_id AND p.kind = 'EVALUATION' \
+                  AND json_extract(p.payload, '$.cycle_id') = c.id \
+                 WHERE c.desk_id = ?1 AND c.instrument_id = '600519.XSHG'",
+                &[&mu_id],
+            ) == 1
+        },
+    );
     g.note(
         "H2",
-        "an unconfigured provider left the CN leg on Yahoo with the weekday rule and HiThink unasked, the stored key moved it to one batched snapshot a cycle naming every CN thscode with a null source time and the HITHINK calendar, today out of the stand-in's list closed it, the toggle moved the leg to Yahoo and back with a higher sequence and no node restart, and a CN round trip closed with realized P&L in CNY at 3 bp on both fills",
+        "an unconfigured provider left the CN leg on Yahoo with the weekday rule and HiThink unasked, the stored key moved it to one batched snapshot a cycle naming every CN thscode with a null source time and the HITHINK calendar, today out of the stand-in's list closed it, the toggle moved the leg to Yahoo and back with a higher sequence and no node restart, and a controlled-clock round trip bought in one confirmed session, saw the same-day sell refused with the T+1 term and no sandbox order, and closed in the next session with realized P&L in CNY at 3 bp on both fills and its evaluation prompt queued",
         json!({
             "yahoo": yahoo, "hithink": observed, "closed": closed, "switched": switched,
             "snapshot_query": batched[0].1, "buy": cn_buy, "sell": cn_sell,
@@ -6369,7 +6615,7 @@ fn gate() {
             );
         }
     }
-    g.stop("H4", daemon20);
+    g.stop("H4", daemon20b);
     g.note(
         "H4",
         "a desk created on this daemon listed desk-improvement and hithink-finance in its projection, every file of the HiThink seed — SKILL.md and its reference pages — matched the committed tree byte for byte, and no line of any of them named a surface the desk cannot reach",
@@ -6380,6 +6626,1474 @@ fn gate() {
         }),
     );
 
+    // ======================================================================
+    // The A-share paper-trading engine (`a-share-engine` feature SPEC §6, per
+    // AE-1–AE-9). A1–A6 continue the chain on the same root, on a fresh daemon
+    // whose nodes are seeded at Wednesday 2026-03-11 09:35 Asia/Shanghai and
+    // moved by `PUT /test/clock` alone: not one of these scenarios depends on
+    // the wall-clock hour, the real exchange calendar, or a same-day round
+    // trip. The stand-in's HiThink half serves the whole `CN` leg, so each
+    // instrument's reference, last price and cumulative volume are scripted
+    // exactly and every fill is the sandbox's own.
+    // ======================================================================
+    g.standin_clock(sh(A_DAY1, 9, 35));
+    let nu = format!("nu-{stamp}");
+    let daemon21 = g.spawn("A1");
+    endpoint = daemon21.endpoint.clone();
+    let (status, restored) = g.api_redacted("A1", &endpoint, "PUT", provider, &store_key);
+    assert_eq!(status, 200, "{restored}");
+    assert_eq!(restored["a_share_feed"], "HITHINK");
+    let (status, ungated) = g.api(
+        "A1",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"paper_order_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated}");
+    within(
+        Duration::from_secs(120),
+        "this daemon's OpenViking child",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+    let (exit, created) = g.cli_json("A1", &["--json", "desk", "create", &nu]);
+    assert_eq!(exit, 0, "{created}");
+    let nu_id = created["id"].as_str().expect("id").to_owned();
+    let nu_orders = format!("/desks/{nu_id}/orders");
+    let nu_quotes = format!("/desks/{nu_id}/market/quotes");
+
+    // The day's scripted references, set before this desk's node takes its
+    // first observation: a reference that changes inside a day blocks the
+    // instrument until the next one (§2.1), so the whole board is placed first.
+    let moutai_prev = "1688.00";
+    for (thscode, prev, last) in [
+        ("600519.SH", moutai_prev, "1700.00"),
+        ("601318.SH", "50.00", "48.00"),
+        ("000858.SZ", "100.00", "95.00"),
+        ("000001.SZ", "10.00", "9.90"),
+        ("300750.SZ", "100.00", "95.00"),
+    ] {
+        feed.hithink_prev_close(thscode, prev);
+        feed.hithink_quote(thscode, last, 1_000);
+    }
+    let moutai_up = "1856.80";
+    let moutai_down = "1519.20";
+    within(
+        Duration::from_secs(120),
+        "the CN board to be executable on the controlled day",
+        || {
+            [
+                "600519.XSHG",
+                "601318.XSHG",
+                "000858.XSHE",
+                "000001.XSHE",
+                "300750.XSHE",
+            ]
+            .iter()
+            .all(|id| execution(&g, &endpoint, &nu_id, id)["availability"] == "OPEN")
+        },
+    );
+    let view = execution(&g, &endpoint, &nu_id, "600519.XSHG");
+    assert_eq!(view["band_date"], day(A_DAY1).as_str());
+    assert_eq!(view["band_date_inferred"], json!(true));
+    assert_eq!(view["source_delay"], "UNKNOWN");
+    assert_eq!(view["fill_policy"], "HITHINK_SAMPLED");
+    assert!(view["receipt_age_ms"].is_i64(), "{view}");
+    g.note(
+        "A1",
+        "a fresh daemon on the controlled clock made the CN board executable for the scripted trading day",
+        json!({ "desk": nu_id, "day": day(A_DAY1), "execution": view }),
+    );
+
+    // --- A1 — T+1 and reservation ------------------------------------------
+    // Day one's buys, which every later scenario's prior-day inventory comes
+    // from: 200 Moutai for A1's own round trip, 400 Ping An for A2's odd-lot
+    // table, and 400 Wuliangye for A3's two band boundaries.
+    for (action_id, instrument, quantity) in [
+        ("a1-buy-moutai", "600519.XSHG", "200"),
+        ("a1-buy-pingan", "601318.XSHG", "400"),
+        ("a1-buy-wuliangye", "000858.XSHE", "400"),
+    ] {
+        let (status, bought) = g.api(
+            "A1",
+            &endpoint,
+            "POST",
+            &nu_orders,
+            Some(&order(action_id, instrument, "BUY", "MARKET", quantity)),
+        );
+        assert_eq!(status, 201, "{bought}");
+        assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
+        assert_eq!(bought["outcome"]["filled_quantity"], quantity);
+    }
+    let held = eligibility(&g, &endpoint, &nu_id, "600519.XSHG").expect("the Moutai position");
+    assert_eq!(held["sellable_quantity"], "0", "{held}");
+    assert_eq!(held["locked_quantity"], "200", "{held}");
+    assert_eq!(held["reserved_quantity"], "0", "{held}");
+
+    let (status, same_day) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a1-sell-same-day",
+            "600519.XSHG",
+            "SELL",
+            "MARKET",
+            "200",
+        )),
+    );
+    assert_eq!(status, 400, "{same_day}");
+    assert_eq!(same_day["code"], "ORDER_INVALID");
+    assert!(
+        same_day["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("exceeds sellable 0")
+                && m.contains("200 bought today are locked by T+1")),
+        "{same_day}"
+    );
+
+    // Midnight in Asia/Shanghai unlocks the shares; the session does not open
+    // with them (§1.1, §5.1). 08:00 is a trading day and outside every
+    // supported session.
+    g.advance_clock("A1", &endpoint, sh(A_DAY2, 8, 0));
+    let unlocked = eligibility(&g, &endpoint, &nu_id, "600519.XSHG").expect("the Moutai position");
+    assert_eq!(unlocked["sellable_quantity"], "200", "{unlocked}");
+    assert_eq!(unlocked["locked_quantity"], "0", "{unlocked}");
+    let (status, too_early) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a1-sell-too-early",
+            "600519.XSHG",
+            "SELL",
+            "MARKET",
+            "200",
+        )),
+    );
+    assert_eq!(status, 400, "{too_early}");
+    assert_eq!(too_early["code"], "ORDER_INVALID");
+    assert!(
+        too_early["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("[09:30,11:30)") && m.contains("[13:00,14:57)")),
+        "the refusal names the supported session (§5.1): {too_early}"
+    );
+
+    g.advance_clock("A1", &endpoint, sh(A_DAY2, 9, 35));
+    for id in [
+        "600519.XSHG",
+        "601318.XSHG",
+        "000858.XSHE",
+        "000001.XSHE",
+        "300750.XSHE",
+    ] {
+        await_trading_day(&g, &endpoint, &nu_id, id, A_DAY2);
+    }
+
+    // A resting SELL reserves the shares it names, and gives them back only
+    // once the cancel is terminal (§1.1).
+    let (status, resting) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit(
+            "a1-rest-moutai",
+            "600519.XSHG",
+            "SELL",
+            "200",
+            moutai_up,
+        )),
+    );
+    assert_eq!(status, 201, "{resting}");
+    assert_eq!(resting["outcome"]["status"], "ACCEPTED", "{resting}");
+    let reserved = eligibility(&g, &endpoint, &nu_id, "600519.XSHG").expect("the Moutai position");
+    assert_eq!(reserved["reserved_quantity"], "200", "{reserved}");
+    assert_eq!(reserved["sellable_quantity"], "0", "{reserved}");
+    let (status, cancelled) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &format!("/desks/{nu_id}/orders/a1-rest-moutai/cancel"),
+        Some(r#"{"action_id":"a1-cancel-moutai"}"#),
+    );
+    assert_eq!(status, 200, "{cancelled}");
+    assert_eq!(cancelled["outcome"]["status"], "CANCELED");
+    let released = eligibility(&g, &endpoint, &nu_id, "600519.XSHG").expect("the Moutai position");
+    assert_eq!(
+        released["reserved_quantity"], "0",
+        "the reservation is back only behind the cancel's own terminal event: {released}"
+    );
+    assert_eq!(released["sellable_quantity"], "200", "{released}");
+
+    // Two sells for the same shares, sent at once: exactly one may be admitted,
+    // because the eligibility read and the placement are one action (§1.2).
+    let orders_path: &str = &nu_orders;
+    let competing: Vec<(u16, Value)> = std::thread::scope(|scope| {
+        let (harness, port, credential) = (&g, endpoint.port, endpoint.credential.clone());
+        let sent: Vec<_> = ["a1-race-one", "a1-race-two"]
+            .into_iter()
+            .map(|action_id| {
+                let credential = credential.clone();
+                scope.spawn(move || {
+                    let body = order(action_id, "600519.XSHG", "SELL", "MARKET", "200");
+                    let (status, text) = harness
+                        .request("POST", port, orders_path, &credential, Some(&body))
+                        .expect("the daemon answered a competing sell");
+                    (status, parse(&text))
+                })
+            })
+            .collect();
+        sent.into_iter()
+            .map(|handle| handle.join().expect("a competing sell"))
+            .collect()
+    });
+    g.note(
+        "A1",
+        "two competing sells for the same shares",
+        json!({ "answers": competing }),
+    );
+    let accepted: Vec<&(u16, Value)> = competing
+        .iter()
+        .filter(|(status, _)| *status == 201)
+        .collect();
+    assert_eq!(
+        accepted.len(),
+        1,
+        "exactly one of two competing sells is admitted: {competing:?}"
+    );
+    assert_eq!(accepted[0].1["outcome"]["status"], "FILLED");
+    let refused = competing
+        .iter()
+        .find(|(status, _)| *status != 201)
+        .expect("one refusal");
+    assert!(
+        matches!(
+            refused.1["code"].as_str(),
+            Some("ORDER_INVALID" | "MARKET_UNAVAILABLE")
+        ),
+        "the loser is refused, never filled: {:?}",
+        refused.1
+    );
+    assert!(
+        eligibility(&g, &endpoint, &nu_id, "600519.XSHG").is_none(),
+        "the desk is flat in Moutai"
+    );
+    within(
+        Duration::from_secs(30),
+        "the Moutai cycle and its evaluation prompt",
+        || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM position_cycles c JOIN prompts p \
+                   ON p.desk_id = c.desk_id AND p.kind = 'EVALUATION' \
+                  AND json_extract(p.payload, '$.cycle_id') = c.id \
+                 WHERE c.desk_id = ?1 AND c.instrument_id = '600519.XSHG'",
+                &[&nu_id],
+            ) == 1
+        },
+    );
+
+    // An approval is revalidated when it is decided, not when it is asked: the
+    // holdings the first pending sell was written against are gone by the time
+    // it is approved, and the row ends terminally refused with no sandbox order
+    // (§5.2).
+    let (status, gated) = g.api(
+        "A1",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"paper_order_policy":"REQUIRE_APPROVAL"}"#),
+    );
+    assert_eq!(status, 200, "{gated}");
+    let mut pending = Vec::new();
+    for (action_id, quantity) in [("a1-stale-sell", "400"), ("a1-fresh-sell", "100")] {
+        let (status, row) = g.api(
+            "A1",
+            &endpoint,
+            "POST",
+            &nu_orders,
+            Some(&order(action_id, "601318.XSHG", "SELL", "MARKET", quantity)),
+        );
+        assert_eq!(status, 202, "recorded and awaiting approval: {row}");
+        assert_eq!(row["approval"], "PENDING");
+        pending.push(row["id"].as_str().expect("the row id").to_owned());
+    }
+    assert_eq!(
+        eligibility(&g, &endpoint, &nu_id, "601318.XSHG").expect("Ping An")["reserved_quantity"],
+        "0",
+        "a pending approval reserves nothing (§1.1)"
+    );
+    let (status, fresh) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &decide(&nu_id, &pending[1]),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{fresh}");
+    assert_eq!(fresh["detail"]["outcome"]["status"], "FILLED", "{fresh}");
+    let (status, stale) = g.api(
+        "A1",
+        &endpoint,
+        "POST",
+        &decide(&nu_id, &pending[0]),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{stale}");
+    assert_eq!(stale["approval"], "APPROVED");
+    assert_eq!(
+        stale["detail"]["outcome"]["failure_code"], "ORDER_INVALID",
+        "the revalidated approval is terminally refused: {stale}"
+    );
+    assert!(
+        stale["detail"]["outcome"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exceeds sellable 300")),
+        "{stale}"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2",
+            &[&nu_id, &"a1-stale-sell"],
+        ),
+        0,
+        "the refused approval never reached the sandbox"
+    );
+    let (status, reungated) = g.api(
+        "A1",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"paper_order_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{reungated}");
+    g.note(
+        "A1",
+        "today's buy was locked and its same-day sell refused with the T+1 term, Shanghai midnight unlocked the shares while the session still refused them, a resting sell reserved them and gave them back only behind its cancel's terminal event, exactly one of two competing sells was admitted and closed the CNY cycle with its evaluation prompt, and an approval decided against changed holdings ended ORDER_INVALID with no sandbox order",
+        json!({ "competing": competing.len(), "stale_approval": stale["detail"]["outcome"] }),
+    );
+
+    // --- A2 — bands and quantities -----------------------------------------
+    let (status, instruments) = g.api(
+        "A2",
+        &endpoint,
+        "GET",
+        &format!("/desks/{nu_id}/market/instruments"),
+        None,
+    );
+    assert_eq!(status, 200, "{instruments}");
+    let entry_of = |id: &str| -> Value {
+        instruments["instruments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["instrument_id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("no catalog entry for {id}"))
+    };
+    let main = entry_of("600519.XSHG");
+    assert_eq!(main["board"], "MAIN");
+    assert_eq!(main["band_percent"], json!(10));
+    assert_eq!(main["limit_order_cap"], "1000000");
+    assert_eq!(main["market_order_cap"], "1000000");
+    let chinext = entry_of("300750.XSHE");
+    assert_eq!(chinext["board"], "CHINEXT");
+    assert_eq!(chinext["band_percent"], json!(20));
+    assert_eq!(chinext["limit_order_cap"], "300000");
+    assert_eq!(chinext["market_order_cap"], "150000");
+    assert!(
+        entry_of("AAPL.XNAS").get("board").is_none()
+            && entry_of("AAPL.XNAS").get("band_percent").is_none(),
+        "a US entry carries no board and no band"
+    );
+
+    // A LIMIT outside the inclusive band names the instrument, the inferred
+    // date, the bounds and the reference (§2.4); the boundaries themselves are
+    // inside it.
+    for (action_id, price) in [("a2-above-band", "1856.90"), ("a2-below-band", "1519.10")] {
+        let (status, refused) = g.api(
+            "A2",
+            &endpoint,
+            "POST",
+            &nu_orders,
+            Some(&limit(action_id, "600519.XSHG", "BUY", "100", price)),
+        );
+        assert_eq!(status, 400, "{refused}");
+        assert_eq!(refused["code"], "ORDER_INVALID");
+        let message = refused["message"].as_str().expect("a message");
+        // The reference is the provider's own number, so the sentence carries
+        // whatever precision it arrived with — the band around it does not.
+        for part in [
+            "600519.XSHG",
+            &day(A_DAY2),
+            moutai_down,
+            moutai_up,
+            "around reference 1688",
+        ] {
+            assert!(message.contains(part), "{message} lacks {part}");
+        }
+    }
+
+    // Each board's own per-order cap, and its dependence on the order type: at
+    // the cap the quantity rule passes and only the sandbox's own cash test
+    // remains; over it the order never reaches the sandbox at all (§3.2).
+    let cap_cases: [(&str, &str, &str, &str, u16, &str); 4] = [
+        (
+            "a2-chinext-limit-cap",
+            "LIMIT",
+            "300000",
+            "95.00",
+            409,
+            "ORDER_REJECTED",
+        ),
+        (
+            "a2-chinext-limit-over",
+            "LIMIT",
+            "300100",
+            "95.00",
+            400,
+            "ORDER_INVALID",
+        ),
+        (
+            "a2-chinext-market-cap",
+            "MARKET",
+            "150000",
+            "",
+            409,
+            "ORDER_REJECTED",
+        ),
+        (
+            "a2-chinext-market-over",
+            "MARKET",
+            "150100",
+            "",
+            400,
+            "ORDER_INVALID",
+        ),
+    ];
+    for (action_id, kind, quantity, price, status, code) in cap_cases {
+        let body = if kind == "LIMIT" {
+            limit(action_id, "300750.XSHE", "BUY", quantity, price)
+        } else {
+            order(action_id, "300750.XSHE", "BUY", kind, quantity)
+        };
+        let (got, answer) = g.api("A2", &endpoint, "POST", &nu_orders, Some(&body));
+        assert_eq!(got, status, "{action_id}: {answer}");
+        assert_eq!(answer["code"], code, "{action_id}");
+        if code == "ORDER_INVALID" {
+            assert!(
+                answer["message"].as_str().is_some_and(|m| m.contains(kind)
+                    && m.contains("cap")
+                    && m.contains("300750.XSHE")),
+                "{action_id}: {answer}"
+            );
+        }
+    }
+
+    // The odd-remainder table on a prior-day position (§3.1): a whole lot is
+    // admissible, and a quantity that is neither a whole lot nor the whole odd
+    // remainder of the sellable quantity is not.
+    let pingan = eligibility(&g, &endpoint, &nu_id, "601318.XSHG").expect("Ping An");
+    assert_eq!(pingan["sellable_quantity"], "300", "{pingan}");
+    let (status, odd) = g.api(
+        "A2",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order("a2-odd-lot", "601318.XSHG", "SELL", "MARKET", "125")),
+    );
+    assert_eq!(status, 400, "{odd}");
+    assert_eq!(odd["code"], "ORDER_INVALID");
+    assert!(
+        odd["message"].as_str().is_some_and(|m| m
+            .contains("neither a multiple of 100 nor the whole odd remainder")
+            && m.contains("sellable 300")),
+        "{odd}"
+    );
+    let (status, off_lot) = g.api(
+        "A2",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a2-buy-off-lot",
+            "601318.XSHG",
+            "BUY",
+            "MARKET",
+            "150",
+        )),
+    );
+    assert_eq!(status, 400, "{off_lot}");
+    assert_eq!(off_lot["code"], "ORDER_INVALID");
+
+    // §6 A2's own sentence: a buy limit at the top of the band does not fill on
+    // submission at a last price well below it, and a later volume-increasing
+    // compatible observation triggers it at its own limit.
+    let (status, high) = g.api(
+        "A2",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit(
+            "a2-high-limit",
+            "600519.XSHG",
+            "BUY",
+            "100",
+            moutai_up,
+        )),
+    );
+    assert_eq!(status, 201, "{high}");
+    assert_eq!(
+        high["outcome"]["status"], "ACCEPTED",
+        "a marketable-looking limit does not fill against a synthetic idle book: {high}"
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("600519.XSHG", "600519.SH"),
+        &feed,
+        "1700.00",
+        1_100,
+    );
+    within(
+        Duration::from_secs(60),
+        "the volume-increasing observation to trigger the resting limit",
+        || order_status(&g, &endpoint, &nu_id, "a2-high-limit")["status"] == "FILLED",
+    );
+    let triggered = order_status(&g, &endpoint, &nu_id, "a2-high-limit");
+    assert_eq!(triggered["average_price"], moutai_up, "{triggered}");
+    assert_eq!(triggered["filled_quantity"], "100");
+    g.note(
+        "A2",
+        "the catalog carried each board's band and both caps, both band boundaries were admissible while a tick outside either named the instrument, date, bounds and reference, each ChiNext cap passed at the cap and refused above it by order type, the odd-remainder table refused 125 of a sellable 300, and a buy limit at the top of the band rested at a last price well below it and filled at its own limit on the next volume-increasing observation",
+        json!({ "main": main, "chinext": chinext, "triggered": triggered }),
+    );
+
+    // --- A3 — limit-fill policy --------------------------------------------
+    // Wuliangye's reference is 100.00, so its band is [90.00, 110.00] exactly.
+    let (down, up) = ("90.00", "110.00");
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        down,
+        1_100,
+    );
+    let at_lower = quote_of(&g.call(&endpoint, "GET", &nu_quotes, None).1, "000858.XSHE");
+    assert_eq!(at_lower["limit_down"], down);
+    assert_eq!(at_lower["limit_up"], up);
+    assert_eq!(at_lower["price_condition"], "AT_LOWER_LIMIT", "{at_lower}");
+
+    // At the lower limit no sell crosses: the sandbox answers its own refusal
+    // rather than MarketRig inventing one (§2.3).
+    let (status, no_bid) = g.api(
+        "A3",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a3-sell-suppressed",
+            "000858.XSHE",
+            "SELL",
+            "MARKET",
+            "100",
+        )),
+    );
+    assert_eq!(status, 409, "{no_bid}");
+    assert_eq!(no_bid["code"], "ORDER_REJECTED");
+    assert!(
+        no_bid["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("No market")),
+        "{no_bid}"
+    );
+
+    // A resting sell is suppressed with it, and resumes when the observation
+    // moves back inside the band with more volume.
+    let (status, suppressed) = g.api(
+        "A3",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a3-rest-sell", "000858.XSHE", "SELL", "100", down)),
+    );
+    assert_eq!(status, 201, "{suppressed}");
+    assert_eq!(suppressed["outcome"]["status"], "ACCEPTED");
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        down,
+        1_200,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a3-rest-sell")["status"],
+        "ACCEPTED",
+        "a suppressed direction does not cross even with more volume"
+    );
+
+    // The unsuppressed side fills at the boundary exactly, whole, whatever the
+    // observed volume — the MARKET exception's own publication (§2.5).
+    let (status, at_floor) = g.api(
+        "A3",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a3-buy-at-floor",
+            "000858.XSHE",
+            "BUY",
+            "MARKET",
+            "300",
+        )),
+    );
+    assert_eq!(status, 201, "{at_floor}");
+    assert_eq!(at_floor["outcome"]["status"], "FILLED", "{at_floor}");
+    assert_eq!(at_floor["outcome"]["filled_quantity"], "300");
+    assert_eq!(
+        at_floor["outcome"]["average_price"], down,
+        "a MARKET larger than one lot fills whole at the last price, with no remainder slippage"
+    );
+
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "95.00",
+        1_300,
+    );
+    within(
+        Duration::from_secs(60),
+        "the resumed observation to release the suppressed sell",
+        || order_status(&g, &endpoint, &nu_id, "a3-rest-sell")["status"] == "FILLED",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a3-rest-sell")["average_price"],
+        down,
+        "a released limit fills at its own limit"
+    );
+
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        up,
+        1_400,
+    );
+    let at_upper = quote_of(&g.call(&endpoint, "GET", &nu_quotes, None).1, "000858.XSHE");
+    assert_eq!(at_upper["price_condition"], "AT_UPPER_LIMIT", "{at_upper}");
+    let (status, no_ask) = g.api(
+        "A3",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a3-buy-suppressed",
+            "000858.XSHE",
+            "BUY",
+            "MARKET",
+            "100",
+        )),
+    );
+    assert_eq!(status, 409, "{no_ask}");
+    assert_eq!(no_ask["code"], "ORDER_REJECTED");
+    assert!(
+        no_ask["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("No market")),
+        "{no_ask}"
+    );
+    let (status, at_ceiling) = g.api(
+        "A3",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a3-sell-at-ceiling",
+            "000858.XSHE",
+            "SELL",
+            "MARKET",
+            "300",
+        )),
+    );
+    assert_eq!(status, 201, "{at_ceiling}");
+    assert_eq!(at_ceiling["outcome"]["status"], "FILLED", "{at_ceiling}");
+    assert_eq!(at_ceiling["outcome"]["average_price"], up);
+
+    // Every fill this desk has taken on the instrument sits inside the band.
+    for price in g.column(
+        "SELECT price FROM fills WHERE desk_id = ?1 AND instrument_id = '000858.XSHE'",
+        &[&nu_id],
+    ) {
+        assert!(
+            amount(&price) >= amount(down) && amount(&price) <= amount(up),
+            "a fill at {price} is outside [{down}, {up}]"
+        );
+    }
+    g.note(
+        "A3",
+        "at the lower limit no sell crossed — the sandbox's own No market, and a resting sell stayed put through a volume-increasing observation — while a MARKET buy larger than one lot filled whole at 90.00 exactly; the resumed observation released the suppressed sell at its own limit; at the upper limit no buy crossed and a MARKET sell filled at 110.00 exactly; every fill sat inside the band",
+        json!({ "at_lower": at_lower, "at_upper": at_upper, "floor": at_floor["outcome"], "ceiling": at_ceiling["outcome"] }),
+    );
+
+    // --- A4 — session and expiry -------------------------------------------
+    // A limit that cannot cross at the current last price, rested in session and
+    // carried across the midday break.
+    let (status, across_lunch) = g.api(
+        "A4",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit(
+            "a4-across-lunch",
+            "000858.XSHE",
+            "BUY",
+            "100",
+            "91.00",
+        )),
+    );
+    assert_eq!(status, 201, "{across_lunch}");
+    assert_eq!(across_lunch["outcome"]["status"], "ACCEPTED");
+
+    g.advance_clock("A4", &endpoint, sh(A_DAY2, 11, 30));
+    within(
+        Duration::from_secs(90),
+        "the midday break to pause 000858.XSHE",
+        || execution(&g, &endpoint, &nu_id, "000858.XSHE")["availability"] == "PAUSED",
+    );
+    let (status, at_lunch) = g.api(
+        "A4",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order(
+            "a4-lunch-order",
+            "000858.XSHE",
+            "BUY",
+            "MARKET",
+            "100",
+        )),
+    );
+    assert_eq!(status, 400, "{at_lunch}");
+    assert_eq!(at_lunch["code"], "ORDER_INVALID");
+    assert!(
+        at_lunch["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("[09:30,11:30)")),
+        "{at_lunch}"
+    );
+    // A crossing observation inside the break is awareness only.
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "90.00",
+        1_500,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a4-across-lunch")["status"],
+        "ACCEPTED",
+        "no fill inside the midday break"
+    );
+
+    g.advance_clock("A4", &endpoint, sh(A_DAY2, 13, 0));
+    within(
+        Duration::from_secs(90),
+        "the afternoon session to open 000858.XSHE",
+        || execution(&g, &endpoint, &nu_id, "000858.XSHE")["availability"] == "OPEN",
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "90.00",
+        1_600,
+    );
+    within(
+        Duration::from_secs(60),
+        "the resumed session to release the carried limit",
+        || order_status(&g, &endpoint, &nu_id, "a4-across-lunch")["status"] == "FILLED",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a4-across-lunch")["average_price"],
+        "91.00"
+    );
+
+    // 14:57 ends every open CN order's life without a quote, and gives back
+    // whatever it reserved (§5.1, AE-8).
+    let (status, doomed) = g.api(
+        "A4",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a4-deadline", "601318.XSHG", "SELL", "300", "55.00")),
+    );
+    assert_eq!(status, 201, "{doomed}");
+    assert_eq!(doomed["outcome"]["status"], "ACCEPTED");
+    assert_eq!(
+        eligibility(&g, &endpoint, &nu_id, "601318.XSHG").expect("Ping An")["reserved_quantity"],
+        "300"
+    );
+    g.advance_clock("A4", &endpoint, sh(A_DAY2, 14, 57));
+    within(
+        Duration::from_secs(60),
+        "the 14:57 deadline to end the resting order",
+        || order_status(&g, &endpoint, &nu_id, "a4-deadline")["status"] == "CANCELED",
+    );
+    let expired = order_status(&g, &endpoint, &nu_id, "a4-deadline");
+    assert_eq!(expired["time_in_force"], "GTC", "{expired}");
+    assert_eq!(expired["filled_quantity"], "0");
+    assert_eq!(
+        eligibility(&g, &endpoint, &nu_id, "601318.XSHG").expect("Ping An")["reserved_quantity"],
+        "0",
+        "the deadline gives the reservation back"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT occurred_at_ns FROM order_events WHERE desk_id = ?1 \
+             AND client_order_id = ?2 AND kind = 'OrderCanceled'",
+            &[&nu_id, &"a4-deadline"],
+        ),
+        sh(A_DAY2, 14, 57) as i64,
+        "the terminal event is stamped at the boundary itself: a clock event, not a quote"
+    );
+
+    // Closed, then a scripted holiday, then a weekend: each refuses, and the
+    // holiday says why in MarketRig's own vocabulary (§2.1, §5.1).
+    //
+    // The trading day is provider evidence, not a clock reading: a kernel alert
+    // re-gates the session from the clock alone, but only the next poll can
+    // learn that the new day is not in the calendar. So each refusal is asked
+    // once the desk's own execution view says what the daemon knows.
+    let refuse = |g: &mut Harness, at: u64, action_id: &'static str| {
+        let (status, refused) = g.api(
+            "A4",
+            &endpoint,
+            "POST",
+            &nu_orders,
+            Some(&order(action_id, "601318.XSHG", "BUY", "MARKET", "100")),
+        );
+        assert!(
+            (status == 400 && refused["code"] == "ORDER_INVALID")
+                || (status == 503 && refused["code"] == "MARKET_UNAVAILABLE"),
+            "{action_id} at {at}: {status} {refused}"
+        );
+    };
+    g.advance_clock("A4", &endpoint, sh(A_DAY2, 15, 30));
+    within(
+        Duration::from_secs(90),
+        "the closed session on 601318.XSHG",
+        || execution(&g, &endpoint, &nu_id, "601318.XSHG")["availability"] == "CLOSED",
+    );
+    refuse(&mut g, sh(A_DAY2, 15, 30), "a4-after-close");
+
+    g.advance_clock("A4", &endpoint, sh(A_HOLIDAY, 10, 0));
+    within(
+        Duration::from_secs(90),
+        "the scripted holiday to leave the CN leg unavailable",
+        || {
+            let view = execution(&g, &endpoint, &nu_id, "601318.XSHG");
+            view["availability"] == "UNAVAILABLE" && view["reason"] == "NOT_TRADING_DAY"
+        },
+    );
+    refuse(&mut g, sh(A_HOLIDAY, 10, 0), "a4-holiday");
+
+    g.advance_clock("A4", &endpoint, sh(A_SATURDAY, 10, 0));
+    refuse(&mut g, sh(A_SATURDAY, 10, 0), "a4-weekend");
+
+    // No fill was stamped inside the break or at or after the deadline: the
+    // node clock stamps every one of them (§5.1).
+    let (lunch_start, lunch_end) = (sh(A_DAY2, 11, 30) as i64, sh(A_DAY2, 13, 0) as i64);
+    let deadline = sh(A_DAY2, 14, 57) as i64;
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM fills WHERE desk_id = ?1 \
+             AND ((occurred_at_ns >= ?2 AND occurred_at_ns < ?3) OR occurred_at_ns >= ?4)",
+            &[&nu_id, &lunch_start, &lunch_end, &deadline],
+        ),
+        0,
+        "no fill at or after a session boundary"
+    );
+    g.note(
+        "A4",
+        "11:30 paused the instrument, refused a submission with the supported session, and let a crossing observation pass without a fill; 13:00 opened it and released the carried limit at its own price; 14:57 ended a resting order as CANCELED with GTC and gave back its reservation without a quote; after the close, on a scripted holiday and on a Saturday every submission was refused, the holiday as NOT_TRADING_DAY; and no fill was stamped inside the break or at or after the deadline",
+        json!({ "expired": expired, "holiday": day(A_HOLIDAY) }),
+    );
+
+    // --- A5 — restart and data loss ----------------------------------------
+    // A new trading day, and a resting order that cannot cross at the last
+    // price it was admitted against.
+    g.advance_clock("A5", &endpoint, sh(A_DAY3, 9, 35));
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "100.00",
+        2_000,
+    );
+    await_trading_day(&g, &endpoint, &nu_id, "000858.XSHE", A_DAY3);
+    let (status, survivor) = g.api(
+        "A5",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a5-survivor", "000858.XSHE", "BUY", "100", "95.00")),
+    );
+    assert_eq!(status, 201, "{survivor}");
+    assert_eq!(survivor["outcome"]["status"], "ACCEPTED");
+
+    // Stopped before the break and restarted in the afternoon: the order is
+    // still there under its own id, and the day-stale bar the stand-in serves
+    // on the way back leaves the instrument unproven rather than executable.
+    let before = history_counts(&g, &nu_id);
+    g.stop("A5", daemon21);
+    feed.hithink_bar_date("000858.SZ", Some(&day(A_DAY2)));
+    g.standin_clock(sh(A_DAY3, 13, 30));
+    let daemon22 = g.spawn("A5");
+    endpoint = daemon22.endpoint.clone();
+    let (status, open) = g.api("A5", &endpoint, "GET", &nu_orders, None);
+    assert_eq!(status, 200, "{open}");
+    assert!(
+        open["orders"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|o| o["client_order_id"] == "a5-survivor"),
+        "the same-day order came back under its original id: {open}"
+    );
+    assert_eq!(
+        history_counts(&g, &nu_id),
+        before,
+        "a restart moves no durable history"
+    );
+    within(
+        Duration::from_secs(120),
+        "the day-stale bar to leave 000858.XSHE unproven",
+        || {
+            let view = execution(&g, &endpoint, &nu_id, "000858.XSHE");
+            view["availability"] == "UNAVAILABLE" && view["reason"] == "DATE_UNPROVEN"
+        },
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "94.00",
+        2_100,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a5-survivor")["status"],
+        "ACCEPTED",
+        "an unproven date blocks resting fills as well as submissions"
+    );
+
+    // The bar proves the day; the observation that re-establishes readiness only
+    // re-baselines, because every unready cycle discarded what came before it.
+    feed.hithink_bar_date("000858.SZ", None);
+    within(
+        Duration::from_secs(120),
+        "the current-day bar to make 000858.XSHE executable again",
+        || execution(&g, &endpoint, &nu_id, "000858.XSHE")["availability"] == "OPEN",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a5-survivor")["status"],
+        "ACCEPTED",
+        "the observation that re-established readiness released nothing"
+    );
+
+    // One instrument's data going missing is a feed failure: it blocks resting
+    // fills against the book the desk still has cached, and recovery
+    // re-baselines before anything can match. The next observation is armed
+    // while the item is still missing, so the first one the desk sees again is
+    // exactly the one recovery re-baselines against.
+    feed.hithink_hide("000858.SZ", true);
+    within(
+        Duration::from_secs(120),
+        "the missing snapshot item to be read as a feed failure",
+        || {
+            let view = execution(&g, &endpoint, &nu_id, "000858.XSHE");
+            view["availability"] == "UNAVAILABLE" && view["reason"] == "FEED_LOST"
+        },
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a5-survivor")["status"],
+        "ACCEPTED",
+        "a lost feed fills nothing against the cached book"
+    );
+    feed.hithink_quote("000858.SZ", "93.00", 2_300);
+    feed.hithink_hide("000858.SZ", false);
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "93.00",
+        2_300,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a5-survivor")["status"],
+        "ACCEPTED",
+        "recovery re-baselines rather than filling"
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "93.00",
+        2_400,
+    );
+    within(
+        Duration::from_secs(60),
+        "the observation after recovery to release the order",
+        || order_status(&g, &endpoint, &nu_id, "a5-survivor")["status"] == "FILLED",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a5-survivor")["average_price"],
+        "95.00"
+    );
+
+    // A provider switch is the same reset with a different policy label, and
+    // nothing fills off the book the old provider left (§2.1, §5.3).
+    let (status, to_yahoo) = g.api(
+        "A5",
+        &endpoint,
+        "PATCH",
+        provider,
+        Some(r#"{"a_share_feed":"YAHOO"}"#),
+    );
+    assert_eq!(status, 200, "{to_yahoo}");
+    let (status, off_book) = g.api(
+        "A5",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a5-off-book", "000858.XSHE", "BUY", "100", "95.00")),
+    );
+    assert!(
+        status == 201 || status == 503,
+        "the switch either blocks the submission or admits it, never fills it off the old book: {off_book}"
+    );
+    if status == 201 {
+        assert_eq!(off_book["outcome"]["status"], "ACCEPTED", "{off_book}");
+    }
+    within(
+        Duration::from_secs(120),
+        "the CN leg's fill policy to say Yahoo is simplified",
+        || execution(&g, &endpoint, &nu_id, "000858.XSHE")["fill_policy"] == "YAHOO_SIMPLIFIED",
+    );
+    if status == 201 {
+        let (status, cancelled) = g.api(
+            "A5",
+            &endpoint,
+            "POST",
+            &format!("/desks/{nu_id}/orders/a5-off-book/cancel"),
+            Some(r#"{"action_id":"a5-cancel-off-book"}"#),
+        );
+        assert_eq!(status, 200, "{cancelled}");
+    }
+    let (status, to_hithink) = g.api(
+        "A5",
+        &endpoint,
+        "PATCH",
+        provider,
+        Some(r#"{"a_share_feed":"HITHINK"}"#),
+    );
+    assert_eq!(status, 200, "{to_hithink}");
+    within(
+        Duration::from_secs(120),
+        "the CN leg back on the sampled policy",
+        || {
+            let view = execution(&g, &endpoint, &nu_id, "000858.XSHE");
+            view["fill_policy"] == "HITHINK_SAMPLED" && view["availability"] == "OPEN"
+        },
+    );
+
+    // A second desk starts with no observation progress of its own: the
+    // observations this daemon has already taken belong to the first desk's
+    // node and release nothing on the second's.
+    let xi = format!("xi-{stamp}");
+    within(
+        Duration::from_secs(120),
+        "this daemon's OpenViking child",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+    let (exit, second) = g.cli_json("A5", &["--json", "desk", "create", &xi]);
+    assert_eq!(exit, 0, "{second}");
+    let xi_id = second["id"].as_str().expect("id").to_owned();
+    let xi_orders = format!("/desks/{xi_id}/orders");
+    within(
+        Duration::from_secs(120),
+        "the second desk's own execution boundary",
+        || execution(&g, &endpoint, &xi_id, "000858.XSHE")["availability"] == "OPEN",
+    );
+    let (status, fresh_desk) = g.api(
+        "A5",
+        &endpoint,
+        "POST",
+        &xi_orders,
+        Some(&limit(
+            "a5-second-desk",
+            "000858.XSHE",
+            "BUY",
+            "100",
+            "95.00",
+        )),
+    );
+    assert_eq!(status, 201, "{fresh_desk}");
+    assert_eq!(fresh_desk["outcome"]["status"], "ACCEPTED", "{fresh_desk}");
+    observe(
+        &g,
+        &endpoint,
+        &xi_id,
+        ("000858.XSHE", "000858.SZ"),
+        &feed,
+        "93.00",
+        2_500,
+    );
+    within(
+        Duration::from_secs(60),
+        "the second desk's own next observation to release its order",
+        || order_status(&g, &endpoint, &xi_id, "a5-second-desk")["status"] == "FILLED",
+    );
+
+    // Stopped before the deadline and restarted after it: the order is
+    // terminated exactly once, under its own id, with no fill.
+    g.advance_clock("A5", &endpoint, sh(A_DAY3, 14, 30));
+    let (status, doomed) = g.api(
+        "A5",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a5-doomed", "000858.XSHE", "BUY", "100", "90.00")),
+    );
+    assert_eq!(status, 201, "{doomed}");
+    assert_eq!(doomed["outcome"]["status"], "ACCEPTED");
+    g.stop("A5", daemon22);
+    g.standin_clock(sh(A_DAY3, 15, 10));
+    let daemon23 = g.spawn("A5");
+    endpoint = daemon23.endpoint.clone();
+    within(
+        Duration::from_secs(120),
+        "the restart past the deadline to terminate the order",
+        || order_status(&g, &endpoint, &nu_id, "a5-doomed")["status"] == "CANCELED",
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND client_order_id = ?2 \
+             AND kind = 'OrderCanceled'",
+            &[&nu_id, &"a5-doomed"],
+        ),
+        1,
+        "terminal exactly once, under the original client order id"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM fills WHERE desk_id = ?1 AND client_order_id = ?2",
+            &[&nu_id, &"a5-doomed"],
+        ),
+        0,
+        "a prior deadline never replays as a fill"
+    );
+    g.note(
+        "A5",
+        "a restart carried a same-day order under its own id and moved no history, a day-stale bar left the instrument DATE_UNPROVEN and blocked its resting fill, the current-day bar restored it and the first observation only re-baselined, a missing snapshot item read as FEED_LOST and filled nothing off the cached book while recovery re-baselined before the next observation released the order at its own limit, a provider switch relabeled the policy YAHOO_SIMPLIFIED without filling off the old book, a second desk's order was released only by an observation its own node took, and a restart past 14:57 terminated a resting order exactly once with no fill",
+        json!({ "desks": [nu_id, xi_id], "day": day(A_DAY3) }),
+    );
+
+    // --- A6 — sampled execution --------------------------------------------
+    // §2.5's own worked example, on the instrument the SPEC names, from a fresh
+    // daemon's first observation of the day: 9.90 at cumulative volume 1000
+    // idle, a buy limit at 10.00 admitted against it, 9.95 at the same volume
+    // releasing nothing, and 9.95 at 1001 filling the whole 100 at 10.00.
+    g.advance_clock("A6", &endpoint, sh(A_DAY4, 9, 35));
+    let ping = "000001.XSHE";
+    await_trading_day(&g, &endpoint, &nu_id, ping, A_DAY4);
+    within(
+        Duration::from_secs(120),
+        "the first observation of the fourth trading day",
+        || {
+            let quote = quote_of(&g.call(&endpoint, "GET", &nu_quotes, None).1, ping);
+            quote["last"] == "9.90" && quote["volume"] == "1000"
+        },
+    );
+    let (status, sampled) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a6-limit", ping, "BUY", "100", "10.00")),
+    );
+    assert_eq!(status, 201, "{sampled}");
+    assert_eq!(
+        sampled["outcome"]["status"], "ACCEPTED",
+        "the observation the order was admitted against is not one it can be filled by: {sampled}"
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        (ping, "000001.SZ"),
+        &feed,
+        "9.95",
+        1_000,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-limit")["status"],
+        "ACCEPTED",
+        "a compatible price without volume growth releases nothing"
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        (ping, "000001.SZ"),
+        &feed,
+        "9.95",
+        1_001,
+    );
+    within(
+        Duration::from_secs(60),
+        "the volume-increasing compatible observation to fill the whole order",
+        || order_status(&g, &endpoint, &nu_id, "a6-limit")["status"] == "FILLED",
+    );
+    let example = order_status(&g, &endpoint, &nu_id, "a6-limit");
+    assert_eq!(example["filled_quantity"], "100", "{example}");
+    assert_eq!(example["average_price"], "10.00", "{example}");
+    let commission = g.column(
+        "SELECT commission FROM fills WHERE desk_id = ?1 AND client_order_id = 'a6-limit'",
+        &[&nu_id],
+    );
+    assert_eq!(commission, vec!["0.30".to_string()], "3 bp of 100 at 10.00");
+
+    // An incompatible price with more volume advances the baseline; a later
+    // compatible price at the same volume releases nothing (§2.5).
+    let (status, patient) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a6-patient", ping, "BUY", "100", "9.50")),
+    );
+    assert_eq!(status, 201, "{patient}");
+    assert_eq!(patient["outcome"]["status"], "ACCEPTED");
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        (ping, "000001.SZ"),
+        &feed,
+        "9.80",
+        1_100,
+    );
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        (ping, "000001.SZ"),
+        &feed,
+        "9.40",
+        1_100,
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-patient")["status"],
+        "ACCEPTED",
+        "an equal-volume compatible price after an incompatible advance releases nothing"
+    );
+
+    // Two limits admitted at different baselines and different prices: one
+    // observation releases both, each at its own limit.
+    let (status, higher) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a6-higher", ping, "BUY", "100", "9.60")),
+    );
+    assert_eq!(status, 201, "{higher}");
+    observe(
+        &g,
+        &endpoint,
+        &nu_id,
+        (ping, "000001.SZ"),
+        &feed,
+        "9.30",
+        1_200,
+    );
+    within(
+        Duration::from_secs(60),
+        "one observation to release both resting limits",
+        || {
+            ["a6-patient", "a6-higher"]
+                .iter()
+                .all(|id| order_status(&g, &endpoint, &nu_id, id)["status"] == "FILLED")
+        },
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-patient")["average_price"],
+        "9.50"
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-higher")["average_price"],
+        "9.60"
+    );
+
+    // The MARKET exception: the publication a MARKET executes against fills
+    // every compatible resting limit first, whatever the volume did, leaves a
+    // price-incompatible one untouched, and then fills the MARKET at the last
+    // price (§2.5).
+    for (action_id, price) in [("a6-maker", "9.35"), ("a6-far", "9.05")] {
+        let (status, rested) = g.api(
+            "A6",
+            &endpoint,
+            "POST",
+            &nu_orders,
+            Some(&limit(action_id, ping, "BUY", "100", price)),
+        );
+        assert_eq!(status, 201, "{rested}");
+        assert_eq!(rested["outcome"]["status"], "ACCEPTED");
+    }
+    let (status, taker) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order("a6-market", ping, "BUY", "MARKET", "100")),
+    );
+    assert_eq!(status, 201, "{taker}");
+    assert_eq!(taker["outcome"]["status"], "FILLED", "{taker}");
+    assert_eq!(taker["outcome"]["average_price"], "9.30", "{taker}");
+    within(
+        Duration::from_secs(30),
+        "the compatible resting limit the MARKET's publication filled",
+        || order_status(&g, &endpoint, &nu_id, "a6-maker")["status"] == "FILLED",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-maker")["average_price"],
+        "9.35",
+        "a released maker fills at its own limit"
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-far")["status"],
+        "ACCEPTED",
+        "a price-incompatible limit is untouched by the MARKET's publication"
+    );
+
+    // A MARKET the sandbox denies for cash may follow fills the same
+    // publication produced; each authoritative outcome stands (§2.5).
+    let (status, doomed_maker) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&limit("a6-last-maker", ping, "BUY", "100", "9.32")),
+    );
+    assert_eq!(status, 201, "{doomed_maker}");
+    let (status, denied) = g.api(
+        "A6",
+        &endpoint,
+        "POST",
+        &nu_orders,
+        Some(&order("a6-denied", ping, "BUY", "MARKET", "100000")),
+    );
+    assert_eq!(status, 409, "{denied}");
+    assert_eq!(denied["code"], "ORDER_REJECTED");
+    within(
+        Duration::from_secs(30),
+        "the maker the denied MARKET's publication still filled",
+        || order_status(&g, &endpoint, &nu_id, "a6-last-maker")["status"] == "FILLED",
+    );
+    assert_eq!(
+        order_status(&g, &endpoint, &nu_id, "a6-last-maker")["average_price"],
+        "9.32",
+        "the denial does not roll the fill back"
+    );
+
+    // Native balances and history agree with what the sandbox published: every
+    // stored fill has an OrderFilled behind it, and the desk's own CNY accounts
+    // are NautilusTrader's payloads, never MarketRig's arithmetic.
+    let (status, fills) = g.api(
+        "A6",
+        &endpoint,
+        "GET",
+        &format!("/desks/{nu_id}/history/fills"),
+        None,
+    );
+    assert_eq!(status, 200, "{fills}");
+    let stored: i64 = g.scalar("SELECT count(*) FROM fills WHERE desk_id = ?1", &[&nu_id]);
+    assert_eq!(
+        fills["fills"].as_array().map(Vec::len),
+        Some(stored as usize)
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM order_events WHERE desk_id = ?1 AND kind = 'OrderFilled'",
+            &[&nu_id],
+        ),
+        stored,
+        "one stored fill for every native OrderFilled"
+    );
+    let (status, history) = g.api(
+        "A6",
+        &endpoint,
+        "GET",
+        &format!("/desks/{nu_id}/history/orders"),
+        None,
+    );
+    assert_eq!(status, 200, "{history}");
+    for action_id in [
+        "a6-limit",
+        "a6-patient",
+        "a6-higher",
+        "a6-maker",
+        "a6-market",
+    ] {
+        assert!(
+            history["orders"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|o| o["client_order_id"] == action_id && o["status"] == "FILLED"),
+            "{action_id} is missing from the replayed history"
+        );
+    }
+    let cny: Vec<(String, String)> = balances(&g, &nu_id)
+        .into_iter()
+        .filter(|(account, _)| account.ends_with("-CNY"))
+        .collect();
+    assert_eq!(cny.len(), 2, "one CNY account per CN venue: {cny:?}");
+    for (account, total) in &cny {
+        assert!(amount(total) > 0.0, "{account} holds {total}");
+    }
+    g.stop("A6", daemon23);
+    g.note(
+        "A6",
+        "the SPEC's own worked example ran on the real node: the observation an order was admitted against filled nothing, a compatible price at the same volume filled nothing, and 9.95 at volume 1001 filled the whole 100 at 10.00 with 0.30 commission; an incompatible advance followed by an equal-volume compatible price released nothing; one observation released two limits at their own prices; a MARKET publication filled its compatible maker at 9.35 and itself at 9.30 while leaving a price-incompatible limit untouched; a MARKET denied for cash left the fill its own publication produced standing; and every stored fill had a native OrderFilled behind it",
+        json!({ "example": example, "commission": commission, "taker": taker["outcome"], "accounts": cny }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-H4 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-A6 complete", json!({ "evidence": evidence }));
 }

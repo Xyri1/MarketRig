@@ -1206,7 +1206,10 @@ async fn cn_cycle(
                 {
                     let mut exec = cn.borrow_mut();
                     let day = exec.calendar_verdict(day);
-                    exec.inst(*instrument_id).readiness = day;
+                    let today = cn::shanghai_date(at);
+                    let inst = exec.inst(*instrument_id);
+                    inst.readiness = day;
+                    inst.ready_date = day.is_ok().then_some(today);
                     cn::gate(&mut exec, entry, at);
                 }
                 poll_once(entry, *instrument_id, chart, market, sender).await?;

@@ -2,9 +2,9 @@
 
 **Slice:** [014 — A-share paper-trading engine](../../slices/014-a-share-engine.md)
 
-**Status:** Design complete 2026-09-10; native feasibility established on macOS with the AE-9 MARKET exception. Implementation planned, not delivered.
+**Status:** Implemented on macOS 2026-09-10 by [slice 014](../../slices/014-a-share-engine.md); Windows checks and the attended E7 close remain outstanding, so root contracts are not yet amended.
 
-**Next work:** Slice 014; production integration, Windows checks, and attended acceptance remain outstanding. [FEASIBILITY.md](FEASIBILITY.md) records the evidence and known defects.
+**Next work:** Slice 014 exit: Windows checks and the attended E7 cells (first sitting partial, later-session close). [FEASIBILITY.md](FEASIBILITY.md) records the evidence and known defects.
 
 ## 1. Motivation
 

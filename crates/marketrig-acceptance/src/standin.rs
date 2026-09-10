@@ -114,7 +114,21 @@ impl Feed {
             .expect("the stand-in listener is nonblocking");
 
         let hithink: HithinkScript = Arc::new(Mutex::new(Hithink {
-            prices: CN_THSCODES.iter().map(|c| (*c, CN_PRICE)).collect(),
+            prices: CN_THSCODES
+                .iter()
+                .map(|code| {
+                    (
+                        *code,
+                        CnQuote {
+                            price: CN_PRICE,
+                            prev: CN_PRICE,
+                            volume: CN_VOLUME,
+                        },
+                    )
+                })
+                .collect(),
+            bar_dates: HashMap::new(),
+            hidden: BTreeSet::new(),
             days: default_trading_days(),
             rate_limited: 0,
             dark: 0,
@@ -306,6 +320,23 @@ const CN_PRICE: i64 = 168_800;
 /// One scripted CN tick: a whole yuan up.
 const CN_STEP: i64 = 100;
 
+/// The opening cumulative volume every CN thscode serves, and the step one tick
+/// adds to it. The daily band's reference (`prev_price`) opens at the same
+/// price, so a fresh instrument is inside its own band and readiness holds
+/// (`a-share-engine` SPEC §2.1).
+const CN_VOLUME: i64 = 1_000;
+const CN_VOLUME_STEP: i64 = 100;
+
+/// One CN thscode's scripted snapshot: the last price and the daily reference in
+/// hundredths, and the cumulative volume AE-9 samples (`a-share-engine` SPEC
+/// §2.5). Every field is exact integer arithmetic; none of them is ever a float.
+#[derive(Debug, Clone, Copy)]
+struct CnQuote {
+    price: i64,
+    prev: i64,
+    volume: i64,
+}
+
 /// `meta/tickers/search`'s one fixed item. These are the exact bytes the
 /// passthrough hands `marketrig research hithink`, which is what H3 compares
 /// its standard output against.
@@ -329,8 +360,15 @@ const BIG_BODY_BYTES: usize = 1024 * 1024;
 /// The HiThink half's script.
 #[derive(Debug)]
 struct Hithink {
-    /// `last_price` per thscode, in hundredths.
-    prices: HashMap<&'static str, i64>,
+    /// The scripted snapshot per thscode.
+    prices: HashMap<&'static str, CnQuote>,
+    /// The `yyyyMMdd` the current-day bar is dated, per thscode. Absent means
+    /// "the day the request's own `end` falls in", which is the ready answer;
+    /// a scripted value is how a stale bar is served (`a-share-engine` §2.1).
+    bar_dates: HashMap<&'static str, String>,
+    /// Thscodes the batched snapshot serves no item for at all — one
+    /// instrument's provider failure (`a-share-engine` SPEC §2.1).
+    hidden: BTreeSet<&'static str>,
     /// The trading-day list, `yyyyMMdd` in Asia/Shanghai.
     days: BTreeSet<String>,
     /// How many more scriptable calls answer `4001`.
@@ -360,23 +398,67 @@ impl Feed {
     /// as the decimal text the observation will carry.
     pub fn hithink_tick(&self, thscode: &str) -> String {
         let mut script = self.hithink_lock();
-        let price = script
-            .prices
-            .get_mut(thscode)
-            .unwrap_or_else(|| panic!("{thscode} is not in the HiThink stand-in's script"));
-        *price += CN_STEP;
-        decimal(*price)
+        let quote = cn_of(&mut script, thscode);
+        quote.price += CN_STEP;
+        quote.volume += CN_VOLUME_STEP;
+        decimal(quote.price)
     }
 
     /// The price this thscode currently serves, as decimal text.
     pub fn hithink_price(&self, thscode: &str) -> String {
-        decimal(
-            *self
-                .hithink_lock()
-                .prices
-                .get(thscode)
-                .unwrap_or_else(|| panic!("{thscode} is not in the HiThink stand-in's script")),
-        )
+        decimal(self.hithink_lock().prices[thscode].price)
+    }
+
+    /// The cumulative volume this thscode currently serves, as the decimal text
+    /// the observation will carry.
+    pub fn hithink_volume(&self, thscode: &str) -> String {
+        self.hithink_lock().prices[thscode].volume.to_string()
+    }
+
+    /// Serves one exact snapshot: the last price and the cumulative volume AE-9
+    /// samples (`a-share-engine` SPEC §2.5). Repeating the same volume with a
+    /// new price is how "an accepted observation that releases nothing" is
+    /// scripted; raising it is how a release is.
+    pub fn hithink_quote(&self, thscode: &str, price: &str, volume: i64) {
+        let mut script = self.hithink_lock();
+        let quote = cn_of(&mut script, thscode);
+        quote.price = hundredths(price);
+        quote.volume = volume;
+    }
+
+    /// Serves one exact daily reference — the `prev_price` the band is derived
+    /// from (`a-share-engine` SPEC §2.2).
+    pub fn hithink_prev_close(&self, thscode: &str, price: &str) {
+        let mut script = self.hithink_lock();
+        cn_of(&mut script, thscode).prev = hundredths(price);
+    }
+
+    /// Dates this thscode's current-day bar at one `yyyyMMdd`, or (`None`) at
+    /// whatever day the request's own window ends in. A scripted earlier date is
+    /// a day-stale bar, which leaves the instrument `DATE_UNPROVEN`
+    /// (`a-share-engine` SPEC §2.1).
+    pub fn hithink_bar_date(&self, thscode: &str, date: Option<&str>) {
+        let mut script = self.hithink_lock();
+        let code = cn_code(thscode);
+        match date {
+            Some(date) => script.bar_dates.insert(code, date.to_owned()),
+            None => script.bar_dates.remove(code),
+        };
+    }
+
+    /// Serves no snapshot item at all for this thscode, or serves it again.
+    /// One instrument's data going missing is a provider failure the desk must
+    /// read as `FEED_LOST` (`a-share-engine` SPEC §2.1); the batched snapshot
+    /// itself is never scripted, so that the research budgets H3 arms cannot be
+    /// eaten by a poll already in flight.
+    pub fn hithink_hide(&self, thscode: &str, hidden: bool) {
+        let mut script = self.hithink_lock();
+        let code = cn_code(thscode);
+        if hidden {
+            script.hidden.insert(code);
+        } else {
+            script.hidden.remove(code);
+        }
     }
 
     /// Puts one `yyyyMMdd` into the trading-day list, or takes it out (§6.1's
@@ -408,6 +490,25 @@ impl Feed {
     fn hithink_lock(&self) -> MutexGuard<'_, Hithink> {
         self.hithink.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The catalog thscode by name, so a typo fails the scenario rather than
+/// silently scripting nothing.
+#[track_caller]
+fn cn_code(thscode: &str) -> &'static str {
+    CN_THSCODES
+        .iter()
+        .copied()
+        .find(|code| *code == thscode)
+        .unwrap_or_else(|| panic!("{thscode} is not in the HiThink stand-in's script"))
+}
+
+#[track_caller]
+fn cn_of<'a>(script: &'a mut Hithink, thscode: &str) -> &'a mut CnQuote {
+    script
+        .prices
+        .get_mut(cn_code(thscode))
+        .expect("a seeded CN thscode")
 }
 
 /// Asia/Shanghai's calendar date for a Unix second, `yyyyMMdd` — the form
@@ -536,11 +637,14 @@ async fn ht_snapshot(
         .collect();
     let items: Vec<String> = CN_THSCODES
         .iter()
-        .filter(|code| requested.contains(code))
+        .filter(|code| requested.contains(code) && !script.hidden.contains(*code))
         .map(|code| {
+            let quote = script.prices[code];
             format!(
-                r#"{{"thscode":"{code}","ticker":"{code}","last_price":{},"volume":1200,"turnover":3400}}"#,
-                decimal(script.prices[code])
+                r#"{{"thscode":"{code}","ticker":"{code}","last_price":{},"prev_price":{},"volume":{},"turnover":3400}}"#,
+                decimal(quote.price),
+                decimal(quote.prev),
+                quote.volume
             )
         })
         .collect();
@@ -592,17 +696,26 @@ async fn ht_historical(
         &headers,
         false,
     );
-    let code = query
-        .unwrap_or_default()
-        .split('&')
-        .find_map(|p| p.strip_prefix("thscode=").map(str::to_owned))
-        .unwrap_or_default();
+    let raw = query.unwrap_or_default();
+    let field = |name: &str| -> Option<String> {
+        raw.split('&')
+            .find_map(|p| p.strip_prefix(&format!("{name}=")).map(str::to_owned))
+    };
+    let code = field("thscode").unwrap_or_default();
     let last = script
         .prices
         .get(code.as_str())
-        .copied()
-        .unwrap_or(CN_PRICE);
-    let today_ms = shanghai_midnight_s() * 1_000;
+        .map_or(CN_PRICE, |quote| quote.price);
+    // The bar is dated by the window the daemon asked for — which is its own
+    // node clock (`a-share-engine` SPEC §2.1) — unless a scenario scripted an
+    // earlier date to make it day-stale.
+    let end_s = field("end")
+        .and_then(|end| end.parse::<i64>().ok())
+        .map_or_else(|| crate::now_secs() as i64, |ms| ms / 1_000);
+    let today_ms = match script.bar_dates.get(code.as_str()) {
+        Some(date) => shanghai_midnight_ms(date),
+        None => shanghai_midnight_s(end_s) * 1_000,
+    };
     json_body(format!(
         r#"{{"code":0,"message":"success","request_id":"gate-historical","data":{{"timestamp":{today_ms},"item":[
            {{"date_ms":{},"close_price":{}}},
@@ -613,11 +726,32 @@ async fn ht_historical(
     ))
 }
 
-/// Today's Asia/Shanghai midnight, as a Unix second — what a current-day bar's
-/// `date_ms` carries (F7 §2.2).
-fn shanghai_midnight_s() -> i64 {
-    let now = crate::now_secs() as i64;
-    (now + 8 * 3_600) / 86_400 * 86_400 - 8 * 3_600
+/// The Asia/Shanghai midnight opening the day one Unix second falls in — what a
+/// current-day bar's `date_ms` carries (F7 §2.2).
+fn shanghai_midnight_s(unix_s: i64) -> i64 {
+    (unix_s + 8 * 3_600).div_euclid(86_400) * 86_400 - 8 * 3_600
+}
+
+/// One `yyyyMMdd`'s Asia/Shanghai midnight, in milliseconds — the inverse of
+/// [`shanghai_date`], for a bar a scenario dates by hand. Howard Hinnant's
+/// `days_from_civil`, the shortest exact proleptic Gregorian conversion.
+#[track_caller]
+fn shanghai_midnight_ms(yyyymmdd: &str) -> i64 {
+    let number = |range: std::ops::Range<usize>| -> i64 {
+        yyyymmdd
+            .get(range)
+            .and_then(|text| text.parse().ok())
+            .unwrap_or_else(|| panic!("{yyyymmdd} is not a yyyyMMdd date"))
+    };
+    let (year, month, day) = (number(0..4), number(4..6), number(6..8));
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    (days * 86_400 - 8 * 3_600) * 1_000
 }
 
 /// `GET /api/a-share/financials/income-statements` — one fixed envelope, and
@@ -653,4 +787,13 @@ fn shanghai_dates_and_weekdays() {
     assert!(!weekday(1_789_173_000 + 86_400));
     // The default list always carries today, whatever weekday it is.
     assert!(default_trading_days().contains(&shanghai_today()));
+}
+
+#[test]
+fn a_scripted_bar_date_round_trips() {
+    for date in ["20260304", "20260311", "20261231", "20260101"] {
+        let ms = shanghai_midnight_ms(date);
+        assert_eq!(shanghai_date(ms / 1_000), date);
+        assert_eq!(shanghai_midnight_s(ms / 1_000 + 3_600 * 20), ms / 1_000);
+    }
 }

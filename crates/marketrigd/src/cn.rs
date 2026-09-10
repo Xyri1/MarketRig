@@ -305,6 +305,11 @@ pub struct Inst {
     /// confirmed same-day trading calendar opens CN execution, Yahoo CN
     /// included (§2.1, AE-7).
     pub readiness: Result<(), Reason>,
+    /// The Shanghai date readiness was established on. Rollover invalidates it
+    /// (§2.1): a boundary alert or an admission on a later date reads it as
+    /// `NO_CALENDAR` until the next poll re-establishes the day, so nothing is
+    /// admitted on a new day against yesterday's evidence.
+    pub ready_date: Option<String>,
     /// The day's accepted reference and band, present exactly while readiness
     /// holds under HiThink.
     pub ready: Option<Ready>,
@@ -330,6 +335,7 @@ impl Default for Inst {
             busy: false,
             ts_last: 0,
             readiness: Ok(()),
+            ready_date: None,
             ready: None,
             status: None,
             idle_last: None,
@@ -342,6 +348,18 @@ impl Default for Inst {
 }
 
 impl Inst {
+    /// Readiness as of `now_ns`: held readiness from an earlier Shanghai date is
+    /// `NO_CALENDAR` (§2.1 rollover) until a poll on the new day re-establishes
+    /// it. Readiness set without a date (feed failure paths, module checks)
+    /// carries no day claim and is read as it stands.
+    pub fn ready_at(&self, now_ns: u64) -> Result<(), Reason> {
+        self.readiness?;
+        match &self.ready_date {
+            Some(date) if *date != shanghai_date(now_ns) => Err(Reason::NoCalendar),
+            _ => Ok(()),
+        }
+    }
+
     /// Discards every temporal baseline, leaving readiness and the band alone
     /// (§2.5): restart, feed recovery, provider switch, volume decrease.
     fn forget(&mut self) {
@@ -481,6 +499,7 @@ impl CnExec {
             Ok(ready) => ready,
         };
         inst.readiness = Ok(());
+        inst.ready_date = Some(today.clone());
         inst.ready = Some(ready.clone());
         inst.idle_last = Some(last);
 
@@ -729,7 +748,7 @@ fn fail_local(exec: &mut CnExec, entry: &'static Entry, reason: Reason, ts_ns: u
 /// re-establishes it).
 pub fn republish_status(exec: &mut CnExec, entry: &'static Entry, at_ns: u64) {
     let instrument_id = InstrumentId::from(entry.instrument_id);
-    let ready = exec.inst(instrument_id).readiness.is_ok();
+    let ready = exec.inst(instrument_id).ready_at(at_ns).is_ok();
     let action = status_for(at_ns, ready);
     exec.inst(instrument_id).set_status(action);
     let ts = exec.stamp(instrument_id, at_ns);
@@ -739,7 +758,7 @@ pub fn republish_status(exec: &mut CnExec, entry: &'static Entry, at_ns: u64) {
 /// The status one instrument's poll cycle asks for, published on change only.
 pub fn gate(exec: &mut CnExec, entry: &'static Entry, at_ns: u64) {
     let instrument_id = InstrumentId::from(entry.instrument_id);
-    let ready = exec.inst(instrument_id).readiness.is_ok();
+    let ready = exec.inst(instrument_id).ready_at(at_ns).is_ok();
     let action = status_for(at_ns, ready);
     if exec.inst(instrument_id).set_status(action).is_some() {
         let ts = exec.stamp(instrument_id, at_ns);
@@ -1035,7 +1054,7 @@ pub fn check(context: &NodeContext, intent: Intent) -> Result<(), Refusal> {
     let ready = {
         let mut exec = context.cn.borrow_mut();
         let inst = exec.inst(instrument_id);
-        inst.readiness.map_err(Refusal::Unavailable)?;
+        inst.ready_at(now_ns).map_err(Refusal::Unavailable)?;
         inst.ready.clone()
     };
     // §2.4: a LIMIT price outside the inclusive band is refused, naming the
@@ -1206,7 +1225,7 @@ pub fn executions(node: &Node) -> HashMap<&'static str, Execution> {
         crate::feed::cn_entries()
             .map(|entry| {
                 let inst = exec.inst(InstrumentId::from(entry.instrument_id));
-                let (availability, reason) = match inst.readiness {
+                let (availability, reason) = match inst.ready_at(now_ns) {
                     Err(reason) => (UNAVAILABLE, Some(reason)),
                     Ok(()) => {
                         let status = inst.status.unwrap_or_else(|| status_for(now_ns, true));
@@ -1511,6 +1530,37 @@ fn liquidity(store: &Store, client_order_id: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+/// §2.1: rollover invalidates readiness. Evidence established on one Shanghai
+/// day reads `NO_CALENDAR` the next day until a poll re-establishes it, so a
+/// boundary alert or an admission on the new day never trusts yesterday's band.
+#[test]
+fn readiness_does_not_survive_the_shanghai_rollover() {
+    let mut inst = Inst::default();
+    assert_eq!(
+        inst.ready_at(CN_0935),
+        Ok(()),
+        "no day claim: read as it stands"
+    );
+    inst.readiness = Ok(());
+    inst.ready_date = Some(shanghai_date(CN_0935));
+    assert_eq!(
+        inst.ready_at(CN_0935 + 6 * 3_600 * SECOND_NS),
+        Ok(()),
+        "same day"
+    );
+    assert_eq!(
+        inst.ready_at(CN_0935 + DAY_NS),
+        Err(Reason::NoCalendar),
+        "next day"
+    );
+    inst.readiness = Err(Reason::FeedLost);
+    assert_eq!(
+        inst.ready_at(CN_0935),
+        Err(Reason::FeedLost),
+        "a block wins"
+    );
+}
+
 #[test]
 fn session_window_is_the_execution_window() {
     // 09:35 is inside the morning session; 11:30 and 14:57 are already out,
