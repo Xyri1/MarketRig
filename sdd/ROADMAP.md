@@ -232,6 +232,8 @@ Dependencies: Milestone R4.
 
 ## Milestone R6 — HiThink A-share data
 
+**A-share engine design complete (2026-09-10):** [`features/a-share-engine/`](features/a-share-engine/PRD.md) records AE-1–AE-9, including the accepted MARKET-trigger exception and provider-data limits. Native feasibility is established on macOS; [slice 014](slices/014-a-share-engine.md) is the implementation plan. Production integration, Windows verification and next-session attended acceptance remain outstanding. This planned extension does not change slice 013’s status or claim the root’s paper-physics gaps are already closed.
+
 **Design complete 2026-09-08** — [`features/hithink-a-share/`](features/hithink-a-share/PRD.md) (PRD, DECISIONS HT-1 … HT-6, SPEC §1–§7); implemented in [`slices/013-r6-hithink-a-share.md`](slices/013-r6-hithink-a-share.md), Active.
 
 This milestone realizes the choices recorded per D4, D9, D49, D76, D78, and D84.
