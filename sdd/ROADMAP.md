@@ -232,7 +232,9 @@ Dependencies: Milestone R4.
 
 ## Milestone R6 — HiThink A-share data
 
-**A-share engine design complete (2026-09-10):** [`features/a-share-engine/`](features/a-share-engine/PRD.md) records AE-1–AE-10, including the accepted MARKET-trigger exception and provider-data limits. Native feasibility is established on macOS; [slice 014](slices/014-a-share-engine.md) is the implementation plan. Production integration, Windows verification and the one-sitting attended acceptance remain outstanding. This planned extension does not change slice 013’s status or claim the root’s paper-physics gaps are already closed.
+**A-share engine delivered; slice 014 frozen (2026-09-11):** [Slice 014](slices/014-a-share-engine.md) is closed by operator confirmation. [`features/a-share-engine/`](features/a-share-engine/PRD.md) records the delivered AE-1–AE-10 contract: CN T+1 and sell reservations, board/order quantity rules, confirmed sessions and 14:57 cancellation, HiThink bands and sampled LIMIT fills, the explicit MARKET publication exception, readiness/recovery gates, and agent-visible limitations. A1–A6 extend the deterministic gate; the slice records all four attended E7 cells closing in one sitting on staged trading days. Closure here does not invent missing Windows check output or macOS bundle paths; the historical verification record remains in the slice. Slice 013's status is unchanged.
+
+**Documentation follow-through:** merge the durable AE amendments into root DECISIONS and SPEC §12, §13, §16 and §17, replacing the earlier CN simplifications consistently. The feature folder remains the detailed governing contract; this reconciliation does not reopen the frozen implementation slice.
 
 **Design complete 2026-09-08** — [`features/hithink-a-share/`](features/hithink-a-share/PRD.md) (PRD, DECISIONS HT-1 … HT-6, SPEC §1–§7); implemented in [`slices/013-r6-hithink-a-share.md`](slices/013-r6-hithink-a-share.md), Active.
 
@@ -273,6 +275,15 @@ Dependencies: Milestone R5.
 This milestone realizes the choices recorded per D11, D13, D34, D49, and D68. Kraken crypto, once the first item here, is deferred past MVP with its design kept in D74 (per D84).
 
 **Goal:** Widen every proven path to the full MVP surface.
+
+**Next feature — event triggers (planned, design not yet complete):** after slice 014, define the EVENT input path over the existing firing, execution, result and prompt-delivery pipeline (per D34; SPEC §8.2). The work is:
+
+- Write the feature PRD, DECISIONS and SPEC for local CLI-to-daemon submission targeting one desk, exact event-name matching, optional raw payloads and stable ingress-scoped occurrence identities.
+- Settle the input format, identity/replay rules, payload limits, durable duplicate suppression, approval eligibility and bounded handling of incoming work. Public webhooks, connectors and richer filters remain deferred under SPEC §18.
+- Implement one-off consumption and recurring firing for each distinct match, independently for every eligible matching trigger, reusing existing execution and structured prompt delivery. Disabled triggers do not buffer events; failures do not automatically rearm or retry work.
+- Add deterministic acceptance for desk isolation, multiple matching triggers, duplicate submissions (including after restart), later distinct events, approval/disable boundaries and delivery without a live agent session.
+
+Create the feature folder when its design content is written and allocate the next implementation slice only when implementation starts. Localization and packaging follow within R7.
 
 Expected outcomes:
 

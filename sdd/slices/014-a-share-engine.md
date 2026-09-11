@@ -1,8 +1,8 @@
 # Slice 014 — A-share paper-trading engine
 
-**Status:** Implemented on macOS (2026-09-10) on branch `codex/a-share-engine`; steps 1–5 landed, the extended gate G1–A6 passes on macOS. Not frozen: the Windows checks and the attended E7 cells (macOS/Windows × Codex/Claude, one sitting each on AE-10's staged trading day) remain outstanding, so root SDD is not merged yet.
+**Status:** Frozen (2026-09-11), closure confirmed by the operator. Steps 1–5 are implemented; the verification record below preserves the recorded runs and their limitations. This documentation update records closure, not a new test run.
 
-The implementation plan for [`features/a-share-engine/`](../features/a-share-engine/PRD.md), decisions AE-1–AE-10 and SPEC §1–§6. The feature folder is canonical. This extends the R6 CN data plane with enforceable paper-trading restrictions; slice 013's delivery status is unchanged. Root D76/D78/D84 and SPEC §12 describe delivered behavior until this slice's exit checks pass. The feature decisions explicitly record their intended amendments.
+The implementation plan for [`features/a-share-engine/`](../features/a-share-engine/PRD.md), decisions AE-1–AE-10 and SPEC §1–§6. The feature folder is canonical. This extends the R6 CN data plane with enforceable paper-trading restrictions; slice 013's delivery status is unchanged. The feature decisions record the durable amendments to root D76/D78/D84 and SPEC §12; their root-document reconciliation is tracked in ROADMAP.
 
 ## Outcome
 
@@ -101,4 +101,4 @@ Implementation (2026-09-10, macOS 26.3 arm64, rustc 1.98.0, branch `codex/a-shar
 
 Checks (all exit 0 unless noted): `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test -p marketrigd --lib` 275 passed; `cargo test --workspace --exclude marketrig-acceptance` green (step 5 run); `pnpm check` green; the gate G1–G32, O1–O10, H1–H4, A1–A6 passed on macOS in step 5 (bundle `target/acceptance/gate-1789047661`, 374 observations, 935 s) — the post-fix rerun passed likewise (bundle `target/acceptance/gate-1789050355`, 979 s). E7 was not run.
 
-Outstanding before freeze: the module checks and the extended gate on Windows (`node::the_first_publish_waits_for_recovery` raced the released poller on the Windows CI runner at 1c42cb3; the check now holds the latch itself through a test seam); the two macOS E7 cells also passed on 2026-09-11 before the Windows pair — their bundles are recorded from that machine, one sitting each, with the close on the staged trading day and one queued evaluation; root merge of the AE amendments into SPEC §12, §13, §17 and DECISIONS, and the ROADMAP/AGENTS.md refresh, which wait for those checks.
+Recorded before operator-confirmed closure (historical, not the current slice status): the module checks and the extended gate on Windows (`node::the_first_publish_waits_for_recovery` raced the released poller on the Windows CI runner at 1c42cb3; the check now holds the latch itself through a test seam); the two macOS E7 cells also passed on 2026-09-11 before the Windows pair — their bundles are recorded from that machine, one sitting each, with the close on the staged trading day and one queued evaluation; root merge of the AE amendments into SPEC §12, §13, §17 and DECISIONS, and the ROADMAP/AGENTS.md refresh, which wait for those checks.
