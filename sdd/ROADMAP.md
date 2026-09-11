@@ -276,18 +276,18 @@ This milestone realizes the choices recorded per D11, D13, D34, D49, and D68. Kr
 
 **Goal:** Widen every proven path to the full MVP surface.
 
-**Next feature — event triggers (planned, design not yet complete):** after slice 014, define the EVENT input path over the existing firing, execution, result and prompt-delivery pipeline (per D34; SPEC §8.2). The work is:
+**Design complete 2026-09-11** — [`features/event-triggers/`](features/event-triggers/PRD.md) (PRD, DECISIONS ET-1 … ET-7, SPEC): trigger invocation over the existing firing, execution, result and prompt-delivery pipeline (per the amended D34; SPEC §8.2). A local producer invokes a saved trigger directly by name or id through `marketrig trigger invoke` with a caller-supplied request identity and optional raw input; there is no event name, listener matching, or fan-out. The work the implementing slice owns:
 
-- Write the feature PRD, DECISIONS and SPEC for local CLI-to-daemon submission targeting one desk, exact event-name matching, optional raw payloads and stable ingress-scoped occurrence identities.
-- Settle the input format, identity/replay rules, payload limits, durable duplicate suppression, approval eligibility and bounded handling of incoming work. Public webhooks, connectors and richer filters remain deferred under SPEC §18.
-- Implement one-off consumption and recurring firing for each distinct match, independently for every eligible matching trigger, reusing existing execution and structured prompt delivery. Disabled triggers do not buffer events; failures do not automatically rearm or retry work.
-- Add deterministic acceptance for desk isolation, multiple matching triggers, duplicate submissions (including after restart), later distinct events, approval/disable boundaries and delivery without a live agent session.
+- Migration 10: `triggers` without `source` and with an optional schedule; `firings` with `request_id` and `input` under one partial unique index per entry path.
+- The invocation route and its acceptance unit: duplicate first, then eligibility, then one firing; a one-off consumed through either door disables itself; refusals buffer nothing; no backlog ceiling.
+- The firing document and result prompt carry the input; the CLI gains `invoke`, `--no-schedule`, and the optional schedule on `create`.
+- Gate T1–T5 after A6 and the attended E8 after E7, per the feature SPEC §7–§8.
 
-Create the feature folder when its design content is written and allocate the next implementation slice only when implementation starts. Localization and packaging follow within R7.
+Allocate the implementation slice only when implementation starts. Localization and packaging follow within R7.
 
 Expected outcomes:
 
-- desk-scoped EVENT trigger ingress, ingress-scoped occurrence identity, exact event-name matching, and duplicate suppression (per D34);
+- direct trigger invocation through `marketrig`, desk- and trigger-scoped request identity, duplicate suppression across restart, and one-off consumption through either entry path (per D34);
 - localization parity: the desktop, tray, and notifications in English and Simplified Chinese, the onboarding language step and locale setting, and an agent-facing contract that stays byte-identical under both (per D68);
 - packaging and distribution for both platforms, bundling `openviking-wheels/<platform>/` as the resource the memory child is provisioned from — no interpreter ships — plus code signing, autostart, and notifications;
 - uninstall preserves user data unless erasure is explicitly requested (per D13).
@@ -295,8 +295,8 @@ Expected outcomes:
 Evidence of completion:
 
 ```text
-one desk-scoped event fires every matching enabled trigger, its duplicate is
-   ignored, and a distinct later event refires only the recurring ones
+one invocation fires its named trigger once, its replay is a duplicate, a burst
+   of distinct requests all queue, and a one-off is consumed through either door
 -> the packaged application runs the whole loop in zh-Hans while marketrig, the MCP
    surface, prompts, and seeded files stay byte-identical to the en run
 ```

@@ -80,11 +80,11 @@ MarketRig intentionally has no Run domain entity.
 
 The trigger model is defined per D34, D35, D36, and D37.
 
-A **trigger** is a durable desk-bound daemon job. It fires from a schedule or an event, captures the firing-time brief/context and any approved code identity as immutable provenance, may execute approved code, and returns the raw result to the desk agent.
+A **trigger** is a durable desk-bound daemon job. It fires from its schedule or when a local producer invokes it by name, captures the firing-time brief/context and any approved code identity as immutable provenance, may execute approved code, and returns the raw result to the desk agent.
 
-For EVENT triggers, one-off means the first distinct matching event durably creates a firing and consumes the trigger regardless of later execution or delivery outcome. Recurring means every distinct matching event creates one firing; duplicate delivery of the same event identity does not create another.
+A one-off is consumed by its first accepted firing through either path, regardless of later execution or delivery outcome. A recurring trigger fires once per accepted occurrence; repeating an accepted invocation's request identity does not create another.
 
-This lets an agent decide ahead of time: write a rule, wait for time or an event, act through MarketRig if appropriate, and review the result later.
+This lets an agent decide ahead of time: write a job, wait for time or for a producer to finish, act through MarketRig if appropriate, and review the result later.
 
 ### 5.4 Agent surface
 
@@ -244,7 +244,7 @@ Acceptance requires:
 1. At least two concurrent desks remain isolated across workspaces, agent sessions, triggers, and paper books.
 2. The real Codex/Claude terminal continues under the daemon while its warm desktop presentation survives tray hide/reopen.
 3. MarketRig can interrupt or exit a managed session, resume the selected runtime's exact remembered native session, or start fresh without manufacturing an agent-status state machine.
-4. Scheduled and event triggers can persist and fire independently of agent-session activity; EVENT one-offs consume their first distinct match, recurring EVENT triggers fire once per distinct match, and duplicate event identities do not refire.
+4. Scheduled and invoked triggers can persist and fire independently of agent-session activity; a one-off is consumed by its first accepted firing through either path, a recurring trigger fires once per accepted invocation, and a repeated request identity does not refire.
 5. Approved trigger code can use MarketRig public reads and paper actions.
 6. Results are persisted before at-most-once structured delivery and can activate a desk with no live managed session without keystroke emulation or delivery-triggered interruption.
 7. The sandbox remains authoritative for paper execution and accounting; MarketRig durably preserves its resulting orders, fills, position cycles, fees, and realized P&L without recalculating them.
