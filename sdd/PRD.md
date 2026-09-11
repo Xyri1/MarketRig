@@ -1,7 +1,7 @@
 # MarketRig Product Requirements Document
 
 **Product:** MarketRig  
-**Positioning:** *Vibe trading terminal for agents.*  
+**Positioning:** _Vibe trading terminal for agents._  
 **Stage:** MVP / minimum viable experiment  
 **Agent runtimes:** Codex and Claude Code  
 **Platforms:** Windows and Apple Silicon macOS  

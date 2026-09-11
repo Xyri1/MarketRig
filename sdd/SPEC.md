@@ -8,7 +8,7 @@ Where a decision or a recorded spike settles a mechanism, this document states i
 
 ## 1. Scope
 
-*Decision basis: per D1, D2, D3, D5, D6, D9, D10, D11, D14, D22, D38, D39, D43, D63, and D76.*
+_Decision basis: per D1, D2, D3, D5, D6, D9, D10, D11, D14, D22, D38, D39, D43, D63, and D76._
 
 MarketRig is a local persistent harness for external coding agents operating and improving in a paper-trading environment. It owns durable desks, time, runtime lifecycle, public-data access, trigger execution, approvals, trading history, and authoritative access to trading reality. Codex or Claude Code owns orientation, decisions, evaluation, and learning.
 
@@ -16,7 +16,7 @@ MVP platforms are Windows and macOS on Apple Silicon. MVP agent runtimes are Cod
 
 ## 2. Canonical terminology
 
-*Decision basis: per D4, D8, D15, D16, D17, D19, D23, D34, and D83.*
+_Decision basis: per D4, D8, D15, D16, D17, D19, D23, D34, and D83._
 
 ### MarketRig
 
@@ -128,7 +128,7 @@ Not a canonical MarketRig entity. UI prose may informally say "pause the run," b
 
 ## 3. Top-level architecture
 
-*Decision basis: per D4, D16, D23, D24, D30, D31, D39, D42, D43, D44, D45, D46, D48, D53, D54, D55, D63, D64, D77, and D83.*
+_Decision basis: per D4, D16, D23, D24, D30, D31, D39, D42, D43, D44, D45, D46, D48, D53, D54, D55, D63, D64, D77, and D83._
 
 ```text
 Tauri 2 / Vue 3          marketrig CLI          Codex CLI / Claude Code
@@ -164,17 +164,17 @@ Architectural invariants:
 
 One Cargo workspace builds and releases `marketrigd`, `marketrig`, and `marketrig-mcp` together: one version, one lockfile, one boundary model, shared internal crates rather than published libraries, and no versioning seam between them (per D53).
 
-| Path | Contents |
-| --- | --- |
-| `/` (root) | the Vue 3 / TypeScript / Vite frontend with its `package.json`, `index.html`, and `src/`; the Cargo workspace manifest and `Cargo.lock` |
-| `crates/` | `marketrigd`, `marketrig`, `marketrig-mcp`, the internal acceptance-harness crate (§17), and shared internal crates |
-| `src-tauri/` | the Tauri 2 Rust shell, a member of the same Cargo workspace |
+| Path         | Contents                                                                                                                                |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `/` (root)   | the Vue 3 / TypeScript / Vite frontend with its `package.json`, `index.html`, and `src/`; the Cargo workspace manifest and `Cargo.lock` |
+| `crates/`    | `marketrigd`, `marketrig`, `marketrig-mcp`, the internal acceptance-harness crate (§17), and shared internal crates                     |
+| `src-tauri/` | the Tauri 2 Rust shell, a member of the same Cargo workspace                                                                            |
 
 pnpm and Cargo are used directly. There is no monorepo framework, general task runner, or commit-hook framework (per D54, D61). Dependencies are pinned exactly; bumping a pin is a version change verified by that module's own checks.
 
 ## 4. Installation, platform, and security boundary
 
-*Decision basis: per D3, D11, D13, D14, D18, D25, D42, D44, D47, D48, D49, D52, D58, D59, D66, D68, D70, D77, D80, D81, D82, and D83.*
+_Decision basis: per D3, D11, D13, D14, D18, D25, D42, D44, D47, D48, D49, D52, D58, D59, D66, D68, D70, D77, D80, D81, D82, and D83._
 
 ### 4.1 Installation
 
@@ -250,7 +250,7 @@ For the memory child's hosted models the user sets one OpenAI-compatible base UR
 
 ### 4.5 Localization
 
-*Decision basis: per D68.*
+_Decision basis: per D68._
 
 MVP ships exactly `en` and `zh-Hans`. One installation `locale` setting, detected by the desktop from the system language at first launch and changeable in settings, drives the desktop UI, tray menu, and notifications.
 
@@ -260,7 +260,7 @@ Detection, endpoints, catalog mechanics, font and input-method requirements, and
 
 ### 4.6 Daemon startup and shutdown
 
-*Decision basis: per D66, D73, D77, D80, D81, and D83.*
+_Decision basis: per D66, D73, D77, D80, D81, and D83._
 
 Every `marketrigd` start follows one fixed order, so a daemon a client can reach is a daemon whose own state is already resolved:
 
@@ -282,7 +282,7 @@ Shutdown is an authenticated route, `POST /quit`, from the first milestone; the 
 
 ## 5. Desk model and ownership
 
-*Decision basis: per D7, D8, D15, D20, D21, D22, D46, D77, D81, and D83.*
+_Decision basis: per D7, D8, D15, D20, D21, D22, D46, D77, D81, and D83._
 
 MarketRig supports multiple durable concurrent desks from day one.
 
@@ -346,7 +346,7 @@ The desk schema, the creation and retry sequences, the workspace-status derivati
 
 ## 6. Managed runtime lifecycle
 
-*Decision basis: per D24, D25, D27, D28, D31, D32, D69, and D80.*
+_Decision basis: per D24, D25, D27, D28, D31, D32, D69, and D80._
 
 ### 6.1 Facts MarketRig owns
 
@@ -418,7 +418,7 @@ Each attachment first sends `{"attached":{"terminal_id":"<UUIDv7>","offset":"<de
 
 ## 7. Activation
 
-*Decision basis: per D22, D28, D36, D80, and D83.*
+_Decision basis: per D22, D28, D36, D80, and D83._
 
 The canonical automatic activation path is:
 
@@ -445,7 +445,7 @@ Concretely (per D80), activation is one dispatcher task per daemon, woken by a `
 
 ## 8. Trigger model
 
-*Decision basis: per D34, D35, and D70.*
+_Decision basis: per D34, D35, and D70._
 
 ### 8.1 Definition
 
@@ -510,7 +510,7 @@ Connector framing, occurrence-identity construction, payload limits, deduplicati
 
 ## 9. Trigger code execution
 
-*Decision basis: per D35, D41, and D79.*
+_Decision basis: per D35, D41, and D79._
 
 Trigger code:
 
@@ -536,7 +536,7 @@ The concrete shape (per D79; the full record is the R2 feature SPEC §4): a snap
 
 ## 10. Scheduled-trigger semantics
 
-*Decision basis: per D37, D40, and D79.*
+_Decision basis: per D37, D40, and D79._
 
 Scheduling is daemon-owned. One coordinator task reads the earliest eligible SQLite `next_occurrence_ns` projection and waits on that deadline, a recheck of at most 60 seconds, or an in-memory wake signal published after a schedule mutation; it holds no armed occurrence in memory. The recheck keeps a clock change from leaving an obsolete long sleep. SQLite is the only durable authority: no scheduler framework and no separate job store participates.
 
@@ -554,7 +554,7 @@ Scheduled occurrence identity is the trigger identity plus its scheduled instant
 
 ## 11. Daemon prompt delivery
 
-*Decision basis: per D36, D70, D71, and D80.*
+_Decision basis: per D36, D70, D71, and D80._
 
 ### 11.1 States and ordering
 
@@ -577,7 +577,7 @@ Rules:
 - failed prompts and notices appear in the next activation prompt as disclosure, never as redelivery;
 - each attempt appends one structured operational record naming the desk, prompt, kind, runtime, native session, and outcome code.
 
-Concretely (per D80), the handoff boundary is the Codex `turn/start` response — a `turn` in the result is `DELIVERED`, a JSON-RPC error `FAILED DELIVERY_REFUSED`, a connection lost before the response `FAILED HANDOFF_UNKNOWN` — and the Claude channel write, `DELIVERED` on completion and `FAILED CHANNEL_UNAVAILABLE` on error or with no connection after 30 seconds; the dispatcher adds `ACTIVATION_FAILED` and `RUNTIME_UNAVAILABLE` (§7), and those five are the whole `failure_code` vocabulary. An attempt writes `attempted_at_ns`, `runtime`, and `native_session_id` in one unit *before* the adapter call, and `state`, `resolved_at_ns`, `failure_code`, and `PROMPT_DELIVERED` or `PROMPT_FAILED` (the latter carrying `failure_detail`) in a second unit after it, which is what lets recovery resolve a daemon lost mid-handoff as `HANDOFF_UNKNOWN` (§15); a closed gate clears `attempted_at_ns` again and leaves the row `QUEUED`, so a wait is never recovered as a handoff. Every prompt is delivered as one English text, byte-identical under both locales: `TRIGGER_RESULT` and `EVALUATION` render their payload as a fenced JSON block after one line `MarketRig <KIND> <id>:`; `ORIENTATION` is §7's paragraph; `DISCLOSURE` lists each undisclosed failed prompt as `<id> <kind> <failure_code>` on its own line and stamps `disclosed_at_ns` on those rows in the delivery unit.
+Concretely (per D80), the handoff boundary is the Codex `turn/start` response — a `turn` in the result is `DELIVERED`, a JSON-RPC error `FAILED DELIVERY_REFUSED`, a connection lost before the response `FAILED HANDOFF_UNKNOWN` — and the Claude channel write, `DELIVERED` on completion and `FAILED CHANNEL_UNAVAILABLE` on error or with no connection after 30 seconds; the dispatcher adds `ACTIVATION_FAILED` and `RUNTIME_UNAVAILABLE` (§7), and those five are the whole `failure_code` vocabulary. An attempt writes `attempted_at_ns`, `runtime`, and `native_session_id` in one unit _before_ the adapter call, and `state`, `resolved_at_ns`, `failure_code`, and `PROMPT_DELIVERED` or `PROMPT_FAILED` (the latter carrying `failure_detail`) in a second unit after it, which is what lets recovery resolve a daemon lost mid-handoff as `HANDOFF_UNKNOWN` (§15); a closed gate clears `attempted_at_ns` again and leaves the row `QUEUED`, so a wait is never recovered as a handoff. Every prompt is delivered as one English text, byte-identical under both locales: `TRIGGER_RESULT` and `EVALUATION` render their payload as a fenced JSON block after one line `MarketRig <KIND> <id>:`; `ORIENTATION` is §7's paragraph; `DISCLOSURE` lists each undisclosed failed prompt as `<id> <kind> <failure_code>` on its own line and stamps `disclosed_at_ns` on those rows in the delivery unit.
 
 Trigger-result input carries only the trigger reference, the firing-time brief and context snapshot, and the raw result or artifact reference. Concretely (per D79), a `TRIGGER_RESULT` prompt's payload is the trigger (id, name), the firing (id, occurrence, acceptance), the brief and context, and — for a code-bearing firing — an execution summary (outcome, exit code, byte counts, truncation flags); the captured streams stay on the execution row and are read through the firing route. Evaluation input carries a stable realized-P&L history reference with enough order, fill, position, fee, and provenance identity for the agent to query supporting history. Operational queue status and installation policy are queryable but are never injected into a prompt.
 
@@ -602,7 +602,7 @@ Claude delivery is considered handed off when written to the Channel transport, 
 
 ## 12. Trading and public-data boundary
 
-*Decision basis: per D5, D9, D10, D38, D39, D63, D64, D70, D74, D76, D78, and D82.*
+_Decision basis: per D5, D9, D10, D38, D39, D63, D64, D70, D74, D76, D78, and D82._
 
 ### 12.1 Trading authority and node topology
 
@@ -691,9 +691,9 @@ Of the three things the 2026-09-01 spikes left unproven (per D64, D76), R1 close
 
 ## 13. Agent surface
 
-*Decision basis: per D4, D50, D63, D68, D69, D71, D77, D78, D80, D81, D82, and D83.*
+_Decision basis: per D4, D50, D63, D68, D69, D71, D77, D78, D80, D81, D82, and D83._
 
-The agent surface is split by what the agent is doing, and no capability appears on two planes (per D4). **`marketrig-mcp` is the market plane** — what the agent does *in the market*: observe and act. **The `marketrig` CLI is the continuity plane** — what the agent does *in the harness*: durable records, structure, and skill writes. **The seeded OpenViking plugin's own MCP server is the memory plane** — the desk's memories, reached through the plugin's tools and never proxied by MarketRig (per D83, §16). The daemon's SQLite is the evidence authority for every action the first two planes perform; the transcript never is.
+The agent surface is split by what the agent is doing, and no capability appears on two planes (per D4). **`marketrig-mcp` is the market plane** — what the agent does _in the market_: observe and act. **The `marketrig` CLI is the continuity plane** — what the agent does _in the harness_: durable records, structure, and skill writes. **The seeded OpenViking plugin's own MCP server is the memory plane** — the desk's memories, reached through the plugin's tools and never proxied by MarketRig (per D83, §16). The daemon's SQLite is the evidence authority for every action the first two planes perform; the transcript never is.
 
 The split is measured, not assumed: six sessions per client against Claude Code 2.1.252 and Codex CLI 0.151.0 with an `rmcp =3.2.0` probe server, arbitrated by raw JSON-RPC logs rather than model prose. Every rule below that names a client behavior rests on that wire evidence.
 
@@ -737,7 +737,7 @@ Global flags precede the group. Desk scope is explicit or resolved by the daemon
 
 ## 14. Desktop and application lifecycle
 
-*Decision basis: per D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D68, D69, D71, D72, D82, and D83.*
+_Decision basis: per D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D62, D66, D68, D69, D71, D72, D82, and D83._
 
 The desktop shell is Tauri 2. Its system webview hosts a Vue 3 and TypeScript 6 application built by Vite, styled with Tailwind CSS 4, using Reka UI 2 directly for behavior-heavy accessible primitives and native HTML for ordinary controls. Frontend builds use an exact tested Node.js 24 LTS release and a `packageManager`-pinned pnpm 11 release with its integrity hash, provisioned through Corepack; the committed lockfile is authoritative and none of these tools ship in the installer. The frontend pins the newest tested TypeScript 6.x compatible with the whole Vue and Vite toolchain, and exact Tailwind 4.x, Reka UI 2.x, and vue-i18n releases.
 
@@ -795,9 +795,9 @@ exit_app()           -> never returns
 
 The daemon is spawned detached — its own session on macOS, its own process group on Windows — because the shell's own crash must not stop it, and the webview alone verifies it (§4.3): read the endpoint, authenticate health, match the UUID, and call `start_daemon` only when that fails. R6 adds `set_locale` (§4.5) and nothing else.
 
-Close prevents the window's destruction and hides it, and an exit request the application did not ask for is prevented too, so a hidden window keeps MarketRig alive with nothing on screen. The tray menu is *Open MarketRig*, a disabled pending-approval line whose text `set_tray_pending` sets, and *Quit MarketRig*; *Open* and a left click unminimize, show, and focus, and the single-instance callback does the same, which is what makes a second launch a focus rather than a second daemon. Quit is one sequence the webview runs from either entry point, the tray's or the window's own confirmed control: `POST /quit`, poll health until it stops answering or a bounded wait elapses, then `exit_app`. Autostart is the official plugin launching with a hidden-start argument, enabled once on a first launch and toggled in Settings, where the plugin's own state is the setting and MarketRig records nothing beside it. Tray labels are English until R7 (§4.5). The shell writes its own bounded log through the official log plugin (§15).
+Close prevents the window's destruction and hides it, and an exit request the application did not ask for is prevented too, so a hidden window keeps MarketRig alive with nothing on screen. The tray menu is _Open MarketRig_, a disabled pending-approval line whose text `set_tray_pending` sets, and _Quit MarketRig_; _Open_ and a left click unminimize, show, and focus, and the single-instance callback does the same, which is what makes a second launch a focus rather than a second daemon. Quit is one sequence the webview runs from either entry point, the tray's or the window's own confirmed control: `POST /quit`, poll health until it stops answering or a bounded wait elapses, then `exit_app`. Autostart is the official plugin launching with a hidden-start argument, enabled once on a first launch and toggled in Settings, where the plugin's own state is the setting and MarketRig records nothing beside it. Tray labels are English until R7 (§4.5). The shell writes its own bounded log through the official log plugin (§15).
 
-The three panels are concretely a fixed-width desk list, a terminal well that takes the rest, and a fixed-width right panel that collapses to a rail. A desk row is a status gutter, the name in the terminal font stack, a pending-approval count, and an attention dot; the well's header carries the desk, its runtime, its session state, and §6.2's controls, and shows the last known screen when no session is live. The right panel is five tabs — *Desk* (quotes, book, positions, open orders, polled while visible because the event tail carries no trading kind), *Triggers* (with each code-bearing trigger's approval state and its firings), *Approvals* (the pending items across desks, decided in place, a denial confirmed), *Activity* (the event listing paged back through its cursor), and *Settings* (runtimes; the memory setup — the two prerequisite paths with their discovered candidates, **Set up**, the setup and child states, and a **Retry** shown only while `UNAVAILABLE` — and the provider; the two policies with the delivery mode visibly disabled; autostart; and Quit). Settings is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
+The three panels are concretely a fixed-width desk list, a terminal well that takes the rest, and a fixed-width right panel that collapses to a rail. A desk row is a status gutter, the name in the terminal font stack, a pending-approval count, and an attention dot; the well's header carries the desk, its runtime, its session state, and §6.2's controls, and shows the last known screen when no session is live. The right panel is five tabs — _Desk_ (quotes, book, positions, open orders, polled while visible because the event tail carries no trading kind), _Triggers_ (with each code-bearing trigger's approval state and its firings), _Approvals_ (the pending items across desks, decided in place, a denial confirmed), _Activity_ (the event listing paged back through its cursor), and _Settings_ (runtimes; the memory setup — the two prerequisite paths with their discovered candidates, **Set up**, the setup and child states, and a **Retry** shown only while `UNAVAILABLE` — and the provider; the two policies with the delivery mode visibly disabled; autostart; and Quit). Settings is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
 
 The live-event socket is `WS /events`. After §4.3's first frame it subscribes, replays the rows after the client's cursor up to the tail position at subscription, answers one frame naming that tail, and then streams one frame per committed row — id, kind, desk, instant, and payload — in `(occurred_at_ns, id)` order. One publisher per daemon holds the installation's cursor, wakes on the database thread's post-commit signal or on a bounded recheck, reads in bounded pages, and fans out to each subscriber's bounded queue; a queue that fills closes that one subscriber `4408` and drops it. A cursor this history does not contain is ignored and the tail reported instead. `GET /events` is the same rows newest first with keyset paging, filtered to a desk when asked, and `marketrig desk events` is its agent-facing form (§13.2).
 
@@ -807,7 +807,7 @@ The token set is one `@theme` block in the frontend's single stylesheet plus one
 
 ## 15. Persistence, crash recovery, and history
 
-*Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, D73, D77, D78, D79, D80, D81, D82, and D83.*
+_Decision basis: per D22, D23, D36, D38, D45, D46, D51, D71, D73, D77, D78, D79, D80, D81, D82, and D83._
 
 Durable state covers desk identity and configuration, runtime selection and last native pointers, triggers and code snapshots, daemon prompts and delivery, approvals and provenance, paper-book restoration state, and complete trading history. The current market-observation cache and the MCP adapter's state are deliberately non-durable: after a restart each quote stays unavailable until a new observation arrives.
 
@@ -848,7 +848,7 @@ Long-lived children a crashed daemon left running are recorded in `runtime/child
 
 ## 16. Memory and skills
 
-*Decision basis: per D16, D17, D18, D19, D21, D22, D47, D49, D65, D81, and D83.*
+_Decision basis: per D16, D17, D18, D19, D21, D22, D47, D49, D65, D81, and D83._
 
 Each desk self-improves through the agent-owned Evaluate and Learn stages of the modified OODA loop:
 
@@ -889,7 +889,7 @@ The concrete shape (per D83; the full record is the OpenViking feature SPEC §1�
 
 ## 17. Verification
 
-*Decision basis: per D60, D61, D67, D75, D76, D77, D78, D80, D81, D82, and D83.*
+_Decision basis: per D60, D61, D67, D75, D76, D77, D78, D80, D81, D82, and D83._
 
 Verification has three layers, and no layer restates another:
 
@@ -917,7 +917,7 @@ Rules both modes share (per D67, D75):
 - mechanical scenarios fail the cell, while the assertions that wait on the agent to act end as **inconclusive** with their evidence, never as a product defect, and the operator decides whether to rerun;
 - desk names are run-stamped, the harness deletes nothing, and each cell produces an evidence bundle;
 - the harness ships one helper binary, `trigger-code`, that the gate names as every code-bearing trigger's executable and drives through the snapshot's one-line source — print the environment and document, order twice through the real adapter, exit, sleep, flood — so trigger scenarios run the real executor, adapter, and attribution path with no interpreter the CI image might lack (per D79). G21–G26 extend the chain after G20; E3 is the attended scenario in which the real session writes its own trigger code;
-- the harness ships a second helper binary, `runtime-standin`, that the gate registers by explicit path as both runtimes and scripts per launch through the one JSON file `MARKETRIG_STANDIN_SCRIPT` names on the daemon's environment (per D80). As Codex it serves the app-server's `initialize`, `thread/start`, `thread/resume`, `thread/turns/list`, `turn/start`, and `turn/interrupt` behind the capability token and the four broadcasts, and its TUI half connects with `--remote`; as Claude Code it honors `--session-id`, `--resume`, `--mcp-config`, `--settings`, and the channel flag, spawns the listed stdio servers, runs the hooks, and sends `initialized` only after a delay so a bridge that connected early would be caught. Both halves echo every delivered input and one scripted MCP read to their terminal, which is how the gate reads delivery order and the registration takeover. G27–G32 extend the chain after G26 — discovery, trigger-fires-nobody-home on Codex, FIFO behind a turn then resume, the Claude half after a switch, activation failure and disclosure with one control-plane loss, and a hard kill mid-attempt; E4 is the attended scenario in which MarketRig launches the real runtime itself, the operator's console *is* the desk's terminal, and a scheduled result lands as the session's own input;
+- the harness ships a second helper binary, `runtime-standin`, that the gate registers by explicit path as both runtimes and scripts per launch through the one JSON file `MARKETRIG_STANDIN_SCRIPT` names on the daemon's environment (per D80). As Codex it serves the app-server's `initialize`, `thread/start`, `thread/resume`, `thread/turns/list`, `turn/start`, and `turn/interrupt` behind the capability token and the four broadcasts, and its TUI half connects with `--remote`; as Claude Code it honors `--session-id`, `--resume`, `--mcp-config`, `--settings`, and the channel flag, spawns the listed stdio servers, runs the hooks, and sends `initialized` only after a delay so a bridge that connected early would be caught. Both halves echo every delivered input and one scripted MCP read to their terminal, which is how the gate reads delivery order and the registration takeover. G27–G32 extend the chain after G26 — discovery, trigger-fires-nobody-home on Codex, FIFO behind a turn then resume, the Claude half after a switch, activation failure and disclosure with one control-plane loss, and a hard kill mid-attempt; E4 is the attended scenario in which MarketRig launches the real runtime itself, the operator's console _is_ the desk's terminal, and a scheduled result lands as the session's own input;
 - the harness ships a third helper binary, `openviking-standin`, which the gate registers through `PUT /openviking/setup {standin}` under the test seam, after which the daemon starts, stops, and reprovisions it exactly as it would the real child (per D83). It serves `/health`, `/ready`, the admin account, user, and seeded-key routes with OpenViking's own key rule, the skills routes with content and files, sessions with messages and a scripted commit task, `find`, and `content/read`, on the exact paths and field shapes the daemon consumes, behind `api_key` auth over an in-memory per-user store, and takes its readiness delay, its scripted exit, and its commit-task outcome from the `openviking` object of the same `MARKETRIG_STANDIN_SCRIPT` file; it runs no Node, no Python, and no hook. O1–O6 replace G33–G37 after G32 — setup and secrets, two desks and the seeded skill, the projection with a turn-end refresh and a `marketrig skill put` and `delete`, registration and the per-desk credential file on both runtimes, loss with Retry and a hard kill, and reprovisioning — and R5's four scenarios follow as O7–O10, so the gate is G1–G32 then O1–O10. E6 replaces E5 as the attended scenario in which a real session closes the same loop on a real OpenViking child provisioned offline from the bundled wheels, skipped with evidence when the operator's environment names no Python, Node, wheel set, or provider; both macOS cells passed on 2026-09-08 and the Windows pair is R6's first entry check;
 - the desktop milestone adds no helper and no attended scenario, because its evidence is mechanical (per D82). Its four scenarios, renumbered O7–O10, cover the policy resource with `STEER` refused and the event tail read live, reconnected gaplessly, and closed `4408` on a consumer that stops reading; trigger-code approval, where a pending trigger never becomes due through enable, disable, or an elapsed occurrence and a denied one leaves no firing, execution, or prompt; paper-order approval, where a pending order reaches no sandbox, replays idempotently, refuses its cancel, and after approval fills, closes a cycle, and queues its evaluation exactly as an ungated one; and the three sockets under a foreign origin, a wrong first frame, and a hard kill after which both pending records are still decidable and a reconnecting client receives the successor's recovery unit. Because the installed default gates trigger code (per D70), G21's prologue and the experiment's E3 setup put that policy on **Always allow** before their first code-bearing trigger, and O7 restores the default.
 
