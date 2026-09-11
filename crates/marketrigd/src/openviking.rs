@@ -3634,6 +3634,11 @@ mod tests {
             println!("skipped: python3 is not on PATH");
             return;
         };
+        // Windows ships a `python3` alias that only offers the Store install.
+        if String::from_utf8_lossy(&read.stderr).contains("Microsoft Store") {
+            println!("skipped: python3 is the Microsoft Store alias");
+            return;
+        }
         assert!(
             read.status.success(),
             "python3 refused the archive: {}",

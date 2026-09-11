@@ -12,6 +12,8 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::fmt;
 use std::rc::Rc;
 #[cfg(test)]
@@ -124,6 +126,31 @@ fn resolve_clock_start(
 #[cfg(test)]
 static CONTROLLED: LazyLock<Mutex<HashMap<String, u64>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Desks whose first publish one module check releases by hand, so it can look
+/// at the restored book before any quote — `ensure` releasing it as its last
+/// step is exactly what a slow runner races against.
+#[cfg(test)]
+static HELD: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn hold_release(desk_id: &str) {
+    HELD.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(desk_id.to_owned());
+}
+
+#[cfg(test)]
+fn held(desk_id: &str) -> bool {
+    HELD.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(desk_id)
+}
+
+#[cfg(not(test))]
+fn held(_desk_id: &str) -> bool {
+    false
+}
 
 #[cfg(test)]
 fn registered(desk_id: &str) -> Option<u64> {
@@ -489,7 +516,9 @@ impl Registry {
         }
         // Only now may the feed publish: restoration decided, the expired CN
         // orders are terminal, and the session gate is back up (§5.3).
-        node.call(|context| context.cn.borrow_mut().released = true)?;
+        if !held(desk_id) {
+            node.call(|context| context.cn.borrow_mut().released = true)?;
+        }
         Ok(node)
     }
 
@@ -1822,6 +1851,7 @@ fn the_first_publish_waits_for_recovery() {
         feed::chart_body("600519.SS", "CNY", "1500.00", 1_788_917_700),
     )]);
     register_controlled(&desk_id, CN_0935);
+    hold_release(&desk_id);
     let registry = Registry::new(
         store.clone(),
         Arc::new(MarketState::new()),
@@ -1830,14 +1860,17 @@ fn the_first_publish_waits_for_recovery() {
     let node = registry.ensure(&desk_id).expect("the node restores");
 
     // `ensure` returns with the book restored and no market data at all: the
-    // poller was still holding its first publish.
+    // poller is still holding its first publish (this check keeps the latch
+    // itself, so the look is not a race against the poller).
     assert_eq!(
         order_status(&node, "cn-hold-1").as_deref(),
         Some("ACCEPTED")
     );
     assert_eq!(fill_count(&store), 0, "nothing filled during recovery");
 
-    // And the feed does resume: the same crossing quote lands afterwards.
+    // And the feed does resume: the same crossing quote lands after release.
+    node.call(|context| context.cn.borrow_mut().released = true)
+        .unwrap();
     within(10, "the released feed publishes", || {
         node.call(|context| {
             context
