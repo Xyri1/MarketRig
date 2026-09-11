@@ -42,6 +42,9 @@ pub struct ApiState {
     pub registry: Arc<crate::node::Registry>,
     /// Wakes the scheduler after a trigger mutation (R2 feature SPEC §3.1).
     pub scheduler_wake: Arc<tokio::sync::Notify>,
+    /// Wakes the executor after an accepted code-bearing invocation, exactly as
+    /// the scheduler's pass does (`event-triggers` §2.2).
+    pub exec_wake: Arc<tokio::sync::Notify>,
     /// The `PATH` runtime discovery searches, captured once at daemon start
     /// (R3 feature SPEC §2).
     pub search_path: String,
@@ -89,6 +92,7 @@ const HTTP_PATHS: &[&str] = &[
     "/desks/{desk_id}/triggers",
     "/desks/{desk_id}/triggers/{trigger_id}",
     "/desks/{desk_id}/triggers/{trigger_id}/firings",
+    "/desks/{desk_id}/triggers/{trigger_id}/invocations",
     "/desks/{desk_id}/firings/{firing_id}",
     "/desks/{desk_id}/session",
     "/desks/{desk_id}/session/activate",
@@ -149,6 +153,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(list_triggers, create_trigger))
     .routes(routes!(show_trigger, patch_trigger, delete_trigger))
     .routes(routes!(trigger_firings))
+    .routes(routes!(invoke_trigger))
     .routes(routes!(show_firing))
     .routes(routes!(session))
     .routes(routes!(session_activate))
@@ -410,8 +415,14 @@ impl IntoResponse for TriggerError {
             return e.into_response();
         }
         let status = match &self {
-            TriggerError::Invalid(_) => StatusCode::BAD_REQUEST,
-            TriggerError::NameTaken(_) | TriggerError::NotReady(_) => StatusCode::CONFLICT,
+            TriggerError::Invalid(_) | TriggerError::InvocationInvalid(_) => {
+                StatusCode::BAD_REQUEST
+            }
+            TriggerError::NameTaken(_)
+            | TriggerError::NotReady(_)
+            | TriggerError::Disabled { .. }
+            | TriggerError::Unapproved
+            | TriggerError::Elapsed => StatusCode::CONFLICT,
             _ => StatusCode::NOT_FOUND,
         };
         envelope(status, self.code(), self.to_string())
@@ -2144,6 +2155,52 @@ async fn trigger_firings(
     Ok(Json(serde_json::json!({ "firings": firings })))
 }
 
+/// `POST /desks/{desk_id}/triggers/{trigger_id}/invocations` (`event-triggers`
+/// §2): one firing per distinct accepted request, the original firing on a
+/// replay. The R2 attribution headers are not read here — a trigger's own code
+/// may invoke another trigger, and that provenance is the `request_id` the
+/// producer chose (§2.1).
+#[utoipa::path(
+    post,
+    path = "/desks/{desk_id}/triggers/{trigger_id}/invocations",
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, body = serde_json::Value, description = "ACCEPTED: a new firing"),
+        (status = 200, body = serde_json::Value, description = "DUPLICATE: the original firing"),
+        (status = 400, body = Envelope, description = "INVOCATION_INVALID"),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope, description = "DESK_NOT_FOUND, TRIGGER_NOT_FOUND"),
+        (status = 409, body = Envelope,
+         description = "TRIGGER_DISABLED, TRIGGER_UNAPPROVED, TRIGGER_ELAPSED"),
+    )
+)]
+async fn invoke_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((desk_id, trigger_id)): Path<(String, String)>,
+    body: String,
+) -> Result<Response, TriggerError> {
+    let done = trigger::invoke(&state.store, &desk_id, &trigger_id, &body, store::now_ns())?;
+    if done.accepted {
+        match done.has_code {
+            true => state.exec_wake.notify_one(),
+            false => crate::dispatch::wake(),
+        }
+    }
+    let status = match done.accepted {
+        true => StatusCode::CREATED,
+        false => StatusCode::OK,
+    };
+    let outcome = match done.accepted {
+        true => "ACCEPTED",
+        false => "DUPLICATE",
+    };
+    Ok((
+        status,
+        Json(serde_json::json!({ "outcome": outcome, "firing": done.firing })),
+    )
+        .into_response())
+}
+
 #[utoipa::path(
     get,
     path = "/desks/{desk_id}/firings/{firing_id}",
@@ -2435,6 +2492,7 @@ async fn serve_with(feed_base: Option<crate::feed::FeedBase>) -> Served {
         quit,
         registry: registry.clone(),
         scheduler_wake: Arc::new(tokio::sync::Notify::new()),
+        exec_wake: Arc::new(tokio::sync::Notify::new()),
         dispatch: crate::dispatch::fake::dispatcher(store.clone(), DAEMON_UUID),
         memory: memory.clone(),
         openviking,
@@ -3253,13 +3311,14 @@ async fn action_attribution() {
         .unit(move |tx| {
             for (desk, trigger, firing) in [(&a, "t-alpha", "f-alpha"), (&b, "t-beta", "f-beta")] {
                 tx.execute(
-                    "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                    "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                      enabled, revision, created_at_ns, updated_at_ns) \
-                     VALUES (?1, ?2, 'nightly', 'SCHEDULED', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
+                     VALUES (?1, ?2, 'nightly', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
                     rusqlite::params![trigger, desk],
                 )?;
                 tx.execute(
-                    "INSERT INTO firings VALUES (?1, ?2, ?3, 50, 60, 1, 'trade', NULL, NULL)",
+                    "INSERT INTO firings VALUES \
+                     (?1, ?2, ?3, 50, 60, 1, 'trade', NULL, NULL, NULL, NULL)",
                     rusqlite::params![firing, desk, trigger],
                 )?;
             }
@@ -3470,6 +3529,10 @@ async fn trigger_codes() {
             ("PATCH", url(&format!("/desks/{desk}/triggers/t-1"))),
             ("DELETE", url(&format!("/desks/{desk}/triggers/t-1"))),
             ("GET", url(&format!("/desks/{desk}/triggers/t-1/firings"))),
+            (
+                "POST",
+                url(&format!("/desks/{desk}/triggers/t-1/invocations")),
+            ),
             ("GET", url(&format!("/desks/{desk}/firings/f-1"))),
             ("GET", url(&format!("/desks/{desk}/prompts"))),
             ("GET", url(&format!("/desks/{desk}/prompts/p-1"))),
@@ -3535,8 +3598,8 @@ async fn trigger_codes() {
         ("a body that is not an object", "[]".to_string()),
         ("a name outside the grammar", one_off("Bad--Name", 60)),
         (
-            "no schedule",
-            r#"{"name":"nightly","brief":"b"}"#.to_string(),
+            "an unusable schedule",
+            r#"{"name":"nightly","brief":"b","schedule":5}"#.to_string(),
         ),
         (
             "a brief past its bound",
@@ -3600,7 +3663,10 @@ async fn trigger_codes() {
     let nightly_id = nightly["id"].as_str().unwrap().to_string();
     assert_eq!(nightly["desk_id"], alpha.as_str());
     assert_eq!(nightly["name"], "nightly");
-    assert_eq!(nightly["source"], "SCHEDULED");
+    assert!(
+        nightly.get("source").is_none(),
+        "a trigger has no source (`event-triggers` §1): {nightly}"
+    );
     assert_eq!(nightly["recurrence"], "ONE_OFF");
     assert_eq!(nightly["brief"], "look at AAPL");
     assert_eq!(nightly["context"], "since open");
@@ -3749,11 +3815,13 @@ async fn trigger_codes() {
         .store
         .unit(move |tx| {
             tx.execute(
-                "INSERT INTO firings VALUES ('f-1', ?1, ?2, 100, 100, 1, 'early', NULL, NULL)",
+                "INSERT INTO firings VALUES \
+                 ('f-1', ?1, ?2, 100, 100, 1, 'early', NULL, NULL, NULL, NULL)",
                 rusqlite::params![a, t],
             )?;
             tx.execute(
-                "INSERT INTO firings VALUES ('f-2', ?1, ?2, 200, 200, 2, 'late', 'ctx', NULL)",
+                "INSERT INTO firings VALUES \
+                 ('f-2', ?1, ?2, 200, 200, 2, 'late', 'ctx', NULL, 'r-late', 'hello')",
                 rusqlite::params![a, t],
             )?;
             tx.execute(
@@ -3774,13 +3842,14 @@ async fn trigger_codes() {
             // One trigger, firing, and prompt on the other desk: nothing of
             // theirs is ever found under this one.
             tx.execute(
-                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                  enabled, revision, created_at_ns, updated_at_ns) \
-                 VALUES ('t-beta', ?1, 'nightly', 'SCHEDULED', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
+                 VALUES ('t-beta', ?1, 'nightly', 'ONE_OFF', 'trade', 50, 1, 1, 1, 1)",
                 rusqlite::params![b],
             )?;
             tx.execute(
-                "INSERT INTO firings VALUES ('f-beta', ?1, 't-beta', 50, 60, 1, 'trade', NULL, NULL)",
+                "INSERT INTO firings VALUES \
+                 ('f-beta', ?1, 't-beta', 50, 60, 1, 'trade', NULL, NULL, NULL, NULL)",
                 rusqlite::params![b],
             )?;
             tx.execute(
@@ -3810,6 +3879,9 @@ async fn trigger_codes() {
             "id": "f-2", "desk_id": alpha, "trigger_id": reborn,
             "occurrence_ns": 200, "accepted_at_ns": 200, "trigger_revision": 2,
             "brief": "late", "context": "ctx",
+            // An invoked firing's identity and its input's size, never the
+            // input itself (`event-triggers` §2.4).
+            "request_id": "r-late", "input_bytes": 5,
             "execution": {
                 "state": "COMPLETE", "daemon_uuid": "daemon-1", "outcome": "EXITED",
                 "exit_code": 0, "executable": "/bin/echo",
@@ -3820,6 +3892,10 @@ async fn trigger_codes() {
         }),
         "the listing carries the summary without the streams"
     );
+    assert!(
+        firings[1].get("request_id").is_none() && firings[1].get("input_bytes").is_none(),
+        "a scheduled firing carries neither: {firings}"
+    );
 
     let (status, body) = call_get(url(&format!("/desks/{alpha}/firings/f-2")), ok);
     assert_eq!(status, 200, "{body}");
@@ -3828,6 +3904,10 @@ async fn trigger_codes() {
     assert_eq!(firing["execution"]["stderr"], "err");
     assert_eq!(firing["execution"]["stdout_bytes"], 3);
     assert_eq!(firing["execution"]["stderr_bytes"], 3);
+    // The single read carries the input whole beside its size (§2.4).
+    assert_eq!(firing["request_id"], "r-late");
+    assert_eq!(firing["input_bytes"], 5);
+    assert_eq!(firing["input"], "hello");
 
     let (status, body) = call_get(url(&format!("/desks/{alpha}/prompts")), ok);
     assert_eq!(status, 200, "{body}");
@@ -3900,6 +3980,149 @@ async fn trigger_codes() {
         404,
         "TRIGGER_NOT_FOUND",
     );
+}
+
+// ---------------------------------------------------------------------------
+// api::invocation_codes (`event-triggers` §8)
+// ---------------------------------------------------------------------------
+
+/// `event-triggers` §2: `201 ACCEPTED` against `200 DUPLICATE`, and every error
+/// path answering the R0 envelope with its own code and status.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invocation_codes() {
+    let served = serve().await;
+    crate::policy::put(
+        &served.store,
+        &serde_json::json!({ "trigger_code_policy": "REQUIRE_APPROVAL" }),
+        crate::store::now_ns(),
+    )
+    .unwrap();
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+
+    let (status, body) = call_post(
+        url("/desks"),
+        ok,
+        Some(("application/json", r#"{"name":"alpha"}"#)),
+    );
+    assert_eq!(status, 201, "{body}");
+    let alpha = json(&body)["id"].as_str().unwrap().to_string();
+    let define = |body: &str| {
+        let (status, body) = call_post(
+            url(&format!("/desks/{alpha}/triggers")),
+            ok,
+            Some(("application/json", body)),
+        );
+        assert_eq!(status, 201, "{body}");
+        json(&body)["id"].as_str().unwrap().to_string()
+    };
+    let invoke = |trigger: &str, body: &str| {
+        call_post(
+            url(&format!("/desks/{alpha}/triggers/{trigger}/invocations")),
+            ok,
+            Some(("application/json", body)),
+        )
+    };
+
+    // --- 201 ACCEPTED, then 200 DUPLICATE on the same request id -----------
+    let review = define(r#"{"name":"review","brief":"read the findings"}"#);
+    let (status, body) = invoke(&review, r#"{"request_id":"r1","input":"three lines"}"#);
+    assert_eq!(status, 201, "{body}");
+    let accepted = json(&body);
+    assert_eq!(accepted["outcome"], "ACCEPTED");
+    assert_eq!(accepted["firing"]["request_id"], "r1");
+    assert_eq!(accepted["firing"]["input"], "three lines");
+    assert_eq!(accepted["firing"]["trigger_id"], review.as_str());
+
+    let (status, body) = invoke(&review, r#"{"request_id":"r1"}"#);
+    assert_eq!(status, 200, "{body}");
+    let duplicate = json(&body);
+    assert_eq!(duplicate["outcome"], "DUPLICATE");
+    assert_eq!(duplicate["firing"], accepted["firing"]);
+
+    // The attribution headers are not read on this route (§2.1): the same call
+    // carrying a firing of another trigger is still accepted.
+    let (status, body) = read(
+        ureq::post(url(&format!(
+            "/desks/{alpha}/triggers/{review}/invocations"
+        )))
+        .header("Authorization", format!("Bearer {CREDENTIAL}"))
+        .header("X-MarketRig-Trigger-Id", "t-elsewhere")
+        .header("X-MarketRig-Firing-Id", "f-elsewhere")
+        .header("Content-Type", "application/json")
+        .send(r#"{"request_id":"r2"}"#),
+    );
+    assert_eq!(status, 201, "{body}");
+
+    // --- 400 INVOCATION_INVALID, writing nothing ---------------------------
+    for body in [
+        "{}",
+        r#"{"request_id":""}"#,
+        r#"{"request_id":"has space"}"#,
+        r#"{"request_id":5}"#,
+        r#"{"request_id":"r3","input":5}"#,
+        "not json",
+        "[]",
+    ] {
+        expect_envelope(invoke(&review, body), 400, "INVOCATION_INVALID");
+    }
+
+    // --- 404 TRIGGER_NOT_FOUND ---------------------------------------------
+    expect_envelope(
+        invoke("t-nowhere", r#"{"request_id":"r4"}"#),
+        404,
+        "TRIGGER_NOT_FOUND",
+    );
+
+    // --- 409 TRIGGER_DISABLED ----------------------------------------------
+    let off = define(r#"{"name":"off","brief":"b"}"#);
+    let (status, body) = call_patch(
+        url(&format!("/desks/{alpha}/triggers/{off}")),
+        ok,
+        r#"{"enabled":false}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    expect_envelope(
+        invoke(&off, r#"{"request_id":"r5"}"#),
+        409,
+        "TRIGGER_DISABLED",
+    );
+
+    // --- 409 TRIGGER_UNAPPROVED --------------------------------------------
+    let gated =
+        define(r#"{"name":"gated","brief":"b","code":{"source":"print(1)","suffix":".py"}}"#);
+    expect_envelope(
+        invoke(&gated, r#"{"request_id":"r6"}"#),
+        409,
+        "TRIGGER_UNAPPROVED",
+    );
+
+    // --- 409 TRIGGER_ELAPSED ------------------------------------------------
+    // A one-off two seconds out, disabled at once and re-enabled after its
+    // instant: the schedule never fired it, so it still owns it (§2.2).
+    let soon =
+        chrono::DateTime::from_timestamp_nanos(crate::store::now_ns() + 2_000_000_000).to_rfc3339();
+    let held = define(&format!(
+        r#"{{"name":"held","brief":"b","schedule":{{"at":"{soon}"}}}}"#
+    ));
+    let one = url(&format!("/desks/{alpha}/triggers/{held}"));
+    assert_eq!(call_patch(one.clone(), ok, r#"{"enabled":false}"#).0, 200);
+    tokio::time::sleep(std::time::Duration::from_millis(2_100)).await;
+    assert_eq!(call_patch(one.clone(), ok, r#"{"enabled":true}"#).0, 200);
+    expect_envelope(
+        invoke(&held, r#"{"request_id":"r7"}"#),
+        409,
+        "TRIGGER_ELAPSED",
+    );
+
+    // Every refusal wrote nothing: `r1` and `r2` alone.
+    let firings: i64 = served
+        .store
+        .call(|c| c.query_row("SELECT count(*) FROM firings", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(firings, 2);
 }
 
 #[cfg(test)]

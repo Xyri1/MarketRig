@@ -126,6 +126,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/007_openviking.sql"),
     include_str!("store/008_embedding_dimension.sql"),
     include_str!("store/009_hithink.sql"),
+    include_str!("store/010_invocation.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -565,9 +566,9 @@ fn trigger_migration_applies() {
             for (id, deleted) in [("t1", "9"), ("t2", "NULL")] {
                 tx.execute(
                     &format!(
-                        "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, \
+                        "INSERT INTO triggers (id, desk_id, name, recurrence, brief, \
                          at_ns, enabled, revision, created_at_ns, updated_at_ns, deleted_at_ns) \
-                         VALUES ('{id}','0199','nightly','SCHEDULED','ONE_OFF','b',5,1,1,1,1,{deleted})"
+                         VALUES ('{id}','0199','nightly','ONE_OFF','b',5,1,1,1,1,{deleted})"
                     ),
                     [],
                 )?;
@@ -585,9 +586,9 @@ fn trigger_migration_applies() {
     assert!(
         store
             .unit(|tx| tx.execute(
-                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                  enabled, revision, created_at_ns, updated_at_ns) \
-                 VALUES ('t3','0199','nightly','SCHEDULED','ONE_OFF','b',5,1,1,1,1)",
+                 VALUES ('t3','0199','nightly','ONE_OFF','b',5,1,1,1,1)",
                 [],
             ))
             .is_err(),
@@ -1522,4 +1523,208 @@ fn approval_migration_applies() {
         })
         .unwrap();
     assert_eq!(index, "operational_events_tail");
+}
+
+// ---------------------------------------------------------------------------
+// store::invocation_migration_applies (`event-triggers` §8)
+// ---------------------------------------------------------------------------
+
+/// Migration 10 (`event-triggers` §4): a fresh database carries the rebuilt
+/// `triggers` and `firings`, and a migration-9 database upgrades in place with
+/// every trigger, firing, execution, and trading action intact.
+#[cfg(test)]
+#[test]
+fn invocation_migration_applies() {
+    let user_version = |store: &Store| {
+        store.call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+    };
+    let columns = |store: &Store, table: &'static str| {
+        store
+            .call(move |c| {
+                c.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY name")?
+                    .query_map([table], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+    };
+    let indexes = |store: &Store| {
+        store
+            .call(|c| {
+                c.prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL \
+                     ORDER BY name",
+                )?
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+    };
+
+    // A fresh database: `source` is gone, the two input columns are there, and
+    // the two partial unique indexes replace the table UNIQUE.
+    let (_dir, store) = open_temp();
+    assert_eq!(user_version(&store).unwrap(), 10);
+    assert_eq!(MIGRATIONS.len(), 10);
+    assert!(!columns(&store, "triggers").contains(&"source".to_string()));
+    for column in ["request_id", "input"] {
+        assert!(columns(&store, "firings").contains(&column.to_string()));
+    }
+    for index in ["firings_by_trigger", "firings_invoked", "firings_scheduled"] {
+        assert!(indexes(&store).contains(&index.to_string()), "{index}");
+    }
+
+    // The relaxed CHECKs: either recurrence may carry its shape or nothing, and
+    // the two shapes never mix.
+    store
+        .unit(|tx| {
+            tx.execute(
+                "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+                 VALUES ('d1','alpha','READY','/desks/alpha',1,2)",
+                [],
+            )
+        })
+        .unwrap();
+    // `shape` is the schedule columns and their values; every row is otherwise
+    // enabled, revision 1, created and updated at 1.
+    let insert = |id: &str, recurrence: &str, columns: &str, values: &str| {
+        let sql = format!(
+            "INSERT INTO triggers (id, desk_id, name, recurrence, brief{columns}, enabled, \
+             revision, created_at_ns, updated_at_ns) \
+             VALUES ('{id}','d1','{id}','{recurrence}','b'{values},1,1,1,1)"
+        );
+        store.unit(move |tx| tx.execute(&sql, []))
+    };
+    let rule = (
+        ", rrule, dtstart, tz",
+        ",'FREQ=DAILY','2026-09-03T09:30:00','UTC'",
+    );
+    for (id, recurrence, columns, values) in [
+        ("s1", "ONE_OFF", ", at_ns", ",5"),
+        ("s2", "ONE_OFF", "", ""),
+        ("s3", "RECURRING", "", ""),
+        ("s4", "RECURRING", rule.0, rule.1),
+    ] {
+        insert(id, recurrence, columns, values)
+            .unwrap_or_else(|e| panic!("{id} must be accepted: {e}"));
+    }
+    for (id, recurrence, columns, values) in [
+        // a one-off carrying a rule, and a recurring carrying an instant
+        ("x1", "ONE_OFF", rule.0, rule.1),
+        ("x2", "RECURRING", ", at_ns", ",5"),
+        // half the recurring trio
+        ("x3", "RECURRING", ", rrule", ",'FREQ=DAILY'"),
+    ] {
+        assert!(
+            insert(id, recurrence, columns, values).is_err(),
+            "{id} must be refused"
+        );
+    }
+    // An input without a request id is not a firing.
+    assert!(
+        store
+            .unit(|tx| tx.execute(
+                "INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+                 trigger_revision, brief, input) VALUES ('f9','d1','s1',1,1,1,'b','hello')",
+                [],
+            ))
+            .is_err(),
+        "an input without a request id must be refused"
+    );
+    drop(store);
+
+    // A migration-9 database upgrades in place, every row intact.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..9] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             INSERT INTO code_snapshots (id, desk_id, source, suffix, argv, timeout_secs, \
+                 fingerprint, approval, decided_at_ns, created_at_ns) \
+               VALUES ('s0','0199','print(1)','.py','[\"{script}\"]',300,'ff','APPROVED',1100,1100);
+             INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                 enabled, revision, code_snapshot_id, next_occurrence_ns, created_at_ns, \
+                 updated_at_ns) \
+               VALUES ('t0','0199','morning','SCHEDULED','ONE_OFF','Check the tape.',9000, \
+                 1,3,'s0',9000,1100,1100);
+             INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+                 trigger_revision, brief, code_snapshot_id) \
+               VALUES ('f0','0199','t0',9000,9001,3,'Check the tape.','s0');
+             INSERT INTO executions (firing_id, desk_id, daemon_uuid, state, outcome, \
+                 exit_code, started_at_ns, finished_at_ns) \
+               VALUES ('f0','0199','dae','COMPLETE','EXITED',0,9002,9003);
+             INSERT INTO trading_actions (desk_id, action_id, id, kind, source, trigger_id, \
+                 firing_id, request, outcome, approval, decided_at_ns, created_at_ns) \
+               VALUES ('0199','a0','i0','SUBMIT','TRIGGER','t0','f0','{\"q\":\"1\"}', \
+                 '{\"status\":\"FILLED\"}','ALWAYS_ALLOW',1200,1200);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 9i64).unwrap();
+    }
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(user_version(&store).unwrap(), 10);
+    assert!(!columns(&store, "triggers").contains(&"source".to_string()));
+    let carried: (String, i64, i64, String, i64, String, String) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT t.name, t.revision, t.next_occurrence_ns, f.brief, f.accepted_at_ns, \
+                 e.outcome, a.action_id \
+                 FROM triggers t JOIN firings f ON f.trigger_id = t.id \
+                 JOIN executions e ON e.firing_id = f.id \
+                 JOIN trading_actions a ON a.firing_id = f.id",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        (
+            "morning".into(),
+            3,
+            9000,
+            "Check the tape.".into(),
+            9001,
+            "EXITED".into(),
+            "a0".into()
+        )
+    );
+    // The two rebuilt tables are still the ones `executions` and
+    // `trading_actions` name, and nothing dangles.
+    for (table, parent) in [("executions", "firings"), ("trading_actions", "firings")] {
+        let names: Vec<String> = store
+            .call(move |c| {
+                c.prepare("SELECT \"table\" FROM pragma_foreign_key_list(?1)")?
+                    .query_map([table], |r| r.get::<_, String>(0))?
+                    .collect()
+            })
+            .unwrap();
+        assert!(names.contains(&parent.to_string()), "{table}: {names:?}");
+    }
+    let dangling: i64 = store
+        .call(|c| {
+            c.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(dangling, 0, "PRAGMA foreign_key_check must be empty");
+    for index in ["firings_invoked", "firings_scheduled"] {
+        assert!(indexes(&store).contains(&index.to_string()), "{index}");
+    }
 }

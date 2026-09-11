@@ -29,6 +29,11 @@ pub struct FiringRow {
     pub brief: String,
     pub context: Option<String>,
     pub code_snapshot_id: Option<String>,
+    /// The caller's request identity on an invoked firing, `None` on a
+    /// scheduled one (`event-triggers` §2.1).
+    pub request_id: Option<String>,
+    /// The invocation's raw input, stored verbatim and never parsed (§2.1).
+    pub input: Option<String>,
 }
 
 /// The firing of this desk with this id, or `None`. Takes a `Connection`, so a
@@ -40,7 +45,8 @@ pub fn load_firing(
 ) -> rusqlite::Result<Option<FiringRow>> {
     conn.query_row(
         "SELECT id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, trigger_revision, \
-         brief, context, code_snapshot_id FROM firings WHERE desk_id = ?1 AND id = ?2",
+         brief, context, code_snapshot_id, request_id, input \
+         FROM firings WHERE desk_id = ?1 AND id = ?2",
         params![desk_id, firing_id],
         |r| {
             Ok(FiringRow {
@@ -53,6 +59,8 @@ pub fn load_firing(
                 brief: r.get(6)?,
                 context: r.get(7)?,
                 code_snapshot_id: r.get(8)?,
+                request_id: r.get(9)?,
+                input: r.get(10)?,
             })
         },
     )
@@ -94,6 +102,7 @@ pub fn insert_result_prompt(
         "accepted_at_ns": firing.accepted_at_ns,
         "brief": firing.brief,
         "context": firing.context,
+        "invocation": prompt_invocation(firing),
         "execution": execution,
     });
     tx.execute(
@@ -102,6 +111,26 @@ pub fn insert_result_prompt(
         params![id, firing.desk_id, payload.to_string(), now_ns],
     )?;
     Ok(id)
+}
+
+/// The `TRIGGER_RESULT` payload's `invocation` (`event-triggers` §3): the
+/// request identity, the input's size, and the input itself only while it fits
+/// the brief's own bound, so a prompt stays one bounded text. A scheduled firing
+/// carries a literal `null`, as `execution` does on a code-free one.
+fn prompt_invocation(firing: &FiringRow) -> Value {
+    let Some(request_id) = firing.request_id.as_deref() else {
+        return Value::Null;
+    };
+    let mut invocation = serde_json::Map::new();
+    invocation.insert("request_id".to_string(), json!(request_id));
+    invocation.insert(
+        "input_bytes".to_string(),
+        json!(firing.input.as_deref().map_or(0, str::len)),
+    );
+    if let Some(input) = firing.input.as_deref().filter(|i| i.len() <= INPUT_INLINE) {
+        invocation.insert("input".to_string(), json!(input));
+    }
+    Value::Object(invocation)
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +144,12 @@ const ARGV_MAX: usize = 64;
 const ARG_MAX: usize = 4_096;
 const BRIEF_MAX: usize = 16_384;
 const CONTEXT_MAX: usize = 65_536;
+/// The invocation's own bounds (`event-triggers` §2.1, §3): the request
+/// identity, the input, and how much of the input a result prompt carries
+/// inline — the brief's bound, so the prompt stays one bounded text.
+const REQUEST_ID_MAX: usize = 128;
+const INPUT_MAX: usize = 262_144;
+const INPUT_INLINE: usize = BRIEF_MAX;
 const TIMEOUT_DEFAULT: i64 = 300;
 /// The whole argument the script's absolute path replaces at spawn (§4.3).
 const SCRIPT: &str = "{script}";
@@ -317,26 +352,22 @@ pub fn decide(
         // waiting (§3.2). A denial projects nothing, which it already had.
         let owner = tx
             .query_row(
-                "SELECT id, recurrence, at_ns, rrule, dtstart, tz, enabled, deleted_at_ns \
+                "SELECT id, at_ns, rrule, dtstart, tz, enabled, deleted_at_ns \
                  FROM triggers WHERE code_snapshot_id = ?1",
                 params![snapshot],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
-                        Schedule::from_row(
-                            &r.get::<_, String>(1)?,
-                            r.get(2)?,
-                            r.get(3)?,
-                            r.get(4)?,
-                            r.get(5)?,
-                        ),
-                        r.get::<_, i64>(6)? == 1 && r.get::<_, Option<i64>>(7)?.is_none(),
+                        Schedule::from_row(r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+                        r.get::<_, i64>(5)? == 1 && r.get::<_, Option<i64>>(6)?.is_none(),
                     ))
                 },
             )
             .optional()?;
         if let Some((trigger_id, schedule, due)) = owner {
-            let next = projection(due, Some(decided), || schedule.next_after(now_ns));
+            let next = projection(due, Some(decided), || {
+                schedule.and_then(|s| s.next_after(now_ns))
+            });
             tx.execute(
                 "UPDATE triggers SET next_occurrence_ns = ?2 WHERE id = ?1",
                 params![trigger_id, next],
@@ -369,6 +400,17 @@ pub enum TriggerError {
     PromptNotFound(String),
     /// Creation needs a `READY` desk (§8).
     NotReady(String),
+    /// An invocation's own form failure (`event-triggers` §2.1).
+    InvocationInvalid(String),
+    /// The target is disabled; a consumed one-off names the firing that
+    /// consumed it (`event-triggers` §2.2).
+    Disabled {
+        consumed_by: Option<String>,
+    },
+    /// The target's code snapshot is `PENDING` or `DENIED` (§2.2).
+    Unapproved,
+    /// A scheduled one-off whose instant has passed: the schedule owns it (§2.2).
+    Elapsed,
     Desk(DeskError),
 }
 
@@ -381,6 +423,10 @@ impl TriggerError {
             TriggerError::FiringNotFound(_) => "FIRING_NOT_FOUND",
             TriggerError::PromptNotFound(_) => "PROMPT_NOT_FOUND",
             TriggerError::NotReady(_) => "DESK_NOT_READY",
+            TriggerError::InvocationInvalid(_) => "INVOCATION_INVALID",
+            TriggerError::Disabled { .. } => "TRIGGER_DISABLED",
+            TriggerError::Unapproved => "TRIGGER_UNAPPROVED",
+            TriggerError::Elapsed => "TRIGGER_ELAPSED",
             TriggerError::Desk(e) => e.code(),
         }
     }
@@ -400,6 +446,24 @@ impl fmt::Display for TriggerError {
             TriggerError::NotReady(state) => write!(
                 f,
                 "Only a READY desk can define triggers; this desk is {state}."
+            ),
+            TriggerError::InvocationInvalid(what) => {
+                write!(f, "The invocation is not well formed: {what}")
+            }
+            TriggerError::Disabled { consumed_by: None } => {
+                write!(f, "This trigger is disabled.")
+            }
+            TriggerError::Disabled {
+                consumed_by: Some(firing),
+            } => write!(f, "This trigger is consumed by firing {firing}."),
+            TriggerError::Unapproved => write!(
+                f,
+                "This trigger's code is not approved, so it cannot be invoked."
+            ),
+            TriggerError::Elapsed => write!(
+                f,
+                "This one-off trigger's scheduled instant has passed; reschedule it \
+                 or detach its schedule."
             ),
             TriggerError::Desk(e) => write!(f, "{e}"),
         }
@@ -456,13 +520,7 @@ fn trigger_select(with_source: bool) -> String {
 /// The §8 Trigger. `with_source` is the single read; the listing reports the
 /// snapshot's size instead (§4.1).
 fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
-    let schedule = Schedule::from_row(
-        &r.get::<_, String>(3)?,
-        r.get(6)?,
-        r.get(7)?,
-        r.get(8)?,
-        r.get(9)?,
-    );
+    let schedule = Schedule::from_row(r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?);
     let code = match r.get::<_, Option<String>>(16)? {
         None => Value::Null,
         Some(snapshot_id) => {
@@ -493,11 +551,11 @@ fn trigger_resource(r: &Row<'_>, with_source: bool) -> rusqlite::Result<Value> {
         "id": r.get::<_, String>(0)?,
         "desk_id": r.get::<_, String>(1)?,
         "name": r.get::<_, String>(2)?,
-        "source": "SCHEDULED",
-        "recurrence": schedule.recurrence(),
+        "recurrence": r.get::<_, String>(3)?,
         "brief": r.get::<_, String>(4)?,
         "context": r.get::<_, Option<String>>(5)?,
-        "schedule": schedule.to_json(),
+        // Omitted when the trigger has no schedule (`event-triggers` §1).
+        "schedule": schedule.map(|s| s.to_json()),
         "enabled": r.get::<_, i64>(10)? == 1,
         "revision": r.get::<_, i64>(11)?,
         "next_occurrence_ns": r.get::<_, Option<i64>>(12)?,
@@ -534,13 +592,17 @@ fn firing_select(with_streams: bool) -> String {
          f.accepted_at_ns, f.trigger_revision, f.brief, f.context, f.code_snapshot_id, \
          e.state, e.daemon_uuid, e.outcome, e.exit_code, e.error, e.executable, {}, \
          e.stdout_truncated, e.stderr_truncated, e.started_at_ns, e.finished_at_ns, \
-         length(e.stdout), length(e.stderr) \
+         length(e.stdout), length(e.stderr), f.request_id, \
+         length(CAST(f.input AS BLOB)), {} \
          FROM firings f LEFT JOIN executions e ON e.firing_id = f.id",
         if with_streams {
             "e.stdout, e.stderr"
         } else {
             "NULL, NULL"
-        }
+        },
+        // The input rides with the streams: the single read carries it, the
+        // per-trigger listing reports its size alone (`event-triggers` §2.4).
+        if with_streams { "f.input" } else { "NULL" }
     )
 }
 
@@ -585,6 +647,11 @@ fn firing_resource(r: &Row<'_>, with_streams: bool) -> rusqlite::Result<Value> {
         "brief": r.get::<_, String>(6)?,
         "context": r.get::<_, Option<String>>(7)?,
         "code_snapshot_id": r.get::<_, Option<String>>(8)?,
+        // Absent on a scheduled firing, which has no request identity and no
+        // input (`event-triggers` §2.4).
+        "request_id": r.get::<_, Option<String>>(23)?,
+        "input_bytes": r.get::<_, Option<i64>>(24)?,
+        "input": r.get::<_, Option<String>>(25)?,
         "execution": execution,
     })))
 }
@@ -625,13 +692,15 @@ fn context_of(value: &Value) -> Result<Option<String>, String> {
     }
 }
 
-/// The schedule's four columns (§7); the row's CHECKs want exactly one shape.
+/// The schedule's four columns (§7); the row's CHECKs want at most one shape,
+/// and a trigger with no schedule carries none of them (`event-triggers` §4).
 fn schedule_columns(
-    schedule: &Schedule,
+    schedule: Option<&Schedule>,
 ) -> (Option<i64>, Option<String>, Option<String>, Option<String>) {
     match schedule {
-        Schedule::OneOff { at_ns } => (Some(*at_ns), None, None, None),
-        Schedule::Recurring { rrule, dtstart, tz } => (
+        None => (None, None, None, None),
+        Some(Schedule::OneOff { at_ns }) => (Some(*at_ns), None, None, None),
+        Some(Schedule::Recurring { rrule, dtstart, tz }) => (
             None,
             Some(rrule.clone()),
             Some(dtstart.clone()),
@@ -673,10 +742,14 @@ pub fn create(
         None => None,
         Some(value) => context_of(value).map_err(invalid)?,
     };
-    let schedule = fields
-        .get("schedule")
-        .ok_or_else(|| invalid("`schedule` is required.".to_string()))
-        .and_then(|v| Schedule::parse(v, now_ns).map_err(invalid))?;
+    // Optional: a trigger with no schedule is invocable and never due
+    // (`event-triggers` §1), and with none given it is RECURRING — the
+    // recurrence a producer can invoke more than once.
+    let schedule = match fields.get("schedule") {
+        None => None,
+        Some(value) => Schedule::parse(value, now_ns).map_err(invalid)?,
+    };
+    let recurrence = schedule.as_ref().map_or("RECURRING", Schedule::recurrence);
     let code = match fields.get("code") {
         None | Some(Value::Null) => None,
         Some(value) => Some(Snapshot::parse(value).map_err(invalid)?),
@@ -686,7 +759,7 @@ pub fn create(
     let (read_id, desk_owned, taken) = (id.clone(), desk_id.to_string(), name.clone());
     // Projected before the unit: the candidate scan (§2) never holds the write
     // transaction on the create path.
-    let next = schedule.next_after(now_ns);
+    let next = schedule.as_ref().and_then(|s| s.next_after(now_ns));
     let created = store.unit(move |tx| {
         let snapshot = match &code {
             None => None,
@@ -699,17 +772,17 @@ pub fn create(
         // A fresh trigger is enabled and undeleted; only its snapshot can
         // withhold the projection (R5 feature SPEC §3.2).
         let next = projection(true, approval, || next);
-        let (at_ns, rrule, dtstart, tz) = schedule_columns(&schedule);
+        let (at_ns, rrule, dtstart, tz) = schedule_columns(schedule.as_ref());
         tx.execute(
-            "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, context, \
+            "INSERT INTO triggers (id, desk_id, name, recurrence, brief, context, \
              at_ns, rrule, dtstart, tz, enabled, revision, code_snapshot_id, \
              next_occurrence_ns, created_at_ns, updated_at_ns) \
-             VALUES (?1, ?2, ?3, 'SCHEDULED', ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1, ?11, ?12, ?13, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 1, 1, ?11, ?12, ?13, ?13)",
             params![
                 id,
                 desk_owned,
                 name,
-                schedule.recurrence(),
+                recurrence,
                 brief,
                 context,
                 at_ns,
@@ -768,7 +841,8 @@ pub fn get(store: &Store, desk_id: &str, trigger_id: &str) -> Result<Value, Trig
 struct Patch {
     brief: Option<String>,
     context: Option<Option<String>>,
-    schedule: Option<Schedule>,
+    /// `schedule: null` detaches one (`event-triggers` §1).
+    schedule: Option<Option<Schedule>>,
     enabled: Option<bool>,
     code: Option<Option<Snapshot>>,
 }
@@ -833,13 +907,8 @@ pub fn patch(
                     params![desk, id],
                     |r| {
                         Ok((
-                            Schedule::from_row(
-                                &r.get::<_, String>(0)?,
-                                r.get(3)?,
-                                r.get(4)?,
-                                r.get(5)?,
-                                r.get(6)?,
-                            ),
+                            Schedule::from_row(r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?),
+                            r.get::<_, String>(0)?,
                             r.get::<_, String>(1)?,
                             r.get::<_, Option<String>>(2)?,
                             r.get::<_, i64>(7)? == 1,
@@ -855,6 +924,7 @@ pub fn patch(
             };
             let (
                 row_schedule,
+                row_recurrence,
                 row_brief,
                 row_context,
                 row_enabled,
@@ -863,6 +933,11 @@ pub fn patch(
                 row_approval,
             ) = current;
             let schedule = patch.schedule.unwrap_or(row_schedule);
+            // Attaching a schedule names the recurrence; detaching one keeps it
+            // (`event-triggers` §1).
+            let recurrence = schedule
+                .as_ref()
+                .map_or(row_recurrence, |s| s.recurrence().to_string());
             let enabled = patch.enabled.unwrap_or(row_enabled);
             let same_code = |code: &Snapshot| {
                 row_fingerprint.as_deref()
@@ -884,13 +959,16 @@ pub fn patch(
                     (Some(snapshot_id), Some(approval))
                 }
             };
-            let (at_ns, rrule, dtstart, tz) = schedule_columns(&schedule);
-            // Disabled or undecided is never due; otherwise the projection is
-            // recomputed from the definition's own anchor against now (§2).
+            let (at_ns, rrule, dtstart, tz) = schedule_columns(schedule.as_ref());
+            // Disabled, undecided, or schedule-less is never due; otherwise the
+            // projection is recomputed from the definition's own anchor against
+            // now (§2).
             // ponytail: the scan runs inside the unit because the row's schedule
             // is read here; it is bounded at 100,000 candidates (R2-1's ceiling,
             // a persisted cursor is the upgrade).
-            let next = projection(enabled, approval.as_deref(), || schedule.next_after(now_ns));
+            let next = projection(enabled, approval.as_deref(), || {
+                schedule.as_ref().and_then(|s| s.next_after(now_ns))
+            });
             tx.execute(
                 "UPDATE triggers SET brief = ?3, context = ?4, recurrence = ?5, at_ns = ?6, \
                  rrule = ?7, dtstart = ?8, tz = ?9, enabled = ?10, code_snapshot_id = ?11, \
@@ -901,7 +979,7 @@ pub fn patch(
                     id,
                     patch.brief.unwrap_or(row_brief),
                     patch.context.unwrap_or(row_context),
-                    schedule.recurrence(),
+                    recurrence,
                     at_ns,
                     rrule,
                     dtstart,
@@ -940,6 +1018,214 @@ pub fn delete(
             read_trigger(tx, &desk, &id, true)
         })?
         .ok_or_else(|| TriggerError::NotFound(trigger_id.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Invocation (`event-triggers` §2)
+// ---------------------------------------------------------------------------
+
+/// What one accepted or replayed invocation was (`event-triggers` §2.4). The
+/// route turns `accepted` into `201 ACCEPTED` or `200 DUPLICATE` and wakes the
+/// executor or the dispatcher exactly as the scheduler's pass does.
+#[derive(Debug)]
+pub struct Invocation {
+    pub accepted: bool,
+    pub has_code: bool,
+    pub firing: Value,
+}
+
+/// §2.1's request form. `Err` is the clause `INVOCATION_INVALID` carries;
+/// nothing here touches the database, so a malformed request writes nothing.
+fn invocation_form(body: &str) -> Result<(String, Option<String>), TriggerError> {
+    let invalid = TriggerError::InvocationInvalid;
+    let value: Value = serde_json::from_str(body)
+        .map_err(|e| invalid(format!("the request body is not JSON: {e}.")))?;
+    let fields = value
+        .as_object()
+        .ok_or_else(|| invalid("the request body must be a JSON object.".to_string()))?;
+    let request_id = fields
+        .get("request_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("`request_id` must be a string.".to_string()))?
+        .to_string();
+    if request_id.is_empty() || request_id.len() > REQUEST_ID_MAX {
+        return Err(invalid(format!(
+            "`request_id` must be 1-{REQUEST_ID_MAX} bytes."
+        )));
+    }
+    if !request_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(invalid(
+            "`request_id` is letters, digits, and `. _ : -`.".to_string(),
+        ));
+    }
+    let input = match fields.get("input") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(input)) if input.len() <= INPUT_MAX => Some(input.clone()),
+        Some(Value::String(_)) => {
+            return Err(invalid(format!(
+                "`input` must be at most {INPUT_MAX} bytes."
+            )));
+        }
+        Some(_) => return Err(invalid("`input` must be a string or null.".to_string())),
+    };
+    Ok((request_id, input))
+}
+
+/// `POST /desks/{desk_id}/triggers/{trigger_id}/invocations` (§2.2): duplicate,
+/// target, eligibility, firing, advance — one `BEGIN IMMEDIATE` unit with
+/// `now_ns` read once by the caller. A refusal writes nothing and buffers
+/// nothing, and no backlog is ever read (ET-4, ET-6).
+pub fn invoke(
+    store: &Store,
+    desk_id: &str,
+    trigger_id: &str,
+    body: &str,
+    now_ns: i64,
+) -> Result<Invocation, TriggerError> {
+    desk::get(store, desk_id)?;
+    let (request_id, input) = invocation_form(body)?;
+    let (desk, id, not_found) = (
+        desk_id.to_string(),
+        trigger_id.to_string(),
+        trigger_id.to_string(),
+    );
+    store.unit(move |tx| {
+        // 1. Duplicate first: an accepted request keeps its answer whatever the
+        //    trigger has become since (ET-4).
+        if let Some(firing_id) = tx
+            .query_row(
+                "SELECT id FROM firings WHERE desk_id = ?1 AND trigger_id = ?2 \
+                 AND request_id = ?3",
+                params![desk, id, request_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            let firing = read_firing(tx, &desk, &firing_id)?;
+            return Ok(Ok(Invocation {
+                accepted: false,
+                has_code: firing["code_snapshot_id"].is_string(),
+                firing,
+            }));
+        }
+        // 2. Target.
+        let Some((name, recurrence, at_ns, enabled, brief, context, revision, snapshot, approval)) =
+            tx.query_row(
+                "SELECT t.name, t.recurrence, t.at_ns, t.enabled, t.brief, t.context, \
+                 t.revision, t.code_snapshot_id, c.approval \
+                 FROM triggers t LEFT JOIN code_snapshots c ON c.id = t.code_snapshot_id \
+                 WHERE t.desk_id = ?1 AND t.id = ?2 AND t.deleted_at_ns IS NULL",
+                params![desk, id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<i64>>(2)?,
+                        r.get::<_, i64>(3)? == 1,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, Option<String>>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(Err(TriggerError::NotFound(not_found)));
+        };
+        let one_off = recurrence == "ONE_OFF";
+        // The one-off's own firing, read once: it names the consuming firing in
+        // a refusal, and it is what says the schedule is already spent.
+        let consumed_by = match one_off {
+            true => tx
+                .query_row(
+                    "SELECT id FROM firings WHERE desk_id = ?1 AND trigger_id = ?2 \
+                     ORDER BY accepted_at_ns, id LIMIT 1",
+                    params![desk, id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+            false => None,
+        };
+        // 3. Eligibility, on the scheduler's own join.
+        if !enabled {
+            return Ok(Err(TriggerError::Disabled { consumed_by }));
+        }
+        if matches!(approval.as_deref(), Some("PENDING" | "DENIED")) {
+            return Ok(Err(TriggerError::Unapproved));
+        }
+        // ET-7's deadline: while a scheduled one-off's instant has passed and
+        // the schedule has not resolved it, the schedule owns it — only an
+        // explicit reschedule or detach makes it invocable again. A one-off the
+        // schedule already fired is past that: re-enabling it is the explicit
+        // statement that it may fire once more (§1).
+        if one_off && consumed_by.is_none() && at_ns.is_some_and(|at| at <= now_ns) {
+            return Ok(Err(TriggerError::Elapsed));
+        }
+        // 4. The firing, with the request's identity and its input.
+        let firing = FiringRow {
+            id: Uuid::now_v7().to_string(),
+            desk_id: desk.clone(),
+            trigger_id: id.clone(),
+            occurrence_ns: now_ns,
+            accepted_at_ns: now_ns,
+            trigger_revision: revision,
+            brief,
+            context,
+            code_snapshot_id: snapshot,
+            request_id: Some(request_id.clone()),
+            input,
+        };
+        tx.execute(
+            "INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
+             trigger_revision, brief, context, code_snapshot_id, request_id, input) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                firing.id,
+                firing.desk_id,
+                firing.trigger_id,
+                firing.occurrence_ns,
+                firing.accepted_at_ns,
+                firing.trigger_revision,
+                firing.brief,
+                firing.context,
+                firing.code_snapshot_id,
+                firing.request_id,
+                firing.input,
+            ],
+        )?;
+        let has_code = firing.code_snapshot_id.is_some();
+        if !has_code {
+            insert_result_prompt(tx, &firing, &name, None, now_ns)?;
+        }
+        // 5. Advance: a one-off is consumed here, a recurring trigger keeps its
+        //    schedule, projection, and anchor (ET-7).
+        if one_off {
+            tx.execute(
+                "UPDATE triggers SET enabled = 0, next_occurrence_ns = NULL WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        let firing = read_firing(tx, &desk, &firing.id)?;
+        Ok(Ok(Invocation {
+            accepted: true,
+            has_code,
+            firing,
+        }))
+    })?
+}
+
+/// The §8 Firing with its input, read back inside the unit that wrote it.
+fn read_firing(conn: &Connection, desk_id: &str, firing_id: &str) -> rusqlite::Result<Value> {
+    conn.query_row(
+        &format!("{} WHERE f.desk_id = ?1 AND f.id = ?2", firing_select(true)),
+        params![desk_id, firing_id],
+        |r| firing_resource(r, true),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,13 +1398,14 @@ fn result_prompt_payload() {
                 [],
             )?;
             tx.execute(
-                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                  enabled, revision, created_at_ns, updated_at_ns) \
-                 VALUES ('t1','d1','nightly','SCHEDULED','ONE_OFF','look at AAPL',50,1,1,1,1)",
+                 VALUES ('t1','d1','nightly','ONE_OFF','look at AAPL',50,1,1,1,1)",
                 [],
             )?;
             tx.execute(
-                "INSERT INTO firings VALUES ('f1','d1','t1',50,60,1,'look at AAPL',NULL,NULL)",
+                "INSERT INTO firings VALUES \
+                 ('f1','d1','t1',50,60,1,'look at AAPL',NULL,NULL,NULL,NULL)",
                 [],
             )
         })
@@ -1191,6 +1478,7 @@ fn result_prompt_payload() {
             "trigger_id": "t1", "trigger_name": "nightly",
             "firing_id": "f1", "occurrence_ns": 50, "accepted_at_ns": 60,
             "brief": "look at AAPL", "context": null,
+            "invocation": null,
             "execution": null,
         })
     );
@@ -1548,5 +1836,633 @@ fn a_decision_is_scoped_and_once() {
             .count(),
         1,
         "a refused decision writes nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Trigger invocation (`event-triggers` §8)
+// ---------------------------------------------------------------------------
+
+/// A create body with no schedule at all.
+#[cfg(test)]
+fn free_body(name: &str) -> String {
+    format!(r#"{{"name":"{name}","brief":"look at AAPL"}}"#)
+}
+
+/// §1: a trigger may carry a schedule or none, `schedule: null` detaches one,
+/// and every R2 rejection still answers `TRIGGER_INVALID` when one is given.
+#[cfg(test)]
+#[test]
+fn schedule_optional() {
+    let (_dir, store) = desk_store();
+
+    // Created with no schedule: RECURRING, never due, no `schedule` key.
+    let free = create(&store, "d1", &free_body("review"), T0).unwrap();
+    let free_id = free["id"].as_str().unwrap().to_string();
+    assert_eq!(free["recurrence"], "RECURRING");
+    assert!(
+        free.get("schedule").is_none() && free.get("next_occurrence_ns").is_none(),
+        "no schedule, no projection: {free}"
+    );
+    assert!(
+        free.get("source").is_none(),
+        "a trigger has no source: {free}"
+    );
+
+    // Attaching one names the recurrence and arms the projection.
+    let armed = T0 + 3_600 * SECOND;
+    let attached = patch(
+        &store,
+        "d1",
+        &free_id,
+        &format!(r#"{{"schedule":{{"at":"{}"}}}}"#, rfc3339(armed)),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(attached["recurrence"], "ONE_OFF");
+    assert_eq!(attached["schedule"], json!({ "at_ns": armed }));
+    assert_eq!(attached["next_occurrence_ns"], armed);
+
+    // Detaching keeps the recurrence and takes the projection back to NULL.
+    let detached = patch(&store, "d1", &free_id, r#"{"schedule":null}"#, T0).unwrap();
+    assert_eq!(detached["recurrence"], "ONE_OFF", "{detached}");
+    assert!(
+        detached.get("schedule").is_none() && detached.get("next_occurrence_ns").is_none(),
+        "detaching recomputes the projection as NULL: {detached}"
+    );
+
+    // A one-off created with its instant, and a recurring one created with its
+    // rule, both still work; so does a schedule-less one-off by detachment.
+    let once = create(
+        &store,
+        "d1",
+        &format!(
+            r#"{{"name":"once","brief":"b","schedule":{{"at":"{}"}}}}"#,
+            rfc3339(armed)
+        ),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(once["recurrence"], "ONE_OFF");
+    let ticking = create(
+        &store,
+        "d1",
+        r#"{"name":"tick","brief":"b","schedule":
+            {"rrule":"FREQ=MINUTELY","dtstart":"2026-09-03T12:00:00","tz":"UTC"}}"#,
+        T0,
+    )
+    .unwrap();
+    assert_eq!(ticking["recurrence"], "RECURRING");
+    assert_eq!(ticking["next_occurrence_ns"], T0 + 60 * SECOND);
+
+    // Every R2 rejection still answers TRIGGER_INVALID when a schedule is given.
+    for (label, body) in [
+        (
+            "a past instant",
+            r#"{"name":"bad","brief":"b","schedule":{"at":"2020-01-01T00:00:00Z"}}"#.to_string(),
+        ),
+        (
+            "sub-minute recurrence",
+            r#"{"name":"bad","brief":"b","schedule":
+                {"rrule":"FREQ=SECONDLY","dtstart":"2026-09-03T12:00:00","tz":"UTC"}}"#
+                .to_string(),
+        ),
+        (
+            "a bounded rule",
+            r#"{"name":"bad","brief":"b","schedule":
+                {"rrule":"FREQ=DAILY;COUNT=3","dtstart":"2026-09-03T12:00:00","tz":"UTC"}}"#
+                .to_string(),
+        ),
+        (
+            "an unknown zone",
+            r#"{"name":"bad","brief":"b","schedule":
+                {"rrule":"FREQ=DAILY","dtstart":"2026-09-03T12:00:00","tz":"Mars/Olympus"}}"#
+                .to_string(),
+        ),
+        (
+            "a non-object schedule",
+            r#"{"name":"bad","brief":"b","schedule":5}"#.to_string(),
+        ),
+    ] {
+        let e = create(&store, "d1", &body, T0).expect_err(label);
+        assert_eq!(e.code(), "TRIGGER_INVALID", "{label}");
+    }
+    assert_eq!(
+        patch(
+            &store,
+            "d1",
+            &free_id,
+            r#"{"schedule":{"at":"2020-01-01T00:00:00Z"}}"#,
+            T0
+        )
+        .unwrap_err()
+        .code(),
+        "TRIGGER_INVALID"
+    );
+}
+
+/// Every firing as `(id, trigger_id, request_id)`, acceptance order — what the
+/// invocation scenarios count and identify rows by.
+#[cfg(test)]
+fn firing_rows(store: &Store) -> Vec<(String, String, Option<String>)> {
+    store
+        .call(|c| {
+            c.prepare(
+                "SELECT id, trigger_id, request_id FROM firings \
+                 ORDER BY accepted_at_ns, id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect()
+        })
+        .unwrap()
+}
+
+#[cfg(test)]
+fn prompt_count(store: &Store) -> i64 {
+    store
+        .call(|c| c.query_row("SELECT count(*) FROM prompts", [], |r| r.get(0)))
+        .unwrap()
+}
+
+#[cfg(test)]
+fn trigger_state(store: &Store, id: &str) -> (bool, Option<i64>) {
+    let id = id.to_string();
+    store
+        .call(move |c| {
+            c.query_row(
+                "SELECT enabled, next_occurrence_ns FROM triggers WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, i64>(0)? == 1, r.get(1)?)),
+            )
+        })
+        .unwrap()
+}
+
+#[cfg(test)]
+fn body_of(request_id: &str, input: Option<&str>) -> String {
+    match input {
+        None => format!(r#"{{"request_id":"{request_id}"}}"#),
+        Some(input) => json!({ "request_id": request_id, "input": input }).to_string(),
+    }
+}
+
+/// §2.3's table against a fixed clock: outcomes, rows, projection, `enabled`,
+/// and that a refusal writes nothing.
+#[cfg(test)]
+#[test]
+fn invoke_unit() {
+    let (_dir, store) = desk_store();
+    set_policy(&store, "ALWAYS_ALLOW");
+    let id_of = |value: &Value| value["id"].as_str().unwrap().to_string();
+
+    // --- recurring, no schedule: accepted, replayed, burst ------------------
+    let free = id_of(&create(&store, "d1", &free_body("review"), T0).unwrap());
+    let first = invoke(&store, "d1", &free, &body_of("r1", Some("hello")), T0).unwrap();
+    assert!(first.accepted && !first.has_code);
+    assert_eq!(first.firing["request_id"], "r1");
+    assert_eq!(first.firing["input"], "hello");
+    assert_eq!(first.firing["input_bytes"], 5);
+    assert_eq!(first.firing["occurrence_ns"], T0);
+    assert_eq!(first.firing["accepted_at_ns"], T0);
+    assert_eq!(prompt_count(&store), 1, "a code-free firing queues here");
+
+    // The same request id again, whatever the content: the stored firing.
+    for body in [body_of("r1", Some("hello")), body_of("r1", Some("other"))] {
+        let again = invoke(&store, "d1", &free, &body, T0 + SECOND).unwrap();
+        assert!(!again.accepted);
+        assert_eq!(again.firing["id"], first.firing["id"]);
+        assert_eq!(again.firing["input"], "hello", "the stored input answers");
+    }
+    assert_eq!(firing_rows(&store).len(), 1);
+    assert_eq!(prompt_count(&store), 1);
+
+    // A burst of distinct requests while the first prompt is still queued: no
+    // backlog is ever read (ET-6).
+    for n in 0..50 {
+        let done = invoke(
+            &store,
+            "d1",
+            &free,
+            &body_of(&format!("burst-{n}"), None),
+            T0 + 2 * SECOND + n,
+        )
+        .unwrap();
+        assert!(done.accepted, "burst-{n}");
+        assert!(
+            done.firing.get("input").is_none() && done.firing.get("input_bytes").is_none(),
+            "no input, no keys: {:?}",
+            done.firing
+        );
+    }
+    assert_eq!(firing_rows(&store).len(), 51);
+    assert_eq!(prompt_count(&store), 51);
+    // A recurring trigger keeps everything: enabled, and never due.
+    assert_eq!(trigger_state(&store, &free), (true, None));
+
+    // --- a one-off with a future instant, invoked now ------------------------
+    let armed = T0 + 60 * SECOND;
+    let once = id_of(
+        &create(
+            &store,
+            "d1",
+            &format!(
+                r#"{{"name":"once","brief":"b","schedule":{{"at":"{}"}}}}"#,
+                rfc3339(armed)
+            ),
+            T0,
+        )
+        .unwrap(),
+    );
+    assert_eq!(trigger_state(&store, &once), (true, Some(armed)));
+    assert!(
+        invoke(&store, "d1", &once, &body_of("r-once", None), T0)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(
+        trigger_state(&store, &once),
+        (false, None),
+        "the invocation consumes the one-off: disabled, never due"
+    );
+    // Consumed: the refusal names the firing, and the accepted request stays a
+    // duplicate forever.
+    match invoke(&store, "d1", &once, &body_of("r-other", None), T0).unwrap_err() {
+        e @ TriggerError::Disabled { .. } => {
+            assert_eq!(e.code(), "TRIGGER_DISABLED");
+            let firing = firing_rows(&store)
+                .into_iter()
+                .find(|row| row.1 == once)
+                .unwrap();
+            assert!(e.to_string().contains(&firing.0), "{e}");
+        }
+        other => panic!("a consumed one-off is TRIGGER_DISABLED, not {other:?}"),
+    }
+    assert!(
+        !invoke(&store, "d1", &once, &body_of("r-once", None), T0)
+            .unwrap()
+            .accepted,
+        "the accepted request is a duplicate after consumption"
+    );
+    // Re-enabling is the explicit statement that it may fire once more, so a
+    // new distinct request is accepted although its `at` is long past (§1).
+    patch(&store, "d1", &once, r#"{"enabled":true}"#, armed + SECOND).unwrap();
+    assert!(
+        invoke(&store, "d1", &once, &body_of("r-new", None), armed + SECOND)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(
+        trigger_state(&store, &once),
+        (false, None),
+        "consumed again"
+    );
+
+    // --- the deadline: a one-off the schedule has not resolved --------------
+    // Disabled before its instant, then re-enabled after it: the schedule never
+    // fired it, so the schedule still owns it (ET-7).
+    let held = id_of(
+        &create(
+            &store,
+            "d1",
+            &format!(
+                r#"{{"name":"held","brief":"b","schedule":{{"at":"{}"}}}}"#,
+                rfc3339(T0 + 2 * SECOND)
+            ),
+            T0,
+        )
+        .unwrap(),
+    );
+    patch(&store, "d1", &held, r#"{"enabled":false}"#, T0).unwrap();
+    patch(&store, "d1", &held, r#"{"enabled":true}"#, T0 + 5 * SECOND).unwrap();
+    let rows = firing_rows(&store).len();
+    assert_eq!(
+        invoke(
+            &store,
+            "d1",
+            &held,
+            &body_of("r-held", None),
+            T0 + 5 * SECOND
+        )
+        .unwrap_err()
+        .code(),
+        "TRIGGER_ELAPSED"
+    );
+    assert_eq!(firing_rows(&store).len(), rows, "a refusal writes nothing");
+    // Detaching the schedule makes it invocable again.
+    patch(&store, "d1", &held, r#"{"schedule":null}"#, T0 + 5 * SECOND).unwrap();
+    assert!(
+        invoke(
+            &store,
+            "d1",
+            &held,
+            &body_of("r-held", None),
+            T0 + 5 * SECOND
+        )
+        .unwrap()
+        .accepted
+    );
+
+    // --- a recurring trigger with a schedule keeps it ------------------------
+    let ticking = id_of(
+        &create(
+            &store,
+            "d1",
+            r#"{"name":"tick","brief":"b","schedule":
+                {"rrule":"FREQ=MINUTELY","dtstart":"2026-09-03T12:00:00","tz":"UTC"}}"#,
+            T0,
+        )
+        .unwrap(),
+    );
+    let projected = trigger_state(&store, &ticking).1;
+    assert!(
+        invoke(&store, "d1", &ticking, &body_of("t1", None), T0)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(trigger_state(&store, &ticking), (true, projected));
+
+    // --- refusals write nothing ---------------------------------------------
+    let before = firing_rows(&store).len();
+    let prompts = prompt_count(&store);
+    let disabled = id_of(&create(&store, "d1", &free_body("off"), T0).unwrap());
+    patch(&store, "d1", &disabled, r#"{"enabled":false}"#, T0).unwrap();
+    match invoke(&store, "d1", &disabled, &body_of("r-off", None), T0).unwrap_err() {
+        e @ TriggerError::Disabled { .. } => assert_eq!(e.to_string(), "This trigger is disabled."),
+        other => panic!("a disabled trigger says disabled, not {other:?}"),
+    }
+    // An unknown id, and a deleted trigger reached by a new request id.
+    assert_eq!(
+        invoke(&store, "d1", "t-nowhere", &body_of("r-x", None), T0)
+            .unwrap_err()
+            .code(),
+        "TRIGGER_NOT_FOUND"
+    );
+    let gone = id_of(&create(&store, "d1", &free_body("gone"), T0).unwrap());
+    assert!(
+        invoke(&store, "d1", &gone, &body_of("r-gone", None), T0)
+            .unwrap()
+            .accepted
+    );
+    delete(&store, "d1", &gone, T0).unwrap();
+    assert!(
+        !invoke(&store, "d1", &gone, &body_of("r-gone", None), T0)
+            .unwrap()
+            .accepted,
+        "an old request stays a duplicate on a deleted trigger"
+    );
+    assert_eq!(
+        invoke(&store, "d1", &gone, &body_of("r-after", None), T0)
+            .unwrap_err()
+            .code(),
+        "TRIGGER_NOT_FOUND"
+    );
+    // Pending code: refused, nothing buffered, and after APPROVE the same
+    // request id is a new request, because nothing was stored.
+    set_policy(&store, "REQUIRE_APPROVAL");
+    let gated = create(
+        &store,
+        "d1",
+        &code_body("gated", T0 + 3_600 * SECOND, "print(1)"),
+        T0,
+    )
+    .unwrap();
+    let gated_id = id_of(&gated);
+    let snapshot = gated["code"]["snapshot_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        invoke(&store, "d1", &gated_id, &body_of("r-gated", None), T0)
+            .unwrap_err()
+            .code(),
+        "TRIGGER_UNAPPROVED"
+    );
+    assert_eq!(
+        firing_rows(&store).len(),
+        before + 1,
+        "only `gone` was added"
+    );
+    decide(&store, "d1", &snapshot, Decision::Approve, T0 + SECOND).unwrap();
+    let approved = invoke(
+        &store,
+        "d1",
+        &gated_id,
+        &body_of("r-gated", None),
+        T0 + SECOND,
+    )
+    .unwrap();
+    assert!(
+        approved.accepted && approved.has_code,
+        "{:?}",
+        approved.firing
+    );
+    assert_eq!(approved.firing["code_snapshot_id"], snapshot.as_str());
+    assert_eq!(
+        prompt_count(&store),
+        prompts + 1,
+        "a code-bearing firing queues no prompt here; only `gone` did"
+    );
+
+    // A desk that has no such trigger, and a desk that does not exist.
+    assert_eq!(
+        invoke(&store, "d2", &free, &body_of("r-elsewhere", None), T0)
+            .unwrap_err()
+            .code(),
+        "DESK_NOT_FOUND"
+    );
+}
+
+/// §2.1's request form at both bounds.
+#[cfg(test)]
+#[test]
+fn invoke_request_form() {
+    let (_dir, store) = desk_store();
+    let target = create(&store, "d1", &free_body("review"), T0).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let refuse = |body: String| {
+        let e = invoke(&store, "d1", &target, &body, T0).unwrap_err();
+        assert_eq!(e.code(), "INVOCATION_INVALID", "{body}: {e}");
+    };
+
+    // The grammar, at both bounds.
+    let longest = "a".repeat(REQUEST_ID_MAX);
+    assert!(
+        invoke(&store, "d1", &target, &body_of(&longest, None), T0)
+            .unwrap()
+            .accepted
+    );
+    assert!(
+        invoke(
+            &store,
+            "d1",
+            &target,
+            &body_of("Ab9._:-", Some("")),
+            T0 + SECOND
+        )
+        .unwrap()
+        .accepted,
+        "every allowed byte, and an empty input"
+    );
+    refuse(body_of(&"a".repeat(REQUEST_ID_MAX + 1), None));
+    refuse(body_of("", None));
+    for bad in ["has space", "has/slash", "has\u{e9}accent", "has+plus"] {
+        refuse(body_of(bad, None));
+    }
+    refuse(r#"{}"#.to_string());
+    refuse(r#"{"request_id":5}"#.to_string());
+    refuse("[]".to_string());
+    refuse("not json".to_string());
+
+    // The input bound, at both sides of it, and a non-string input.
+    let at_bound = "x".repeat(INPUT_MAX);
+    let accepted = invoke(
+        &store,
+        "d1",
+        &target,
+        &body_of("at-bound", Some(&at_bound)),
+        T0 + 2 * SECOND,
+    )
+    .unwrap();
+    assert_eq!(accepted.firing["input_bytes"], INPUT_MAX as i64);
+    refuse(body_of("over-bound", Some(&"x".repeat(INPUT_MAX + 1))));
+    refuse(r#"{"request_id":"r","input":5}"#.to_string());
+    refuse(r#"{"request_id":"r","input":{"a":1}}"#.to_string());
+
+    // Every refusal wrote nothing: two accepted plus the bound one.
+    assert_eq!(firing_rows(&store).len(), 3);
+}
+
+/// ET-7: a one-off is consumed through either door, and the loser sees it.
+#[cfg(test)]
+#[test]
+fn one_off_consumed_by_either_door() {
+    let started = T0 - 60 * SECOND;
+    let one_off = |store: &Store, name: &str, at_ns: i64| {
+        create(
+            store,
+            "d1",
+            &format!(
+                r#"{{"name":"{name}","brief":"b","schedule":{{"at":"{}"}}}}"#,
+                rfc3339(at_ns)
+            ),
+            T0,
+        )
+        .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // (a) The schedule accepts first: the invocation is TRIGGER_DISABLED,
+    //     naming the scheduled firing, and no second firing is made.
+    let (_dir, store) = desk_store();
+    let scheduled = one_off(&store, "once", T0 + SECOND);
+    let due = T0 + 2 * SECOND;
+    let pass = store
+        .unit(move |tx| crate::schedule::accept_or_miss(tx, due, started))
+        .unwrap();
+    assert_eq!(pass.accepted.len(), 1);
+    assert_eq!(trigger_state(&store, &scheduled), (false, None));
+    let e = invoke(&store, "d1", &scheduled, &body_of("r-a", None), due).unwrap_err();
+    assert_eq!(e.code(), "TRIGGER_DISABLED");
+    assert!(e.to_string().contains(&pass.accepted[0].firing_id), "{e}");
+    assert_eq!(firing_rows(&store).len(), 1);
+    // Enable, then the refused request id is a new request: nothing was stored.
+    patch(&store, "d1", &scheduled, r#"{"enabled":true}"#, due).unwrap();
+    assert!(
+        invoke(&store, "d1", &scheduled, &body_of("r-a", None), due)
+            .unwrap()
+            .accepted
+    );
+    assert!(
+        !invoke(&store, "d1", &scheduled, &body_of("r-a", None), due)
+            .unwrap()
+            .accepted,
+        "the third call is the duplicate"
+    );
+    assert_eq!(trigger_state(&store, &scheduled), (false, None));
+    let rows = firing_rows(&store);
+    assert_eq!(rows.len(), 2, "one scheduled, one invoked: {rows:?}");
+    assert_eq!(rows[0].2, None);
+    assert_eq!(rows[1].2.as_deref(), Some("r-a"));
+
+    // (b) The invocation accepts first: the scheduled deadline never fires it,
+    //     and no miss is recorded — the row left the due index.
+    let (_dir, store) = desk_store();
+    let invoked = one_off(&store, "once", T0 + SECOND);
+    assert!(
+        invoke(&store, "d1", &invoked, &body_of("r-b", None), T0)
+            .unwrap()
+            .accepted
+    );
+    assert_eq!(trigger_state(&store, &invoked), (false, None));
+    let after = T0 + 3 * SECOND;
+    let pass = store
+        .unit(move |tx| crate::schedule::accept_or_miss(tx, after, started))
+        .unwrap();
+    assert_eq!(pass.accepted.len(), 0);
+    assert_eq!(
+        pass.missed, 0,
+        "a consumed one-off is not due, so not missed"
+    );
+    assert_eq!(firing_rows(&store).len(), 1);
+}
+
+/// §3: the result prompt carries the input inline up to the brief's bound and
+/// its size alone above it.
+#[cfg(test)]
+#[test]
+fn result_prompt_input_bound() {
+    let (_dir, store) = desk_store();
+    let target = create(&store, "d1", &free_body("review"), T0).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let payload = |firing_id: &str| {
+        let firing_id = firing_id.to_string();
+        store
+            .call(move |c| {
+                c.query_row(
+                    "SELECT payload FROM prompts \
+                     WHERE json_extract(payload, '$.firing_id') = ?1",
+                    params![firing_id],
+                    |r| Ok(serde_json::from_str::<Value>(&r.get::<_, String>(0)?).unwrap()),
+                )
+            })
+            .unwrap()
+    };
+
+    let inline = "x".repeat(INPUT_INLINE);
+    let done = invoke(
+        &store,
+        "d1",
+        &target,
+        &body_of("r-inline", Some(&inline)),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(
+        payload(done.firing["id"].as_str().unwrap())["invocation"],
+        json!({ "request_id": "r-inline", "input_bytes": INPUT_INLINE, "input": inline })
+    );
+
+    let over = "x".repeat(INPUT_INLINE + 1);
+    let done = invoke(
+        &store,
+        "d1",
+        &target,
+        &body_of("r-over", Some(&over)),
+        T0 + SECOND,
+    )
+    .unwrap();
+    let invocation = payload(done.firing["id"].as_str().unwrap())["invocation"].clone();
+    assert_eq!(
+        invocation,
+        json!({ "request_id": "r-over", "input_bytes": INPUT_INLINE + 1 }),
+        "over the bound the payload carries the size alone"
+    );
+    // The whole input is still readable through the firing route.
+    assert_eq!(
+        firing(&store, "d1", done.firing["id"].as_str().unwrap()).unwrap()["input"],
+        over.as_str()
     );
 }

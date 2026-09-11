@@ -483,9 +483,11 @@ enum End {
     Quit,
 }
 
-/// The version-1 firing document (§4.2), field for field.
+/// The version-1 firing document (§4.2), field for field. An invoked firing
+/// gains `invocation`, which a scheduled one omits: the key is additive, so the
+/// version does not move (`event-triggers` §3).
 fn document(plan: &Plan, firing: &FiringRow) -> Value {
-    json!({
+    let mut document = json!({
         "version": 1,
         "firing": {
             "id": firing.id,
@@ -506,7 +508,16 @@ fn document(plan: &Plan, firing: &FiringRow) -> Value {
         "brief": firing.brief,
         "context": firing.context,
         "code_snapshot_id": firing.code_snapshot_id,
-    })
+    });
+    if let Some(request_id) = &firing.request_id {
+        // Whole, on standard input with the rest — never an argument, never a
+        // file, never source (`event-triggers` §3).
+        document["invocation"] = match &firing.input {
+            Some(input) => json!({ "request_id": request_id, "input": input }),
+            None => json!({ "request_id": request_id }),
+        };
+    }
+    document
 }
 
 async fn write_script(script: &Path, source: &str) -> io::Result<()> {
@@ -646,7 +657,7 @@ fn claim(store: &Store, daemon_uuid: &str) -> Result<Vec<FiringRow>, StoreError>
         let rows: Vec<FiringRow> = {
             let mut stmt = tx.prepare(
                 "SELECT id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
-                 trigger_revision, brief, context, code_snapshot_id FROM ( \
+                 trigger_revision, brief, context, code_snapshot_id, request_id, input FROM ( \
                    SELECT f.*, row_number() OVER ( \
                      PARTITION BY f.desk_id ORDER BY f.accepted_at_ns, f.id) AS rn \
                    FROM firings f \
@@ -667,6 +678,8 @@ fn claim(store: &Store, daemon_uuid: &str) -> Result<Vec<FiringRow>, StoreError>
                     brief: r.get(6)?,
                     context: r.get(7)?,
                     code_snapshot_id: r.get(8)?,
+                    request_id: r.get(9)?,
+                    input: r.get(10)?,
                 })
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -844,9 +857,9 @@ fn seed_desk(store: &Store, roots: &Roots, desk_id: &str, name: &str) -> String 
                 params![desk_id, name, sql_path],
             )?;
             tx.execute(
-                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                  enabled, revision, created_at_ns, updated_at_ns) \
-                 VALUES (?1, ?2, 'nightly', 'SCHEDULED', 'ONE_OFF', 'look at AAPL', 50, 1, 7, 1, 1)",
+                 VALUES (?1, ?2, 'nightly', 'ONE_OFF', 'look at AAPL', 50, 1, 7, 1, 1)",
                 params![format!("t-{desk_id}"), desk_id],
             )
         })
@@ -1027,6 +1040,61 @@ async fn document_and_environment() {
             "context": "since open",
             "code_snapshot_id": "c-f1",
         })
+    );
+}
+
+/// `event-triggers` §3: the document gains `invocation` on an invoked firing
+/// and omits the key on a scheduled one; the version does not move.
+#[cfg(test)]
+#[test]
+fn document_carries_invocation() {
+    let plan = Plan {
+        source: "print(1)".into(),
+        suffix: ".py".into(),
+        argv: vec!["{script}".into()],
+        timeout_secs: 30,
+        trigger_name: "review-research".into(),
+        recurrence: "RECURRING".into(),
+        desk_name: "alpha".into(),
+        workspace_path: "/desks/alpha".into(),
+        started_at_ns: 100,
+    };
+    let firing = |request_id: Option<&str>, input: Option<&str>| FiringRow {
+        id: "f1".into(),
+        desk_id: "d1".into(),
+        trigger_id: "t1".into(),
+        occurrence_ns: 40,
+        accepted_at_ns: 40,
+        trigger_revision: 7,
+        brief: "look at AAPL".into(),
+        context: None,
+        code_snapshot_id: Some("c1".into()),
+        request_id: request_id.map(str::to_string),
+        input: input.map(str::to_string),
+    };
+
+    let scheduled = document(&plan, &firing(None, None));
+    assert_eq!(scheduled["version"], 1);
+    assert!(
+        scheduled.get("invocation").is_none(),
+        "a scheduled firing omits the key: {scheduled}"
+    );
+
+    let invoked = document(&plan, &firing(Some("r1"), Some("three lines")));
+    assert_eq!(invoked["version"], 1);
+    assert_eq!(
+        invoked["invocation"],
+        json!({ "request_id": "r1", "input": "three lines" })
+    );
+    // The rest of the document is the scheduled one, key for key.
+    for (key, value) in scheduled.as_object().unwrap() {
+        assert_eq!(&invoked[key], value, "{key}");
+    }
+
+    // An invocation without input carries its identity alone.
+    assert_eq!(
+        document(&plan, &firing(Some("r2"), None))["invocation"],
+        json!({ "request_id": "r2" })
     );
 }
 

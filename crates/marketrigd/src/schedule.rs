@@ -43,12 +43,17 @@ pub enum Schedule {
 }
 
 impl Schedule {
-    /// The two JSON shapes and every §2 rejection. `Err` is the English message
-    /// the route reports as `TRIGGER_INVALID`.
-    pub fn parse(value: &Value, now_ns: i64) -> Result<Schedule, String> {
+    /// The two JSON shapes and every §2 rejection, plus absence: `null` is a
+    /// trigger with no schedule, which only an invocation ever fires
+    /// (`event-triggers` §1). `Err` is the English message the route reports as
+    /// `TRIGGER_INVALID`.
+    pub fn parse(value: &Value, now_ns: i64) -> Result<Option<Schedule>, String> {
+        if value.is_null() {
+            return Ok(None);
+        }
         let object = value
             .as_object()
-            .ok_or("A schedule must be a JSON object.".to_string())?;
+            .ok_or("A schedule must be a JSON object or null.".to_string())?;
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
         let text = |key: &str| {
@@ -67,7 +72,7 @@ impl Schedule {
                 if at_ns <= now_ns {
                     return Err("`at` must be strictly in the future.".to_string());
                 }
-                Ok(Schedule::OneOff { at_ns })
+                Ok(Some(Schedule::OneOff { at_ns }))
             }
             ["dtstart", "rrule", "tz"] => {
                 let (rrule, dtstart, tz) = (text("rrule")?, text("dtstart")?, text("tz")?);
@@ -103,7 +108,7 @@ impl Schedule {
                 }
                 rule.validate(anchor)
                     .map_err(|e| format!("`rrule` does not validate against `dtstart`: {e}."))?;
-                Ok(Schedule::Recurring { rrule, dtstart, tz })
+                Ok(Some(Schedule::Recurring { rrule, dtstart, tz }))
             }
             _ => Err(
                 "A schedule is either {\"at\"} or {\"rrule\",\"dtstart\",\"tz\"}, \
@@ -113,29 +118,25 @@ impl Schedule {
         }
     }
 
-    /// The schedule a `triggers` row carries (§7); the row's CHECKs make the
-    /// columns of the named recurrence present.
+    /// The schedule a `triggers` row carries, or `None` when it carries none
+    /// (`event-triggers` §4); the row's CHECKs tie each shape to its recurrence,
+    /// so the columns alone say which one is there.
     pub fn from_row(
-        recurrence: &str,
         at_ns: Option<i64>,
         rrule: Option<String>,
         dtstart: Option<String>,
         tz: Option<String>,
-    ) -> Schedule {
-        if recurrence == "ONE_OFF" {
-            Schedule::OneOff {
-                at_ns: at_ns.unwrap_or_default(),
+    ) -> Option<Schedule> {
+        match (at_ns, rrule, dtstart, tz) {
+            (Some(at_ns), ..) => Some(Schedule::OneOff { at_ns }),
+            (None, Some(rrule), Some(dtstart), Some(tz)) => {
+                Some(Schedule::Recurring { rrule, dtstart, tz })
             }
-        } else {
-            Schedule::Recurring {
-                rrule: rrule.unwrap_or_default(),
-                dtstart: dtstart.unwrap_or_default(),
-                tz: tz.unwrap_or_default(),
-            }
+            _ => None,
         }
     }
 
-    /// The `triggers.recurrence` value.
+    /// The `triggers.recurrence` a schedule of this shape belongs to.
     pub fn recurrence(&self) -> &'static str {
         match self {
             Schedule::OneOff { .. } => "ONE_OFF",
@@ -295,13 +296,8 @@ pub fn accept_or_miss(
                 id: r.get(0)?,
                 desk_id: r.get(1)?,
                 name: r.get(2)?,
-                schedule: Schedule::from_row(
-                    &r.get::<_, String>(3)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                ),
+                recurrence: r.get(3)?,
+                schedule: Schedule::from_row(r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?),
                 brief: r.get(4)?,
                 context: r.get(5)?,
                 revision: r.get(10)?,
@@ -314,7 +310,7 @@ pub fn accept_or_miss(
 
     let mut pass = Pass::default();
     for trigger in due {
-        let one_off = matches!(trigger.schedule, Schedule::OneOff { .. });
+        let one_off = trigger.recurrence == "ONE_OFF";
         if trigger.occurrence_ns >= started_at_ns
             && now_ns.saturating_sub(trigger.occurrence_ns) <= LATE_BOUND_NS
         {
@@ -332,6 +328,10 @@ pub fn accept_or_miss(
                 brief: trigger.brief,
                 context: trigger.context,
                 code_snapshot_id: trigger.code_snapshot_id,
+                // A scheduled firing carries no request identity and no input
+                // (`event-triggers` §2.4).
+                request_id: None,
+                input: None,
             };
             match tx.execute(
                 "INSERT INTO firings (id, desk_id, trigger_id, occurrence_ns, accepted_at_ns, \
@@ -356,7 +356,7 @@ pub fn accept_or_miss(
                 Err(rusqlite::Error::SqliteFailure(f, _))
                     if f.code == ErrorCode::ConstraintViolation =>
                 {
-                    project(tx, &trigger.id, next)?;
+                    project(tx, &trigger.id, next, one_off)?;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -366,7 +366,7 @@ pub fn accept_or_miss(
             if firing.code_snapshot_id.is_none() {
                 insert_result_prompt(tx, &firing, &trigger.name, None, now_ns)?;
             }
-            project(tx, &trigger.id, next)?;
+            project(tx, &trigger.id, next, one_off)?;
             pass.accepted.push(Accepted {
                 has_code: firing.code_snapshot_id.is_some(),
                 firing_id: firing.id,
@@ -374,9 +374,9 @@ pub fn accept_or_miss(
             });
         } else {
             let next = advance(&trigger, one_off, now_ns);
-            let (count, count_capped) = trigger
-                .schedule
-                .count_between(trigger.occurrence_ns, now_ns);
+            let (count, count_capped) = trigger.schedule.as_ref().map_or((0, false), |s| {
+                s.count_between(trigger.occurrence_ns, now_ns)
+            });
             crate::desk::append_event(
                 tx,
                 "TRIGGER_MISSED",
@@ -385,7 +385,7 @@ pub fn accept_or_miss(
                 json!({
                     "trigger_id": trigger.id,
                     "name": trigger.name,
-                    "recurrence": trigger.schedule.recurrence(),
+                    "recurrence": trigger.recurrence,
                     "missed_from_ns": trigger.occurrence_ns,
                     "missed_through_ns": now_ns,
                     "count": count,
@@ -393,7 +393,9 @@ pub fn accept_or_miss(
                     "next_occurrence_ns": next,
                 }),
             )?;
-            project(tx, &trigger.id, next)?;
+            // A miss is not a consumption: a missed one-off stays enabled with
+            // a NULL projection, as R2 §3.3 has it.
+            project(tx, &trigger.id, next, false)?;
             pass.missed += 1;
         }
     }
@@ -405,7 +407,10 @@ struct Due {
     id: String,
     desk_id: String,
     name: String,
-    schedule: Schedule,
+    /// The column, not the schedule's shape: a trigger keeps its recurrence
+    /// with or without a schedule (`event-triggers` §1).
+    recurrence: String,
+    schedule: Option<Schedule>,
     brief: String,
     context: Option<String>,
     revision: i64,
@@ -421,14 +426,30 @@ struct Due {
 fn advance(trigger: &Due, one_off: bool, reference_ns: i64) -> Option<i64> {
     crate::trigger::projection(true, trigger.approval.as_deref(), || {
         (!one_off)
-            .then(|| trigger.schedule.next_after(reference_ns))
+            .then(|| {
+                trigger
+                    .schedule
+                    .as_ref()
+                    .and_then(|s| s.next_after(reference_ns))
+            })
             .flatten()
     })
 }
 
-fn project(tx: &Transaction<'_>, trigger_id: &str, next: Option<i64>) -> rusqlite::Result<()> {
+/// The projection, and — when this pass consumed a one-off — the `enabled = 0`
+/// beside it: consumption is uniform across both entry paths
+/// (`event-triggers` §1).
+fn project(
+    tx: &Transaction<'_>,
+    trigger_id: &str,
+    next: Option<i64>,
+    consumed: bool,
+) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE triggers SET next_occurrence_ns = ?2 WHERE id = ?1",
+        match consumed {
+            true => "UPDATE triggers SET next_occurrence_ns = ?2, enabled = 0 WHERE id = ?1",
+            false => "UPDATE triggers SET next_occurrence_ns = ?2 WHERE id = ?1",
+        },
         params![trigger_id, next],
     )?;
     Ok(())
@@ -601,7 +622,9 @@ fn form_rejected() {
     }
 
     // Both shapes parse, and each round-trips through the row columns.
-    let one_off = Schedule::parse(&json!({ "at": "2026-09-03T14:00:00Z" }), now).unwrap();
+    let one_off = Schedule::parse(&json!({ "at": "2026-09-03T14:00:00Z" }), now)
+        .unwrap()
+        .expect("a schedule");
     assert_eq!(
         one_off,
         Schedule::OneOff {
@@ -614,24 +637,18 @@ fn form_rejected() {
         json!({ "at_ns": utc_ns(2026, 9, 3, 14, 0, 0) })
     );
     assert_eq!(
-        Schedule::from_row(
-            "ONE_OFF",
-            Some(utc_ns(2026, 9, 3, 14, 0, 0)),
-            None,
-            None,
-            None
-        ),
-        one_off
+        Schedule::from_row(Some(utc_ns(2026, 9, 3, 14, 0, 0)), None, None, None),
+        Some(one_off.clone())
     );
     // An offset other than Z resolves to the same instant.
     assert_eq!(
         Schedule::parse(&json!({ "at": "2026-09-03T10:00:00-04:00" }), now).unwrap(),
-        one_off
+        Some(one_off)
     );
 
     let value = json!({ "rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=30",
                         "dtstart": "2026-09-03T09:30:00", "tz": "America/New_York" });
-    let repeating = Schedule::parse(&value, now).unwrap();
+    let repeating = Schedule::parse(&value, now).unwrap().expect("a schedule");
     assert_eq!(
         repeating,
         recurring(
@@ -644,13 +661,20 @@ fn form_rejected() {
     assert_eq!(repeating.to_json(), value);
     assert_eq!(
         Schedule::from_row(
-            "RECURRING",
             None,
             Some("FREQ=DAILY;BYHOUR=9;BYMINUTE=30".into()),
             Some("2026-09-03T09:30:00".into()),
             Some("America/New_York".into()),
         ),
-        repeating
+        Some(repeating)
+    );
+    // Absence: `null` is a trigger with no schedule, and a row with no schedule
+    // columns is the same thing (`event-triggers` §1, §4).
+    assert_eq!(Schedule::parse(&Value::Null, now), Ok(None));
+    assert_eq!(Schedule::from_row(None, None, None, None), None);
+    assert_eq!(
+        Schedule::from_row(None, Some("FREQ=DAILY".into()), None, None),
+        None
     );
     // A minutely rule is the finest cadence the form allows.
     assert!(
@@ -797,9 +821,9 @@ fn seed(store: &Store, rows: Vec<String>) {
 #[cfg(test)]
 fn one_off_row(id: &str, name: &str, at_ns: i64, code: Option<&str>) -> String {
     format!(
-        "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+        "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
          enabled, revision, code_snapshot_id, next_occurrence_ns, created_at_ns, \
-         updated_at_ns) VALUES ('{id}','d1','{name}','SCHEDULED','ONE_OFF','brief {name}',\
+         updated_at_ns) VALUES ('{id}','d1','{name}','ONE_OFF','brief {name}',\
          {at_ns},1,7,{code},{at_ns},1,1)",
         code = code.map_or("NULL".to_string(), |c| format!("'{c}'"))
     )
@@ -809,9 +833,9 @@ fn one_off_row(id: &str, name: &str, at_ns: i64, code: Option<&str>) -> String {
 #[cfg(test)]
 fn recurring_row(id: &str, name: &str, rrule: &str, dtstart: &str, next: i64) -> String {
     format!(
-        "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, rrule, \
+        "INSERT INTO triggers (id, desk_id, name, recurrence, brief, rrule, \
          dtstart, tz, enabled, revision, next_occurrence_ns, created_at_ns, updated_at_ns) \
-         VALUES ('{id}','d1','{name}','SCHEDULED','RECURRING','brief {name}','{rrule}',\
+         VALUES ('{id}','d1','{name}','RECURRING','brief {name}','{rrule}',\
          '{dtstart}','UTC',1,7,{next},1,1)"
     )
 }
@@ -822,6 +846,19 @@ fn projection(store: &Store, id: &'static str) -> Option<i64> {
         .call(move |c| {
             c.query_row(
                 "SELECT next_occurrence_ns FROM triggers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap()
+}
+
+#[cfg(test)]
+fn enabled(store: &Store, id: &'static str) -> i64 {
+    store
+        .call(move |c| {
+            c.query_row(
+                "SELECT enabled FROM triggers WHERE id = ?1",
                 params![id],
                 |r| r.get(0),
             )
@@ -909,9 +946,9 @@ mod tests {
                 one_off_row("t-off", "off", now - 2_000_000_000, None)
                     .replace(",1,7,NULL,", ",0,7,NULL,"),
                 format!(
-                    "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, \
+                    "INSERT INTO triggers (id, desk_id, name, recurrence, brief, \
                      at_ns, enabled, revision, next_occurrence_ns, created_at_ns, \
-                     updated_at_ns, deleted_at_ns) VALUES ('t-gone','d1','gone','SCHEDULED',\
+                     updated_at_ns, deleted_at_ns) VALUES ('t-gone','d1','gone',\
                      'ONE_OFF','brief gone',{at},1,7,{at},1,1,9)",
                     at = now - 2_000_000_000
                 ),
@@ -945,8 +982,17 @@ mod tests {
                 "{id} provenance"
             );
             assert_eq!(projection(&store, id), None, "{id} is consumed");
+            // Consumption is uniform across both entry paths: the accepting
+            // unit disables the one-off beside the NULL projection
+            // (`event-triggers` §1).
+            assert_eq!(enabled(&store, id), 0, "{id} is consumed, so disabled");
         }
         assert_eq!(firings(&store, "t-tick").len(), 1);
+        assert_eq!(enabled(&store, "t-tick"), 1, "a recurring trigger stays on");
+        // A miss is not a consumption.
+        for id in ["t-down", "t-late"] {
+            assert_eq!(enabled(&store, id), 1, "{id} missed, it was not consumed");
+        }
         // Advanced from the accepted occurrence, not from now.
         assert_eq!(
             projection(&store, "t-tick"),
@@ -1050,12 +1096,12 @@ fn duplicate_wake_no_second_firing() {
     assert_eq!(first.accepted.len(), 1);
     assert_eq!(projection(&store, "t1"), None);
 
-    // Simulate the losing wake: the projection is still armed at the
+    // Simulate the losing wake: the row is still armed and enabled at the
     // occurrence the winner already accepted.
     store
         .unit(move |tx| {
             tx.execute(
-                "UPDATE triggers SET next_occurrence_ns = ?1 WHERE id = 't1'",
+                "UPDATE triggers SET next_occurrence_ns = ?1, enabled = 1 WHERE id = 't1'",
                 params![occurrence],
             )
         })
@@ -1071,8 +1117,9 @@ fn duplicate_wake_no_second_firing() {
         .call(|c| c.query_row("SELECT count(*) FROM prompts", [], |r| r.get(0)))
         .unwrap();
     assert_eq!(prompts, 1, "one prompt only");
-    // The loser advances the projection as the winner did: consumed.
+    // The loser advances as the winner did: consumed, and so disabled.
     assert_eq!(projection(&store, "t1"), None);
+    assert_eq!(enabled(&store, "t1"), 0);
 }
 
 /// §3.1: the sleep bound, and a mutation's wake reaching the task.

@@ -2742,9 +2742,9 @@ fn pending_order_approval() {
     store
         .unit(move |tx| {
             tx.execute(
-                "INSERT INTO triggers (id, desk_id, name, source, recurrence, brief, at_ns, \
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
                  enabled, revision, created_at_ns, updated_at_ns) \
-                 VALUES (?1, ?2, 'noon', 'SCHEDULED', 'ONE_OFF', 'trade', 1, 1, 1, 1, 1)",
+                 VALUES (?1, ?2, 'noon', 'ONE_OFF', 'trade', 1, 1, 1, 1, 1)",
                 params![t, d],
             )?;
             tx.execute(

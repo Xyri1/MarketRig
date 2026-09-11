@@ -189,6 +189,7 @@ fn serve(startup: &mut daemon::Startup, feed_base: Option<feed::FeedBase>) -> st
             quit: quit_tx,
             registry: registry.clone(),
             scheduler_wake: scheduler_wake.clone(),
+            exec_wake: exec_wake.clone(),
             search_path,
             terminals: terminals.clone(),
             channels,

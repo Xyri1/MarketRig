@@ -502,6 +502,7 @@ async fn serve(rig: Rig) -> Served {
             None,
         )),
         scheduler_wake: Arc::new(Notify::new()),
+        exec_wake: Arc::new(Notify::new()),
         search_path: String::new(),
         terminals: crate::terminal::Manager::new().0,
         channels: Arc::new(crate::claude::Channels::default()),
