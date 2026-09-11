@@ -1,6 +1,6 @@
 # Slice 015 — Trigger invocation
 
-**Status:** Active (2026-09-11). Implementation not started.
+**Status:** Active (2026-09-11). Steps 1–5 implemented on macOS the same day (604cb57, 305dd38, 453dfa2, aab9f68); freeze waits on the macOS E8 pair and CI on both platforms.
 
 The implementation plan for [`features/event-triggers/`](../features/event-triggers/PRD.md), decisions ET-1–ET-7 and SPEC §1–§8. The feature folder is canonical; drift found while implementing is corrected there in the same change. Root D34, SPEC §8, §10, §11.1, §13.2, §15, §18, the PRD, ROADMAP, and AGENTS.md were reconciled to direct invocation on 2026-09-11, before this slice, so root and feature agree and no root merge waits on the freeze beyond the migration and check records.
 
