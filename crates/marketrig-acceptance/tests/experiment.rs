@@ -36,6 +36,7 @@
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use marketrig_acceptance::standin::{shanghai_date, shanghai_midnight_s, weekday};
 use marketrig_acceptance::{Harness, parse, waited};
 use serde_json::json;
 
@@ -1498,6 +1499,61 @@ const HITHINK_KEY: &str = "MARKETRIG_EXPERIMENT_HITHINK_API_KEY";
 /// Moutai, `600519.SH` to HiThink, 100 shares to a lot.
 const A_SHARE: &str = "600519.XSHG";
 
+/// The cell's two Shanghai instants as Unix seconds (`a-share-engine` SPEC §6,
+/// per AE-10): the staged trading day the buy belongs to, and the one the sell
+/// happens on. Both are 10:00 Asia/Shanghai — inside the morning session, so the
+/// node clock, which is frozen between advances, is in session for the whole
+/// sitting whatever hour the operator starts at.
+///
+/// The sell day is the most recent weekday whose 09:30 Shanghai has passed, so
+/// the provider already has that day's own bar — readiness after the clock move
+/// needs it (§2.1). The buy day is the weekday before it. Both step over the
+/// weekend, so the cell runs on a Sunday evening as readily as on a Tuesday
+/// afternoon. A holiday neither step can see is left to the cell's own readiness
+/// check, which prints what the provider's calendar says before the operator is
+/// asked to drive anything.
+fn staged_days(now_s: i64) -> (i64, i64) {
+    let mut sell = shanghai_midnight_s(now_s);
+    while !weekday(sell + 12 * 3_600) || now_s < sell + 9 * 3_600 + 1_800 {
+        sell -= 86_400;
+    }
+    let mut buy = sell - 86_400;
+    while !weekday(buy + 12 * 3_600) {
+        buy -= 86_400;
+    }
+    (buy + 10 * 3_600, sell + 10 * 3_600)
+}
+
+/// The one part of E7 that is arithmetic rather than the operator's: both
+/// instants are 10:00 Asia/Shanghai, both days are weekdays, and the sell day's
+/// 09:30 has already passed. Thursday 2026-03-12 and Friday 2026-03-13 are
+/// weekdays; the 14th and 15th are the weekend; Monday is the 16th.
+#[test]
+fn staged_days_land_in_session_and_step_over_the_weekend() {
+    for (now_s, expected) in [
+        // A weekday afternoon: today sells, the previous weekday buys.
+        (1_773_244_800 + 14 * 3_600, ("20260311", "20260312")),
+        (1_773_590_400 + 11 * 3_600, ("20260313", "20260316")),
+        // A weekday before 09:30 has no bar of its own yet, so it steps back.
+        (1_773_244_800 + 8 * 3_600, ("20260310", "20260311")),
+        // The weekend, and the Monday morning after it, all sell on Friday.
+        (1_773_417_600 + 11 * 3_600, ("20260312", "20260313")),
+        (1_773_504_000 + 20 * 3_600, ("20260312", "20260313")),
+        (1_773_590_400 + 8 * 3_600, ("20260312", "20260313")),
+    ] {
+        let (buy_s, sell_s) = staged_days(now_s);
+        assert_eq!(
+            (
+                shanghai_date(buy_s).as_str(),
+                shanghai_date(sell_s).as_str()
+            ),
+            expected
+        );
+        assert_eq!(buy_s - shanghai_midnight_s(buy_s), 10 * 3_600);
+        assert_eq!(sell_s - shanghai_midnight_s(sell_s), 10 * 3_600);
+    }
+}
+
 #[test]
 fn e7_codex_cli() {
     a_share("E7", "codex", "Codex CLI");
@@ -1520,12 +1576,19 @@ fn e7_claude_code() {
 /// passthrough writes no row and no event (§4.1) — so that aspect is
 /// inconclusive by construction, as E1's two quote reads are.
 ///
-/// One sitting cannot complete this cell: A-share T+1 locks today's buy until
-/// the next trading day (`a-share-engine` SPEC §1.1), so a first sitting that
-/// buys and watches the same-day sell refused is recorded `PARTIAL`, and the
-/// cell is complete only when a later supported session sells that lot and the
-/// native cycle closes. The bundle also records what this cell cannot prove:
-/// the provider's unknown source delay and the unadjusted corporate action.
+/// One sitting completes the cell, at any wall-clock hour: A-share T+1 locks a
+/// buy until the next trading day (`a-share-engine` SPEC §1.1), so the cell
+/// stages both Shanghai days through the controlled-clock seam instead of
+/// sending the operator away for a day (per AE-10). This desk's nodes open on
+/// the buy day; once the buy has filled and the same-day sell has been refused,
+/// the harness moves every node's clock to the sell day, which unlocks the lot
+/// exactly as the rollover does in gate A1, and asks the same session for the
+/// sell. Only the trading dates are staged: the provider's calendar, the day's
+/// bar and every snapshot are the real service's own, and outside real Shanghai
+/// hours that snapshot is simply the day's last, which a MARKET order fills
+/// against. The bundle records what this cell cannot prove: the provider's
+/// unknown source delay, the unadjusted corporate action, and the staged
+/// calendar behind the realized figure.
 fn a_share(scenario: &str, cell: &str, runtime: &str) {
     if std::env::var(CELL).unwrap_or_default() != cell {
         eprintln!(
@@ -1555,6 +1618,13 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
         return;
     }
 
+    // The calendar this sitting runs on (per AE-10). The seam is honored only
+    // alongside the relocated data root, which the harness always sets, and it
+    // is what serves `PUT /test/clock` later; the daemon's own bookkeeping stays
+    // on the wall clock, and both feeds stay real.
+    let (buy_s, sell_s) = staged_days(marketrig_acceptance::now_secs() as i64);
+    let (buy_day, sell_day) = (shanghai_date(buy_s), shanghai_date(sell_s));
+    g.standin_clock(buy_s as u64 * 1_000_000_000);
     g.real_feed();
     let daemon = g.spawn(scenario);
     let endpoint = daemon.endpoint.clone();
@@ -1656,6 +1726,33 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
         json!({ "observation": observation, "base_url": base }),
     );
 
+    // §2.1 readiness on the staged day, before the operator is asked for
+    // anything: the provider's own calendar must carry that day and its own bar
+    // must be dated it. A holiday the weekend step cannot see leaves the
+    // instrument `UNAVAILABLE`, and the printout says so rather than letting the
+    // sitting discover it fifteen minutes in.
+    let executable = waited(
+        SETTLES,
+        "the A-share to be executable on the staged trading day",
+        || cn(&g)["execution"]["availability"] == "OPEN",
+    );
+    let staged = if executable {
+        format!("{buy_day} (staged) → {sell_day} after the refusal — execution OPEN")
+    } else {
+        format!(
+            "{buy_day} (staged) — NOT EXECUTABLE: {}. Stop this run: this sitting \
+             cannot buy, and the harness has recorded why.",
+            cn(&g)["execution"]["reason"].as_str().unwrap_or("UNKNOWN")
+        )
+    };
+    if !executable {
+        g.inconclusive(
+            scenario,
+            "the staged trading day is not executable on the provider's real calendar, so this sitting cannot buy",
+            json!({ "staged_day": buy_day, "execution": cn(&g)["execution"] }),
+        );
+    }
+
     // The two reads the session is asked for, as the operator will paste them:
     // the CLI needs the daemon's data root, and the terminal relays every
     // MARKETRIG_* variable to the launched runtime (R3 §4.2).
@@ -1678,6 +1775,7 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
          Runtime:    {runtime} {version} at {path}\n\
          Provider:   {base} — AVAILABLE, a_share_feed HITHINK\n\
          Instrument: {instrument} — HiThink 600519.SH, 100 shares to a lot\n\
+         Day:        {staged}\n\
          CLI:        {cli}\n\
          Data root:  {root}\n\
          Evidence:   {root}\n\
@@ -1688,6 +1786,21 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
          MarketRig launches the runtime itself and this console becomes the desk's\n\
          terminal. The session inherits MARKETRIG_TEST_DATA_ROOT, so the command\n\
          above reaches this daemon with no environment of its own.\n\
+         \n\
+         T+1 locks a lot until the next trading day, so this desk's own trading\n\
+         day is staged at {buy_day} and the harness moves it to {sell_day} once\n\
+         the refusal below has happened. Both are weekdays — the `Day:` line\n\
+         above says whether the provider's calendar accepts the first — and\n\
+         MarketRig's session clock is 10:00 on each, so the hour you start at is\n\
+         never what you are waiting on. Everything the provider says is the real\n\
+         service's: its calendar, the day's bar, every snapshot. The session may\n\
+         notice `band_date` reading {buy_day}; that is the staging, and it is why\n\
+         the realized figure of this cell is a harness artifact.\n\
+         \n\
+         Order type matters more than the hour. Outside real Shanghai trading\n\
+         hours the snapshot is the day's last and does not move, so use MARKET\n\
+         orders for both legs: a LIMIT would wait for volume that will not come.\n\
+         Inside trading hours either works.\n\
          \n\
          1. Answer whatever {runtime} asks on first launch, as in E4, and nothing\n\
          \x20  more.\n\
@@ -1711,31 +1824,34 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
          \x20  is the disclosed assumption every order below rests on.\n\
          \n\
          4. Ask the session to buy one lot — 100 shares — of {instrument} through\n\
-         \x20  `submit_order`, inside a supported session (09:30-11:30 and\n\
-         \x20  13:00-14:57 Asia/Shanghai).\n\
+         \x20  `submit_order`, as a MARKET order: it fills against the current\n\
+         \x20  snapshot at once. A LIMIT waits for a later observation whose\n\
+         \x20  volume has grown, which only a trading market produces. Only\n\
+         \x20  {instrument} counts: the harness ignores trades of any other\n\
+         \x20  instrument, and they will not move this protocol on — if the\n\
+         \x20  session buys something else, steer it back to {instrument}.\n\
          \n\
-         5. Ask it to sell that same lot **today**. It must be refused: the\n\
-         \x20  A-share T+1 rule locks today's buy until the next trading day, and\n\
-         \x20  the refusal says so. That refusal is the point of the sitting, not\n\
-         \x20  a fault.\n\
+         5. Ask it to sell that same lot **now**. It must be refused: the\n\
+         \x20  A-share T+1 rule locks the day's buy until the next trading day,\n\
+         \x20  and the refusal says so. That refusal is the point of the sitting,\n\
+         \x20  not a fault.\n\
          \n\
-         6. **The sitting ends PARTIAL here.** A cell is complete only when a\n\
-         \x20  later supported session sells that lot, closing the native cycle\n\
-         \x20  and queueing its EVALUATION prompt. Rerun this cell against the\n\
-         \x20  same bundle on the next trading day — `MARKETRIG_ACCEPTANCE_OUT`\n\
-         \x20  set to this directory — and ask the resumed session to sell. Do\n\
-         \x20  not record the first sitting as a pass.\n\
+         6. Then wait here. The harness moves this desk's trading day on to\n\
+         \x20  {sell_day}, which unlocks the lot, and prints the one step left —\n\
+         \x20  the sell — on this console. Do not ask for it before that.\n\
          \n\
          7. Nothing else. The harness then removes the key from the credential\n\
          \x20  store and greps the whole bundle for it, so a later research read\n\
          \x20  answers RESEARCH_UNCONFIGURED: that is the cell ending, not a fault.\n\
          \n\
-         Two limitations this cell cannot remove, and records instead: the\n\
+         Three limitations this cell cannot remove, and records instead: the\n\
          provider publishes no source timestamp, so every observation's delay is\n\
-         UNKNOWN and no fill may be read as a claim about market time; and a\n\
-         holding carried across a corporate action is not adjusted here, so a\n\
-         dividend or split date inside the hold makes the realized figure\n\
-         incomparable — never attribute the difference to strategy.\n\
+         UNKNOWN and no fill may be read as a claim about market time; a holding\n\
+         carried across a corporate action is not adjusted here, so a dividend or\n\
+         split date inside the hold makes the realized figure incomparable; and\n\
+         both legs trade against the same day's real quotes under two staged\n\
+         trading dates, so that figure is a harness artifact either way — never\n\
+         attribute any of it to strategy.\n\
          \n\
          The harness waits up to {patience} minutes per step. While this console is\n\
          \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
@@ -1752,8 +1868,10 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
     g.write_evidence("instructions-e7.txt", &instructions);
     g.note(
         scenario,
-        "attended cell prepared; the provider is saved and the console is about to become the desk's terminal",
-        json!({ "desk": desk, "desk_id": desk_id, "instrument": A_SHARE, "runtime": row }),
+        "attended cell prepared; the provider is saved, the nodes are staged on the buy day, and the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "instrument": A_SHARE, "runtime": row,
+                "staged_day": buy_day, "sell_day": sell_day, "staged_ns": buy_s as u64 * 1_000_000_000,
+                "execution": cn(&g)["execution"] }),
     );
 
     let console = console::attach(&endpoint, &desk_id);
@@ -1778,78 +1896,136 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
         );
     } else if !waited(PATIENCE, "the session's buy to fill", || {
         g.scalar::<i64>(
-            "SELECT count(*) FROM fills WHERE desk_id = ?1 AND side = 'BUY'",
-            &[&desk_id],
+            "SELECT count(*) FROM fills WHERE desk_id = ?1 AND instrument_id = ?2 AND side = 'BUY'",
+            &[&desk_id, &A_SHARE],
         ) >= 1
     }) {
         g.inconclusive(
             scenario,
-            "the session bought nothing within the cell's patience",
-            json!({ "prompts": prompt_states(&g, &desk_id) }),
-        );
-    } else if g.scalar::<i64>(
-        "SELECT count(*) FROM position_cycles WHERE desk_id = ?1",
-        &[&desk_id],
-    ) == 0
-    {
-        // The buy filled, so the sitting's own claim is the T+1 refusal: a
-        // same-day sell is terminal on the action row, with no order behind it
-        // (`a-share-engine` SPEC §1.2, §5.2). The cycle belongs to a later
-        // supported session, so this sitting is PARTIAL, never a pass.
-        let refused: i64 = g.scalar(
-            "SELECT count(*) FROM trading_actions WHERE desk_id = ?1 \
-             AND outcome LIKE '%ORDER_INVALID%' AND request LIKE '%SELL%'",
-            &[&desk_id],
-        );
-        if refused == 0 {
-            g.inconclusive(
-                scenario,
-                "the session never asked for the same-day sell the T+1 rule must refuse",
-                json!({ "prompts": prompt_states(&g, &desk_id) }),
-            );
-        } else {
-            g.note(
-                scenario,
-                "today's buy filled and the same-day sell was refused terminally by the T+1 rule, with no order behind it",
-                json!({ "refused_sells": refused }),
-            );
-        }
-        g.partial(
-            scenario,
-            "the sitting bought and observed the T+1 refusal; the cell completes only when a later supported session sells the lot, closes the native cycle and queues its evaluation",
+            "the session bought no lot of the named instrument within the cell's patience",
             json!({ "instrument": A_SHARE, "prompts": prompt_states(&g, &desk_id) }),
         );
     } else {
-        // The cycle exists, so the rest is the daemon's own: its evaluation is
-        // queued in the same unit (root §13.2).
-        let cycle: String = g.scalar(
-            "SELECT id FROM position_cycles WHERE desk_id = ?1 ORDER BY closed_at_ns LIMIT 1",
-            &[&desk_id],
-        );
-        assert!(
-            waited(SETTLES, "the cycle's evaluation prompt", || {
-                g.scalar::<i64>(
-                    "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION'",
-                    &[&desk_id],
-                ) >= 1
-            }),
-            "a closed cycle queues its EVALUATION prompt (root §13.2)"
-        );
+        // The buy filled on the staged day, so the sitting's first claim is the
+        // T+1 refusal: a same-day sell is terminal on the action row, with no
+        // order behind it (`a-share-engine` SPEC §1.2, §5.2). `trading_actions`
+        // carries no instrument column, so the named instrument is matched in
+        // the request the session sent, which is where its id is recorded.
+        const REFUSED_SELLS: &str = "SELECT count(*) FROM trading_actions WHERE desk_id = ?1 \
+             AND outcome LIKE '%ORDER_INVALID%' AND request LIKE '%SELL%' AND request LIKE ?2";
+        let named = format!("%{A_SHARE}%");
+        if !waited(
+            PATIENCE,
+            "the same-day sell to be refused by the T+1 rule",
+            || g.scalar::<i64>(REFUSED_SELLS, &[&desk_id, &named]) >= 1,
+        ) {
+            g.inconclusive(
+                scenario,
+                "the session never asked for the same-day sell of the named instrument the T+1 rule must refuse",
+                json!({ "instrument": A_SHARE, "prompts": prompt_states(&g, &desk_id) }),
+            );
+        } else {
+            let refused: i64 = g.scalar(REFUSED_SELLS, &[&desk_id, &named]);
+            g.note(
+                scenario,
+                "the staged day's buy of the named instrument filled and its same-day sell was refused terminally by the T+1 rule, with no order behind it",
+                json!({ "instrument": A_SHARE, "refused_sells": refused }),
+            );
+        }
+
+        // The calendar is staged, never waited for (per AE-10): moving every
+        // node's clock to the sell day is the rollover gate A1 proves, and it
+        // leaves the provider's calendar, that day's own bar and every snapshot
+        // on the real service. The re-open needs a poll on the new day, which is
+        // why the controlled clock also lifts the cadence gate (`node.rs`).
+        g.advance_clock(scenario, &endpoint, sell_s as u64 * 1_000_000_000);
+        let reopened = waited(SETTLES, "the A-share to re-open on the sell day", || {
+            let view = cn(&g);
+            view["execution"]["availability"] == "OPEN"
+                && view["execution"]["band_date"] == json!(sell_day)
+        });
         g.note(
             scenario,
-            "a later supported session sold the lot bought on an earlier day: the native cycle closed and MarketRig queued its evaluation",
-            json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+            "the desk's trading day moved from the staged buy day to the sell day, which unlocks the lot T+1 held",
+            json!({ "from": buy_day, "to": sell_day,
+                    "from_ns": buy_s as u64 * 1_000_000_000,
+                    "to_ns": sell_s as u64 * 1_000_000_000,
+                    "reopened": reopened, "execution": cn(&g)["execution"] }),
         );
+
+        // Printed into the raw console, so every line carries its own return.
+        let sell = format!(
+            "\n\
+             ===========================================================================\n\
+             {scenario} — the trading day moved on: ask for the sell (feature SPEC §6.3)\n\
+             ===========================================================================\n\
+             \n\
+             This desk's trading day is now {sell_day}, and the lot bought on\n\
+             {buy_day} is no longer locked by T+1. Nothing else moved: the\n\
+             calendar, the day's bar and the snapshot are the real service's.\n\
+             \n\
+             Ask the session to sell the 100-share lot of {instrument} through\n\
+             `submit_order`, as a MARKET order again: it fills against the\n\
+             current snapshot at once. A LIMIT waits for a later observation\n\
+             whose volume has grown, which only a trading market produces.\n\
+             \n\
+             Then nothing else: the harness waits up to {patience} minutes for the\n\
+             native cycle to close and its EVALUATION prompt to queue, removes the\n\
+             key, and ends the cell.\n\
+             ===========================================================================\n",
+            instrument = A_SHARE,
+            patience = PATIENCE.as_secs() / 60,
+        );
+        println!("{}", sell.replace('\n', "\r\n"));
+        g.write_evidence("instructions-e7-sell.txt", &sell);
+
+        if !waited(PATIENCE, "the session's sell to close the position", || {
+            g.scalar::<i64>(
+                "SELECT count(*) FROM position_cycles WHERE desk_id = ?1 AND instrument_id = ?2",
+                &[&desk_id, &A_SHARE],
+            ) >= 1
+        }) {
+            g.inconclusive(
+                scenario,
+                "the session never sold the named instrument's lot on the moved-on trading day, so no cycle closed",
+                json!({ "instrument": A_SHARE, "prompts": prompt_states(&g, &desk_id) }),
+            );
+        } else {
+            // The cycle exists, so the rest is the daemon's own: its evaluation
+            // is queued in the same unit (root §13.2).
+            let cycle: String = g.scalar(
+                "SELECT id FROM position_cycles WHERE desk_id = ?1 AND instrument_id = ?2 \
+                 ORDER BY closed_at_ns LIMIT 1",
+                &[&desk_id, &A_SHARE],
+            );
+            assert!(
+                waited(SETTLES, "the cycle's evaluation prompt", || {
+                    g.scalar::<i64>(
+                        "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION'",
+                        &[&desk_id],
+                    ) >= 1
+                }),
+                "a closed cycle queues its EVALUATION prompt (root §13.2)"
+            );
+            g.note(
+                scenario,
+                "the same session sold the lot it had bought on the staged trading day: the native cycle closed and MarketRig queued its evaluation",
+                json!({ "cycle": cycle, "prompts": prompt_states(&g, &desk_id) }),
+            );
+        }
     }
 
-    // The two limitations the cell cannot remove, recorded in the bundle rather
-    // than argued away (`a-share-engine` SPEC §2.1, §6).
+    // The three limitations the cell cannot remove, recorded in the bundle
+    // rather than argued away (`a-share-engine` SPEC §2.1, §6).
     g.note(
         scenario,
         "limitations of this cell, recorded with its evidence",
         json!({
             "source_delay": "UNKNOWN — the provider publishes no source timestamp, so no fill here is a claim about market time",
             "corporate_actions": "a holding carried across a dividend or split date is not adjusted, so its realized figure is incomparable and must never be attributed to strategy",
+            "staged_calendar": format!(
+                "the buy was dated {buy_day} and the sell {sell_day} through the controlled clock, but both traded against the same day's real quotes minutes apart: the realized figure is a harness artifact, not a market outcome"
+            ),
         }),
     );
 

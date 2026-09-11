@@ -1129,8 +1129,13 @@ async fn poll_cn(
     }
     loop {
         // A HiThink stand-in lifts the calendar gate on cadence exactly as the
-        // quote stand-in does (§10.1, feature SPEC `hithink-a-share` §3).
-        let standin = assume_open || market.hithink().is_some_and(|h| h.standin);
+        // quote stand-in does (§10.1, feature SPEC `hithink-a-share` §3), and so
+        // does the controlled clock: a staged node's own Shanghai day is not the
+        // wall clock's, so the leg must keep polling the real service at any
+        // hour for the staged day to re-establish (`a-share-engine` §6, AE-10).
+        let standin = assume_open
+            || market.hithink().is_some_and(|h| h.standin)
+            || test_clock_start_ns().is_some();
         let cadence_phase = match (standin, market.hithink()) {
             (true, _) => Phase::Open,
             (false, Some(hithink)) => hithink.cn_phase(now_ns()).0,

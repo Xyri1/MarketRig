@@ -537,7 +537,7 @@ fn default_trading_days() -> BTreeSet<String> {
 
 /// Monday through Friday in Asia/Shanghai. Day 0 of the Unix epoch was a
 /// Thursday, so `(days + 4) % 7` is 0 for Sunday.
-fn weekday(unix_s: i64) -> bool {
+pub fn weekday(unix_s: i64) -> bool {
     let days = (unix_s + 8 * 3_600).div_euclid(86_400);
     (1..=5).contains(&(days + 4).rem_euclid(7))
 }
@@ -728,7 +728,7 @@ async fn ht_historical(
 
 /// The Asia/Shanghai midnight opening the day one Unix second falls in — what a
 /// current-day bar's `date_ms` carries (F7 §2.2).
-fn shanghai_midnight_s(unix_s: i64) -> i64 {
+pub fn shanghai_midnight_s(unix_s: i64) -> i64 {
     (unix_s + 8 * 3_600).div_euclid(86_400) * 86_400 - 8 * 3_600
 }
 

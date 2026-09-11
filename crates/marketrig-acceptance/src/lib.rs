@@ -591,15 +591,6 @@ impl Harness {
         self.record(scenario, "OK", note, data);
     }
 
-    /// A cell whose mechanics all held but whose scenario is not finished yet —
-    /// E7's first sitting, which can buy and watch the T+1 refusal but cannot
-    /// close the cycle until a later supported session (`a-share-engine`
-    /// feature SPEC §6). Never a pass, never a failure.
-    pub fn partial(&mut self, scenario: &str, note: &str, data: Value) {
-        eprintln!("PARTIAL {scenario}: {note}");
-        self.record(scenario, "PARTIAL", note, data);
-    }
-
     /// An aspect that waits on the agent and did not happen: evidence, not a
     /// product defect (root SPEC §17).
     pub fn inconclusive(&mut self, scenario: &str, note: &str, data: Value) {

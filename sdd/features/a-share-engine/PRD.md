@@ -4,15 +4,15 @@
 
 **Status:** Implemented on macOS 2026-09-10 by [slice 014](../../slices/014-a-share-engine.md); Windows checks and the attended E7 close remain outstanding, so root contracts are not yet amended.
 
-**Next work:** Slice 014 exit: Windows checks and the attended E7 cells (first sitting partial, later-session close). [FEASIBILITY.md](FEASIBILITY.md) records the evidence and known defects.
+**Next work:** Slice 014 exit: Windows checks and the attended E7 cells (one sitting each, on the staged trading day of AE-10). [FEASIBILITY.md](FEASIBILITY.md) records the evidence and known defects.
 
 ## 1. Motivation
 
-_Decision basis: per D4, D20, D38, D75, D76, D78, D84; proposed amendments AE-1–AE-9._
+_Decision basis: per D4, D20, D38, D75, D76, D78, D84; proposed amendments AE-1–AE-10._
 
 An A-share desk should not learn from a same-day round trip in shares bought that day, a fill outside its supported session, or a fill beyond the daily band. MarketRig keeps NautilusTrader as the sole producer of fills, fees, balances, and realized P&L, and enforces the supported venue restrictions around it.
 
-This is a proposal to narrow D76's physics gaps and amend D78's form-only, phase-independent GTC contract for CN. It also refines the approval execution boundary in root SPEC §12.3. AE-1–AE-9 record the intended amendments for slice 014; root contracts remain delivered truth until its exit checks pass and durable changes are merged back. US and Hong Kong are unchanged. Evidence and source links are in [RESEARCH.md](RESEARCH.md).
+This is a proposal to narrow D76's physics gaps and amend D78's form-only, phase-independent GTC contract for CN. It also refines the approval execution boundary in root SPEC §12.3. AE-1–AE-10 record the intended amendments for slice 014; root contracts remain delivered truth until its exit checks pass and durable changes are merged back. US and Hong Kong are unchanged. Evidence and source links are in [RESEARCH.md](RESEARCH.md).
 
 ## 2. Outcome
 
@@ -26,7 +26,7 @@ The supported CN catalog trades only in continuous sessions on exchange trading 
 4. Correct whole-lot buys, whole odd-remainder sells, and board/type-specific caps for main-board and ChiNext instruments.
 5. Approval-time revalidation, restart ordering, and safe suspension across unavailable data or provider changes.
 6. Honest agent-visible limitations, seeded only for new desks; existing agent-owned constitutions remain untouched.
-7. Deterministic next-session, expiry, and recovery evidence, followed by an attended next-trading-day close and queued evaluation.
+7. Deterministic next-session, expiry, and recovery evidence, followed by an attended close on a staged trading day and queued evaluation.
 
 ## 4. Non-goals and deliberate approximations
 
@@ -47,4 +47,4 @@ The supported CN catalog trades only in continuous sessions on exchange trading 
 - A sellable 250-share balance permits 50, 100, 150, 200, and 250, but not 125. Main-board and ChiNext caps differ as specified.
 - Native GTC orders are canceled at the simulator’s day deadline without a new quote and cannot execute after restart on a later day. Reservations release through authoritative terminal order events.
 - Pending approvals reserve nothing and rerun execution checks when approved; competing sells cannot reserve the same shares.
-- The macOS feasibility record supports implementation planning; defect-reproduction tests do not establish production fixes. An attended same-day refusal alone is partial evidence; full E7 completion requires the later close.
+- The macOS feasibility record supports implementation planning; defect-reproduction tests do not establish production fixes. An attended refusal alone is partial evidence; full E7 completion needs the close as well, which AE-10 reaches in the same sitting by staging the trading day.

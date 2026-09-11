@@ -73,7 +73,7 @@ The root §12.2 read gains two fields on every instrument and permits one null:
 - While `a_share_feed` is `YAHOO`, no list is fetched and the `CN` phase is R1's weekday rule with `calendar: "WEEKDAY"`.
 - While `HITHINK`: on the first `CN` cycle under it, and on the first cycle after 00:00 Asia/Shanghai, fetch `GET {base}/api/a-share/calendar/trading-days` under §2.2's retry bound; on success replace the in-memory set of `date` strings (`yyyyMMdd`) and record `calendar_fetched_at_ns`; on failure keep the previous set or none.
 - `CN` phase: `OPEN` iff the Shanghai session rule (R1 SPEC §2.2) holds **and** either today's `yyyyMMdd` is in the set (`calendar: "HITHINK"`) or no set has been fetched (`calendar: "WEEKDAY"`). With a set fetched and today absent, `CLOSED` with `calendar: "HITHINK"`.
-- Under `MARKETRIG_TEST_HITHINK_URL` the cadence gate is lifted exactly as under `MARKETRIG_TEST_QUOTE_URL` (R1 SPEC §10.1): the poller ticks at any hour and observations still label the real phase from the stand-in's calendar.
+- Under `MARKETRIG_TEST_HITHINK_URL` the cadence gate is lifted exactly as under `MARKETRIG_TEST_QUOTE_URL` (R1 SPEC §10.1): the poller ticks at any hour and observations still label the real phase from the stand-in's calendar. `MARKETRIG_TEST_CLOCK_NS` lifts it the same way (`a-share-engine` SPEC §6, per AE-10), against the real service: a staged node's own Shanghai day is not the wall clock's, so it must keep polling while the wall-clock market is closed for a staged day to establish or re-establish its readiness.
 - The set is never persisted (root §15's volatile rule).
 
 ## 4. The research passthrough (HT-4)
@@ -173,7 +173,7 @@ The acceptance crate's stand-in server (R1 SPEC §10.1) answers, under the path 
 
 ### 6.3 Experiment scenario
 
-- **E7 — A-share on the real service.** Attended, one cell per platform and runtime, real key. The operator configures the provider in Settings. The session is asked to read `600519.XSHG`'s latest income statement and valuation through `marketrig`, then to trade one lot on the paper book and close it. The harness verifies the provider row, the `CN` observation's provider and calendar fields, the cycle row and its queued evaluation; the reads themselves are inconclusive by construction.
+- **E7 — A-share on the real service.** Attended, one cell per platform and runtime, real key, one sitting at any wall-clock hour. The operator configures the provider in Settings. The session is asked to read `600519.XSHG`'s latest income statement and valuation through `marketrig`, then to buy one lot on the paper book with a MARKET order, watch T+1 refuse the same-day sell, and — once the harness has staged this desk's trading day forward through the controlled clock (`a-share-engine` SPEC §6, per AE-10) — sell it. The harness verifies the provider row, the `CN` observation's provider and calendar fields, the cycle row and its queued evaluation; the reads themselves are inconclusive by construction.
 
 ## 7. Required checks
 
