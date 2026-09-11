@@ -643,6 +643,13 @@ impl Hithink {
                 "The api_key must not be empty.".to_string(),
             ));
         }
+        // A key an HTTP header cannot carry (a control byte from a multi-line
+        // paste) would otherwise surface as PROVIDER_UNREACHABLE "builder error".
+        if reqwest::header::HeaderValue::from_str(&key).is_err() {
+            return Err(HithinkError::Validation(
+                "The api_key contains a character an HTTP header cannot carry.".to_string(),
+            ));
+        }
         let answer = self
             .fetch(VALIDATE_PATH, VALIDATE_QUERY, &key)
             .await
@@ -1146,6 +1153,18 @@ pub(crate) mod provider {
             hithink.put("   ").await.unwrap_err().code(),
             "VALIDATION",
             "an empty key is refused before the request"
+        );
+        assert_eq!(
+            hithink
+                .put(
+                    "abc
+def"
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "VALIDATION",
+            "a key with a control byte is refused before the request"
         );
 
         // A good key: one request again, then the key, the row, and one event.
