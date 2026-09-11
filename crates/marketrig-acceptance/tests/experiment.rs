@@ -1,18 +1,19 @@
-//! The acceptance experiment: E1 … E4, E6 and E7, the attended scenarios.
+//! The acceptance experiment: E1 … E4, E6, E7 and E8, the attended scenarios.
 //!
 //! Contract: `sdd/features/r1-equity-paper-trading/SPEC.md` §10.3,
 //! `sdd/features/r2-scheduled-triggers/SPEC.md` §10.3,
 //! `sdd/features/openviking-continuity/SPEC.md` §7.3,
-//! `sdd/features/hithink-a-share/SPEC.md` §6.3, and root `sdd/SPEC.md`
+//! `sdd/features/hithink-a-share/SPEC.md` §6.3,
+//! `sdd/features/event-triggers/SPEC.md` §7.2, and root `sdd/SPEC.md`
 //! §17, per D75. One operator-attended run per platform-and-runtime cell, on
 //! real Yahoo, the real HiThink service, and a real runtime CLI, with MCP
 //! registration performed by hand (R1 keeps it operator-performed, feature SPEC
 //! §8).
 //!
 //! **Operator variable:** `MARKETRIG_EXPERIMENT` selects the cell — `codex` runs
-//! E1, E3, E4, E6, and E7; `claude` runs E2 and the same four. Unset or anything
-//! else skips them all cleanly, which is what CI and every unattended `cargo
-//! test` do; E6 additionally skips with evidence unless the operator's
+//! E1, E3, E4, E6, E7, and E8; `claude` runs E2 and the same five. Unset or
+//! anything else skips them all cleanly, which is what CI and every unattended
+//! `cargo test` do; E6 additionally skips with evidence unless the operator's
 //! prerequisites and provider are named, and E7 unless
 //! `MARKETRIG_EXPERIMENT_HITHINK_API_KEY` carries a real HiThink key. A cell's
 //! scenarios run one after the
@@ -2057,6 +2058,302 @@ fn a_share(scenario: &str, cell: &str, runtime: &str) {
         "the key is in no file of the bundle",
         json!({ "scanned": g.out.display().to_string() }),
     );
+}
+
+// ---------------------------------------------------------------------------
+// E8 — a producer hands the desk its findings, attended
+// (`sdd/features/event-triggers/SPEC.md` §7.2)
+// ---------------------------------------------------------------------------
+
+/// The request id a producer would repeat after a failure, and the three lines
+/// it hands over. Both are made up: E8 proves the path, not the research.
+const E8_REQUEST: &str = "e8-findings-2026-09-11";
+const E8_INPUT: &str = "Toolmakers led the tape again: three of the five names we watch closed up.\n\
+                        Two of them reported after the close and neither guided down.\n\
+                        Nothing in the group traded on volume worth calling unusual.";
+
+#[test]
+fn e8_codex_cli() {
+    handoff("E8", "codex", "Codex CLI");
+}
+
+#[test]
+fn e8_claude_code() {
+    handoff("E8", "claude", "Claude Code");
+}
+
+/// **E8 — a producer hands the desk its findings** (`event-triggers` §7.2). The
+/// job is defined once, with no schedule, and runs only when something invokes
+/// it; the harness plays the producer. As in E4, MarketRig launches the runtime
+/// itself and the operator's console becomes the desk's terminal.
+///
+/// Mechanical and asserted: the acceptance, the firing's request identity and
+/// input, the delivery the daemon's own rows must agree with, and the replay
+/// that answers the original firing and queues nothing. Whether the text
+/// reached the session as its own input and what the agent made of it is the
+/// operator's to confirm and ends `INCONCLUSIVE`. No trade is made.
+fn handoff(scenario: &str, cell: &str, runtime: &str) {
+    if std::env::var(CELL).unwrap_or_default() != cell {
+        eprintln!(
+            "{scenario} ({runtime}) skipped: set {CELL}={cell} to run this cell attended, \
+             and pass `-- --nocapture` so its instructions are visible."
+        );
+        return;
+    }
+    let _terminal = TERMINAL.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let mut g = Harness::new(&format!("experiment-e8-{cell}"));
+    g.real_feed();
+    let daemon = g.spawn(scenario);
+    let endpoint = daemon.endpoint.clone();
+
+    // Startup discovery is skipped under the test seam (R3 §2), so the cell
+    // asks for it: the operator's own installation, resolved from the PATH.
+    let (status, row) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        &format!("/runtimes/{cell}/discover"),
+        Some("{}"),
+    );
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["state"], "AVAILABLE",
+        "the cell's runtime must be installed and discoverable: {row}"
+    );
+
+    let desk = format!("{cell}-e8-{}", marketrig_acceptance::now_secs());
+    let (status, created) = g.api(
+        scenario,
+        &endpoint,
+        "POST",
+        "/desks",
+        Some(&json!({ "name": desk, "runtime": cell }).to_string()),
+    );
+    assert_eq!(status, 201, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+
+    // The job, defined once and never again: no schedule, so it runs only when
+    // a producer invokes it (§1).
+    let (exit, trigger) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &desk,
+            "--name",
+            "review-research",
+            "--brief",
+            "Read the findings handed to you and answer with a one-sentence summary of them. \
+             Do not trade.",
+        ],
+    );
+    assert_eq!(exit, 0, "{trigger}");
+    let trigger_id = trigger["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        trigger["recurrence"], "RECURRING",
+        "a create with no schedule is recurring (§1): {trigger}"
+    );
+    assert!(
+        trigger.get("schedule").is_none(),
+        "the job has no schedule (§1): {trigger}"
+    );
+
+    let instructions = format!(
+        "\n\
+         ===========================================================================\n\
+         {scenario} — a producer hands the desk its findings (feature SPEC §7.2)\n\
+         ===========================================================================\n\
+         \n\
+         Desk:      {desk}\n\
+         Runtime:   {runtime} {version} at {path}\n\
+         Trigger:   review-research (recurring, no schedule)\n\
+         Data root: {root}\n\
+         Evidence:  {root}\n\
+         \n\
+         Nothing to register and nothing to start, as in E4: MarketRig launches\n\
+         the runtime itself and this console becomes the desk's terminal.\n\
+         \n\
+         1. Answer whatever {runtime} asks on first launch — trust, permissions,\n\
+         \x20  the development channel — and nothing else.\n\
+         \n\
+         2. The harness now plays a producer: it invokes `review-research` once,\n\
+         \x20  with a request id it could safely repeat, handing over three lines\n\
+         \x20  of made-up findings. There is no schedule and nothing is due; the\n\
+         \x20  invocation is the whole reason the job runs.\n\
+         \n\
+         3. After the orientation MarketRig sends first, you must see\n\
+         \x20  `MarketRig TRIGGER_RESULT <id>:` arrive as the session's own input,\n\
+         \x20  with those three lines inside it. Let the session answer with its\n\
+         \x20  one-sentence summary and read what it says. Whether it did is\n\
+         \x20  recorded INCONCLUSIVE — the daemon's rows are what fail the cell.\n\
+         \n\
+         4. The harness then repeats the same request id. Nothing must reach the\n\
+         \x20  session a second time: a replay answers the first firing.\n\
+         \n\
+         5. No trade is made in this cell.\n\
+         \n\
+         The harness waits up to {patience} minutes per step. While this console is\n\
+         \x20  the terminal, ^C goes to the session, not the harness: abort from another\n\
+         \x20  terminal with `pkill -f deps/experiment-`, then `stty sane` here.\n\
+         ===========================================================================\n",
+        version = row["version"].as_str().unwrap_or_default(),
+        path = row["executable_path"].as_str().unwrap_or_default(),
+        root = g.out.display(),
+        patience = PATIENCE.as_secs() / 60,
+    );
+    println!("{instructions}");
+    g.write_evidence("instructions-e8.txt", &instructions);
+    g.note(
+        scenario,
+        "attended cell prepared; the console is about to become the desk's terminal",
+        json!({ "desk": desk, "desk_id": desk_id, "trigger": trigger }),
+    );
+
+    // The console is the terminal from here until the cell ends.
+    let console = console::attach(&endpoint, &desk_id);
+
+    let (exit, accepted) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "invoke",
+            &desk,
+            "review-research",
+            "--request-id",
+            E8_REQUEST,
+            "--input",
+            E8_INPUT,
+        ],
+    );
+    assert_eq!(exit, 0, "{accepted}");
+    assert_eq!(accepted["outcome"], "ACCEPTED", "{accepted}");
+    let firing_id = accepted["firing"]["id"].as_str().expect("id").to_owned();
+    assert_eq!(accepted["firing"]["trigger_id"], trigger_id.as_str());
+    assert_eq!(accepted["firing"]["request_id"], E8_REQUEST);
+    assert_eq!(
+        accepted["firing"]["input"], E8_INPUT,
+        "the firing carries the producer's text verbatim (§2.2)"
+    );
+    g.note(
+        scenario,
+        "the producer's invocation was accepted as one firing carrying its request id and its input",
+        json!({ "firing": accepted["firing"] }),
+    );
+
+    let started = waited(PATIENCE, "MarketRig to start the runtime", || {
+        !kinds(&g, &desk_id, "SESSION_STARTED").is_empty()
+    });
+    if !started {
+        g.inconclusive(
+            scenario,
+            "no session was started within the cell's patience",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    let ready = waited(PATIENCE, "the session to become ready", || {
+        !kinds(&g, &desk_id, "SESSION_READY").is_empty()
+    });
+    if !ready {
+        g.inconclusive(
+            scenario,
+            "the launch never reached readiness — the operator may not have answered its first-launch questions",
+            json!({ "waited_secs": PATIENCE.as_secs() }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+
+    let delivered = |g: &Harness| -> i64 {
+        g.scalar(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'TRIGGER_RESULT' \
+             AND state = 'DELIVERED'",
+            &[&desk_id],
+        )
+    };
+    if !waited(
+        PATIENCE,
+        "the invoked firing's result to be delivered",
+        || delivered(&g) >= 1,
+    ) {
+        g.inconclusive(
+            scenario,
+            "the invoked result was never delivered within the cell's patience",
+            json!({ "firing_id": firing_id, "prompts": prompt_states(&g, &desk_id) }),
+        );
+        console.detach();
+        finish(&mut g, scenario, daemon, &desk_id);
+        return;
+    }
+    assert_delivery(&g, &desk_id);
+    g.note(
+        scenario,
+        "MarketRig delivered the invoked firing's result to the session it started, and the rows agree",
+        json!({ "prompts": prompt_states(&g, &desk_id) }),
+    );
+    g.inconclusive(
+        scenario,
+        "whether the producer's three lines appeared as the session's own input, and what the agent \
+         made of them, is the operator's to confirm on the console",
+        json!({ "expect": format!("MarketRig TRIGGER_RESULT <id>: carrying {E8_REQUEST}") }),
+    );
+
+    // The replay, in the same run: the producer repeats its request id and gets
+    // the first firing back, with nothing new anywhere (§2.3).
+    let prompts_before = g.scalar::<i64>(
+        "SELECT count(*) FROM prompts WHERE desk_id = ?1",
+        &[&desk_id],
+    );
+    println!(
+        "\r\n{scenario}: repeating the same request id now — nothing must reach the session.\r\n"
+    );
+    let (exit, duplicate) = g.cli_json(
+        scenario,
+        &[
+            "--json",
+            "trigger",
+            "invoke",
+            &desk,
+            "review-research",
+            "--request-id",
+            E8_REQUEST,
+            "--input",
+            E8_INPUT,
+        ],
+    );
+    assert_eq!(exit, 0, "a replay is success: {duplicate}");
+    assert_eq!(duplicate["outcome"], "DUPLICATE", "{duplicate}");
+    assert_eq!(duplicate["firing"]["id"], firing_id.as_str());
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM firings WHERE trigger_id = ?1",
+            &[&trigger_id],
+        ),
+        1,
+        "a replay writes no second firing (§2.2)"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1",
+            &[&desk_id],
+        ),
+        prompts_before,
+        "a replay queues no second prompt (§2.2)"
+    );
+    g.note(
+        scenario,
+        "the repeated request id answered the original firing and left no second firing and no second prompt",
+        json!({ "duplicate": duplicate, "prompts": prompt_states(&g, &desk_id) }),
+    );
+
+    console.detach();
+    finish(&mut g, scenario, daemon, &desk_id);
 }
 
 /// Every file under `root` whose bytes contain `needle`, named relative to it.

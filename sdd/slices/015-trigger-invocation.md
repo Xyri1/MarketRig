@@ -77,3 +77,5 @@ After these checks, freeze this slice, record migration 10 and T1–T5/E8 as del
 ## Verification record
 
 Planning (2026-09-11): feature folder complete, root reconciled, local links checked; no runtime pass claimed.
+
+Step 5, macOS (2026-09-11): `cargo test -p marketrig-acceptance --test gate` green through T5 in 963 s — 438 observations, none not-OK, closing on `G1-T5 complete` (bundle `target/acceptance/gate-1789136795/`, deleted after the run). T1 16 steps, T2 5, T3 21, T4 14, T5 8. `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test -p marketrig-acceptance --test experiment` (13 skipped cleanly, E8 included) green. E8 is written and compiles; no attended cell run. Feature SPEC §7.1 was corrected in the same change: with no runtime registered the dispatcher resolves each queued prompt `RUNTIME_UNAVAILABLE`, so T1 and T5 assert the prompt row and never its state, and T3's (c) margin and (d) `dtstart` are the ones the gate needs.

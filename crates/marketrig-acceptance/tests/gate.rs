@@ -1,4 +1,5 @@
-//! The acceptance gate: scenarios G1–O10, then H1–H4, in order, in one test.
+//! The acceptance gate: scenarios G1–O10, then H1–H4, A1–A6 and T1–T5, in
+//! order, in one test.
 //!
 //! Contract: `sdd/features/r0-workspace-desk-identity/SPEC.md` §10 (G1–G11 and
 //! the evidence bundle) and `sdd/features/r1-equity-paper-trading/SPEC.md` §10
@@ -10,8 +11,10 @@
 //! `sdd/features/r5-desktop-approval-controls/SPEC.md` §7.1 (the approval
 //! policies, the events tail, and O7–O10, renumbered from G33–G37's slot by
 //! `openviking-continuity` §7.2) and `sdd/features/hithink-a-share/SPEC.md` §6
-//! (the stand-in's HiThink half and H1–H4), per D75, D84, R0-7, R1-9, R2-8,
-//! R3-8, R5-8, OV-7, HT-6.
+//! (the stand-in's HiThink half and H1–H4) and
+//! `sdd/features/a-share-engine/SPEC.md` §6 (the controlled clock and A1–A6)
+//! and `sdd/features/event-triggers/SPEC.md` §7.1 (invocation and T1–T5), per
+//! D75, D84, R0-7, R1-9, R2-8, R3-8, R5-8, OV-7, HT-6, AE-1, ET-1.
 //! The harness drives
 //! public surfaces only — the real binaries, `marketrig --json`, the loopback
 //! API, the desk's MCP surface through the harness's own MCP client, workspace
@@ -463,6 +466,30 @@ fn one_off(g: &mut Harness, scenario: &str, desk: &str, name: &str, secs: i64) -
     );
     assert_eq!(exit, 0, "{trigger}");
     trigger["id"].as_str().expect("id").to_owned()
+}
+
+/// One `marketrig --json trigger invoke` (`event-triggers` §5): the exit code
+/// and the body, which is the outcome-and-firing object or the refusal
+/// envelope. `input` is the flag pair the call carries, or nothing.
+fn invoke(
+    g: &mut Harness,
+    scenario: &str,
+    desk: &str,
+    trigger: &str,
+    request_id: &str,
+    input: &[&str],
+) -> (i32, Value) {
+    let mut args = vec![
+        "--json",
+        "trigger",
+        "invoke",
+        desk,
+        trigger,
+        "--request-id",
+        request_id,
+    ];
+    args.extend_from_slice(input);
+    g.cli_json(scenario, &args)
 }
 
 /// How many of a desk's prompts have been handed to a session.
@@ -2341,6 +2368,11 @@ fn gate() {
     assert!(
         consumed.get("next_occurrence_ns").is_none(),
         "a null projection is omitted from the resource (§8): {consumed}"
+    );
+    assert_eq!(
+        consumed["enabled"], false,
+        "a one-off is consumed by its own firing, through either entry path \
+         (`event-triggers` §1): {consumed}"
     );
 
     let (exit, prompts) = g.cli_json("G21", &["--json", "prompt", "list", &gamma]);
@@ -8093,6 +8125,815 @@ fn gate() {
         json!({ "example": example, "commission": commission, "taker": taker["outcome"], "accounts": cny }),
     );
 
+    // ======================================================================
+    // Trigger invocation (`event-triggers` feature SPEC §7.1, per ET-1–ET-7).
+    // T1–T5 continue the chain on the same root, on a fresh daemon and a fresh
+    // desk, with **no runtime registered**: both rows are pointed at a path
+    // that does not exist, so the dispatcher resolves every prompt these
+    // scenarios queue `RUNTIME_UNAVAILABLE` instead of launching the stand-in.
+    // Delivery of an invoked firing's prompt is G28's evidence and is not
+    // re-proven here. Every assertion is a route read, a CLI answer, or one
+    // read-only SQLite query.
+    // ======================================================================
+    let tau = format!("tau-{stamp}");
+    let daemon24 = g.spawn("T1");
+    endpoint = daemon24.endpoint.clone();
+    for runtime in ["codex", "claude"] {
+        let (status, unavailable) =
+            g.api("T1", &endpoint, "POST", &discover(runtime), Some(&missing));
+        assert_eq!(status, 200, "{unavailable}");
+        assert_eq!(unavailable["state"], "UNAVAILABLE", "{unavailable}");
+    }
+    // T2 and T4 define code-bearing triggers; the gate's own prologue puts
+    // trigger code back on Always allow, and T4 moves it for its own leg.
+    let (status, ungated) = g.api(
+        "T1",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated}");
+    within(
+        Duration::from_secs(120),
+        "this daemon's OpenViking child",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+    let (exit, created) = g.cli_json("T1", &["--json", "desk", "create", &tau]);
+    assert_eq!(exit, 0, "{created}");
+    let tau_id = created["id"].as_str().expect("id").to_owned();
+
+    // --- T1 — invoke, replay, burst -----------------------------------------
+    let (exit, note) = g.cli_json(
+        "T1",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t1-note",
+            "--brief",
+            "read the input and summarize it",
+        ],
+    );
+    assert_eq!(exit, 0, "{note}");
+    let note_id = note["id"].as_str().expect("id").to_owned();
+    assert_eq!(
+        note["recurrence"], "RECURRING",
+        "a create with no schedule is recurring (§1): {note}"
+    );
+    assert!(
+        note.get("schedule").is_none(),
+        "a schedule-less trigger omits the key (§1): {note}"
+    );
+    assert!(
+        note.get("next_occurrence_ns").is_none(),
+        "a schedule-less trigger is never due (§1): {note}"
+    );
+    assert_eq!(projected(&g, &note_id), None);
+
+    let (exit, accepted) = invoke(&mut g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
+    assert_eq!(exit, 0, "{accepted}");
+    assert_eq!(accepted["outcome"], "ACCEPTED");
+    let first = accepted["firing"].clone();
+    let first_id = first["id"].as_str().expect("id").to_owned();
+    assert_eq!(first["trigger_id"], note_id.as_str());
+    assert_eq!(first["request_id"], "r1");
+    assert_eq!(first["input"], "hello");
+    assert_eq!(first["input_bytes"], json!(5));
+    assert_eq!(
+        first["occurrence_ns"], first["accepted_at_ns"],
+        "an invoked firing's occurrence is its acceptance (§2.2): {first}"
+    );
+    let queued = result_prompts(&g, &tau_id, &first_id);
+    assert_eq!(
+        queued.len(),
+        1,
+        "a code-free firing inserts its prompt in the acceptance unit (§2.2)"
+    );
+    let (_, prompt) = g.cli_json("T1", &["--json", "prompt", "show", &tau, &queued[0]]);
+    assert_eq!(
+        prompt["payload"]["invocation"],
+        json!({ "request_id": "r1", "input_bytes": 5, "input": "hello" }),
+        "the payload carries the input's second home (§3): {prompt}"
+    );
+    // With no runtime registered the dispatcher resolves the row
+    // RUNTIME_UNAVAILABLE as soon as it wakes; either state proves the insert.
+    assert!(
+        matches!(prompt["state"].as_str(), Some("QUEUED" | "FAILED")),
+        "{prompt}"
+    );
+
+    let (exit, replay) = invoke(&mut g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
+    assert_eq!(exit, 0, "a replay is success (§5): {replay}");
+    assert_eq!(replay["outcome"], "DUPLICATE");
+    assert_eq!(
+        replay["firing"], first,
+        "the original firing answers (§2.4)"
+    );
+    let (exit, other_content) = invoke(
+        &mut g,
+        "T1",
+        &tau,
+        "t1-note",
+        "r1",
+        &["--input", "something else entirely"],
+    );
+    assert_eq!(exit, 0, "{other_content}");
+    assert_eq!(other_content["outcome"], "DUPLICATE");
+    assert_eq!(
+        other_content["firing"]["input"], "hello",
+        "identity, not content, is the contract (§2.3): {other_content}"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(firings(&g, &note_id), 1, "two replays wrote nothing");
+    assert_eq!(result_prompts(&g, &tau_id, &first_id).len(), 1);
+
+    // Fifty distinct requests while the first prompt is still unresolved: fifty
+    // firings in acceptance order, fifty prompts, no refusal (§2.3). Driven
+    // through `cli` rather than `cli_json` so the bundle keeps one note for the
+    // burst instead of fifty.
+    let mut burst: Vec<String> = Vec::new();
+    for n in 0..50 {
+        let request = format!("r-burst-{n:02}");
+        let (exit, stdout, stderr) = g.cli(&[
+            "--json",
+            "trigger",
+            "invoke",
+            &tau,
+            "t1-note",
+            "--request-id",
+            &request,
+        ]);
+        assert_eq!(exit, 0, "{request}: {stdout}{stderr}");
+        let body = parse(stdout.trim());
+        assert_eq!(body["outcome"], "ACCEPTED", "{request}: {body}");
+        burst.push(body["firing"]["id"].as_str().expect("id").to_owned());
+    }
+    assert_eq!(firings(&g, &note_id), 51);
+    assert_eq!(
+        firing_ids(&g, &note_id)[1..],
+        burst[..],
+        "the firings are in acceptance order (§2.3)"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM prompts WHERE desk_id = ?1 AND kind = 'TRIGGER_RESULT'",
+            &[&tau_id],
+        ),
+        51,
+        "one prompt per accepted firing, none refused"
+    );
+
+    // A 200,000-byte input: accepted whole, named by size alone in the prompt,
+    // and answered whole by the single firing read (§2.4, §3).
+    let large_file = g.out.join("t1-input.txt");
+    fs::write(&large_file, "x".repeat(200_000)).expect("the large input");
+    let large_path = large_file.display().to_string();
+    let (exit, large) = invoke(
+        &mut g,
+        "T1",
+        &tau,
+        "t1-note",
+        "r-large",
+        &["--input-file", &large_path],
+    );
+    assert_eq!(exit, 0, "{large}");
+    assert_eq!(large["outcome"], "ACCEPTED");
+    assert_eq!(large["firing"]["input_bytes"], json!(200_000));
+    let large_id = large["firing"]["id"].as_str().expect("id").to_owned();
+    let large_prompt = result_prompts(&g, &tau_id, &large_id).remove(0);
+    let (_, oversize) = g.cli_json("T1", &["--json", "prompt", "show", &tau, &large_prompt]);
+    assert_eq!(
+        oversize["payload"]["invocation"],
+        json!({ "request_id": "r-large", "input_bytes": 200_000 }),
+        "an input past the inline bound is named by size alone (§3): {oversize}"
+    );
+    // Read through `cli`: the bundle keeps the note, not 200,000 bytes of it.
+    let (exit, stdout, stderr) = g.cli(&["--json", "trigger", "firing", &tau, &large_id]);
+    assert_eq!(exit, 0, "{stderr}");
+    assert_eq!(
+        parse(stdout.trim())["input"].as_str().map(str::len),
+        Some(200_000),
+        "the single firing read carries the input whole (§2.4)"
+    );
+
+    let (exit, listed) = g.cli_json("T1", &["--json", "trigger", "firings", &tau, &note_id]);
+    assert_eq!(exit, 0, "{listed}");
+    let newest = listed["firings"][0].clone();
+    assert_eq!(newest["id"], large_id.as_str(), "newest first (§8)");
+    assert_eq!(newest["request_id"], "r-large");
+    assert_eq!(newest["input_bytes"], json!(200_000));
+    assert!(
+        newest.get("input").is_none(),
+        "the listing carries no input (§2.4): {newest}"
+    );
+
+    // The same name on another desk is another trigger, and the path names the
+    // desk (§2.3).
+    let (exit, elsewhere) = g.cli_json(
+        "T1",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &gamma,
+            "--name",
+            "t1-note",
+            "--brief",
+            "the same name on another desk",
+        ],
+    );
+    assert_eq!(exit, 0, "{elsewhere}");
+    let elsewhere_id = elsewhere["id"].as_str().expect("id").to_owned();
+    assert_eq!(firings(&g, &elsewhere_id), 0);
+    let (exit, none) = g.cli_json(
+        "T1",
+        &["--json", "trigger", "firings", &gamma, &elsewhere_id],
+    );
+    assert_eq!(exit, 0, "{none}");
+    assert_eq!(none["firings"].as_array().map(Vec::len), Some(0));
+    g.note(
+        "T1",
+        "a schedule-less recurring trigger took one firing per distinct request id, answered two replays with the original firing and neither content nor a second row, accepted fifty distinct requests in order with fifty prompts, carried a 200,000-byte input whole to the firing read and by size alone to the prompt, and left an identically named trigger on another desk untouched",
+        json!({
+            "firing": first, "prompt": prompt["payload"]["invocation"],
+            "burst": burst.len(), "large": large["firing"]["input_bytes"],
+            "other_desk": elsewhere_id,
+        }),
+    );
+
+    // --- T2 — the document --------------------------------------------------
+    let doc_script = script(&g, "t2-env", "env");
+    let doc_input = "three lines\nof made-up\nfindings";
+    let (exit, probe) = g.cli_json(
+        "T2",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t2-env",
+            "--brief",
+            "report the document the daemon handed the child",
+            "--code",
+            &doc_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{probe}");
+    let probe_id = probe["id"].as_str().expect("id").to_owned();
+    assert_eq!(probe["recurrence"], "RECURRING");
+    let (exit, ran) = invoke(
+        &mut g,
+        "T2",
+        &tau,
+        "t2-env",
+        "r-doc",
+        &["--input", doc_input],
+    );
+    assert_eq!(exit, 0, "{ran}");
+    assert_eq!(ran["outcome"], "ACCEPTED");
+    let doc_firing = ran["firing"]["id"].as_str().expect("id").to_owned();
+    await_execution(&g, &doc_firing, Duration::from_secs(20));
+    let (_, reported) = g.cli_json("T2", &["--json", "trigger", "firing", &tau, &doc_firing]);
+    assert_eq!(reported["execution"]["outcome"], "EXITED");
+    assert_eq!(reported["execution"]["exit_code"], 0);
+    let seen = parse(
+        reported["execution"]["stdout"]
+            .as_str()
+            .expect("the captured standard output")
+            .trim(),
+    );
+    assert_eq!(seen["MARKETRIG_DESK_ID"], tau_id.as_str());
+    assert_eq!(seen["MARKETRIG_DESK_NAME"], tau.as_str());
+    assert_eq!(seen["MARKETRIG_TRIGGER_ID"], probe_id.as_str());
+    assert_eq!(seen["MARKETRIG_FIRING_ID"], doc_firing.as_str());
+    assert_eq!(seen["document"]["version"], 1, "the key is additive (§3)");
+    assert_eq!(
+        seen["document"]["invocation"],
+        json!({ "request_id": "r-doc", "input": doc_input }),
+        "the input reaches the child on standard input with the rest (§3)"
+    );
+    assert_eq!(
+        g.scalar::<i64>(
+            "SELECT count(*) FROM executions WHERE firing_id = ?1",
+            &[&doc_firing]
+        ),
+        1
+    );
+    let summarized = result_prompts(&g, &tau_id, &doc_firing);
+    assert_eq!(summarized.len(), 1);
+    let (_, summary) = g.cli_json("T2", &["--json", "prompt", "show", &tau, &summarized[0]]);
+    assert_eq!(summary["payload"]["execution"]["outcome"], "EXITED");
+    assert_eq!(
+        summary["payload"]["invocation"],
+        json!({
+            "request_id": "r-doc", "input_bytes": doc_input.len(), "input": doc_input,
+        }),
+        "{summary}"
+    );
+    g.note(
+        "T2",
+        "an invoked code-bearing firing handed the child a version-1 document carrying the request id and the input beside the four identifiers, and left one execution and one prompt with both the execution summary and the invocation",
+        json!({ "document": seen["document"], "prompt": summary["payload"] }),
+    );
+
+    // --- T3 — one-off through both doors ------------------------------------
+    // (a) Invoked before its instant: consumed at once, and the schedule never
+    //     fires it or misses it.
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 5));
+    let (exit, ahead) = g.cli_json(
+        "T3",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t3-ahead",
+            "--brief",
+            "invoked before its instant",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{ahead}");
+    let ahead_id = ahead["id"].as_str().expect("id").to_owned();
+    assert_eq!(ahead["recurrence"], "ONE_OFF");
+    let (exit, taken) = invoke(&mut g, "T3", &tau, "t3-ahead", "r-ahead", &[]);
+    assert_eq!(exit, 0, "{taken}");
+    assert_eq!(taken["outcome"], "ACCEPTED");
+    for absent in ["input", "input_bytes"] {
+        assert!(
+            taken["firing"].get(absent).is_none(),
+            "an invocation with no input carries the request id alone (§2.4): {taken}"
+        );
+    }
+    let (_, consumed) = g.cli_json("T3", &["--json", "trigger", "show", &tau, "t3-ahead"]);
+    assert_eq!(
+        consumed["enabled"], false,
+        "an invoked one-off is consumed in the same unit (§2.2): {consumed}"
+    );
+    assert!(consumed.get("next_occurrence_ns").is_none(), "{consumed}");
+    assert_eq!(projected(&g, &ahead_id), None);
+    std::thread::sleep(Duration::from_secs(8));
+    assert_eq!(firings(&g, &ahead_id), 1, "the schedule never fired it");
+    assert!(
+        !g.events().iter().any(|event| event.kind == "TRIGGER_MISSED"
+            && event.payload["trigger_id"] == ahead_id.as_str()),
+        "a consumed one-off is neither fired nor missed"
+    );
+
+    // (b) Fired by its schedule first: refused, re-enabled, accepted, replayed.
+    let at = format!("{}Z", marketrig_acceptance::utc(now() + 2));
+    let (exit, scheduled) = g.cli_json(
+        "T3",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t3-scheduled",
+            "--brief",
+            "fired by its schedule first",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{scheduled}");
+    let scheduled_id = scheduled["id"].as_str().expect("id").to_owned();
+    let scheduled_firing = await_firing(&g, &scheduled_id, 0);
+    let (exit, spent) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    assert_eq!(exit, 1, "{spent}");
+    assert_eq!(spent["code"], "TRIGGER_DISABLED");
+    assert!(
+        spent["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(&scheduled_firing)),
+        "the refusal names the consuming firing (§2.2): {spent}"
+    );
+    let (exit, reenabled) =
+        g.cli_json("T3", &["--json", "trigger", "enable", &tau, "t3-scheduled"]);
+    assert_eq!(exit, 0, "{reenabled}");
+    let (exit, second) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    assert_eq!(exit, 0, "{second}");
+    assert_eq!(
+        second["outcome"], "ACCEPTED",
+        "the refusal stored nothing, so the same id is a new request (§2.2)"
+    );
+    let second_firing = second["firing"]["id"].as_str().expect("id").to_owned();
+    let (exit, third) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    assert_eq!(exit, 0, "{third}");
+    assert_eq!(third["outcome"], "DUPLICATE");
+    assert_eq!(third["firing"]["id"], second_firing.as_str());
+    let (_, twice) = g.cli_json("T3", &["--json", "trigger", "show", &tau, "t3-scheduled"]);
+    assert_eq!(twice["enabled"], false, "{twice}");
+    assert_eq!(
+        firing_ids(&g, &scheduled_id),
+        vec![scheduled_firing.clone(), second_firing.clone()],
+        "one scheduled firing and one invoked (§1)"
+    );
+
+    // (c) Missed while disabled: the schedule still owns it until it is
+    //     rescheduled or detached (§2.2's deadline).
+    let deadline = now() + 4;
+    let at = format!("{}Z", marketrig_acceptance::utc(deadline));
+    let (exit, elapsed) = g.cli_json(
+        "T3",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t3-elapsed",
+            "--brief",
+            "disabled through its own instant",
+            "--at",
+            &at,
+        ],
+    );
+    assert_eq!(exit, 0, "{elapsed}");
+    let elapsed_id = elapsed["id"].as_str().expect("id").to_owned();
+    let (exit, stopped) = g.cli_json("T3", &["--json", "trigger", "disable", &tau, "t3-elapsed"]);
+    assert_eq!(exit, 0, "{stopped}");
+    assert!(
+        now() < deadline,
+        "the disable landed after the candidate; the gate's margin is too thin"
+    );
+    std::thread::sleep(Duration::from_secs(5));
+    let (exit, back) = g.cli_json("T3", &["--json", "trigger", "enable", &tau, "t3-elapsed"]);
+    assert_eq!(exit, 0, "{back}");
+    assert!(back.get("next_occurrence_ns").is_none(), "{back}");
+    let (exit, refused) = invoke(&mut g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
+    assert_eq!(exit, 1, "{refused}");
+    assert_eq!(refused["code"], "TRIGGER_ELAPSED");
+    assert_eq!(firings(&g, &elapsed_id), 0);
+    let (exit, detached) = g.cli_json(
+        "T3",
+        &[
+            "--json",
+            "trigger",
+            "update",
+            &tau,
+            "t3-elapsed",
+            "--no-schedule",
+        ],
+    );
+    assert_eq!(exit, 0, "{detached}");
+    assert!(
+        detached.get("schedule").is_none(),
+        "--no-schedule detaches it (§1): {detached}"
+    );
+    assert_eq!(detached["recurrence"], "ONE_OFF", "{detached}");
+    let (exit, invocable) = invoke(&mut g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
+    assert_eq!(exit, 0, "{invocable}");
+    assert_eq!(invocable["outcome"], "ACCEPTED");
+
+    // (d) A recurring rule keeps its schedule across invocations (§2.2 step 5).
+    let dtstart = marketrig_acceptance::utc(now() + 300);
+    let (exit, rule) = g.cli_json(
+        "T3",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t3-rule",
+            "--brief",
+            "invoked between its runs",
+            "--rrule",
+            "FREQ=MINUTELY",
+            "--dtstart",
+            &dtstart,
+            "--tz",
+            "UTC",
+        ],
+    );
+    assert_eq!(exit, 0, "{rule}");
+    let rule_id = rule["id"].as_str().expect("id").to_owned();
+    let due = rule["next_occurrence_ns"].as_i64().expect("a candidate");
+    for request in ["r-d1", "r-d2"] {
+        let (exit, run) = invoke(&mut g, "T3", &tau, "t3-rule", request, &[]);
+        assert_eq!(exit, 0, "{run}");
+        assert_eq!(run["outcome"], "ACCEPTED", "{run}");
+        assert_eq!(
+            projected(&g, &rule_id),
+            Some(due),
+            "an invocation leaves the projection where it was ({request})"
+        );
+    }
+    assert_eq!(firings(&g, &rule_id), 2);
+    let (_, untouched) = g.cli_json("T3", &["--json", "trigger", "show", &tau, "t3-rule"]);
+    assert_eq!(untouched["enabled"], true, "{untouched}");
+    assert_eq!(untouched["next_occurrence_ns"], json!(due), "{untouched}");
+    let (exit, dropped) = g.cli_json("T3", &["--json", "trigger", "delete", &tau, "t3-rule"]);
+    assert_eq!(exit, 0, "{dropped}");
+    g.note(
+        "T3",
+        "a one-off invoked before its instant was consumed and never fired or missed, one the schedule had already fired refused by name until it was re-enabled and then took a new request and its replay, one disabled through its own instant stayed TRIGGER_ELAPSED until --no-schedule detached it, and a minutely rule fired twice on request with its projection unmoved",
+        json!({
+            "ahead": ahead_id, "scheduled": firing_ids(&g, &scheduled_id),
+            "elapsed": refused, "rule_due": due,
+        }),
+    );
+
+    // --- T4 — refusals buffer nothing ---------------------------------------
+    let (exit, unknown) = invoke(&mut g, "T4", &tau, "t4-nobody", "r-unknown", &[]);
+    assert_eq!(exit, 1, "{unknown}");
+    assert_eq!(unknown["code"], "TRIGGER_NOT_FOUND");
+
+    let (exit, doomed) = g.cli_json(
+        "T4",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t4-gone",
+            "--brief",
+            "deleted before anything invokes it",
+        ],
+    );
+    assert_eq!(exit, 0, "{doomed}");
+    let doomed_id = doomed["id"].as_str().expect("id").to_owned();
+    let (exit, deleted) = g.cli_json("T4", &["--json", "trigger", "delete", &tau, "t4-gone"]);
+    assert_eq!(exit, 0, "{deleted}");
+    let (exit, gone) = invoke(&mut g, "T4", &tau, "t4-gone", "r-gone", &[]);
+    assert_eq!(exit, 1, "{gone}");
+    assert_eq!(
+        gone["code"], "TRIGGER_NOT_FOUND",
+        "a deleted trigger leaves the listing the name resolves through (§5)"
+    );
+    assert_eq!(firings(&g, &doomed_id), 0);
+
+    let (exit, off) = g.cli_json(
+        "T4",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t4-off",
+            "--brief",
+            "disabled by the agent",
+        ],
+    );
+    assert_eq!(exit, 0, "{off}");
+    let off_id = off["id"].as_str().expect("id").to_owned();
+    let (exit, disabled) = g.cli_json("T4", &["--json", "trigger", "disable", &tau, "t4-off"]);
+    assert_eq!(exit, 0, "{disabled}");
+    let (exit, shut) = invoke(&mut g, "T4", &tau, "t4-off", "r-off", &[]);
+    assert_eq!(exit, 1, "{shut}");
+    assert_eq!(shut["code"], "TRIGGER_DISABLED");
+    assert!(
+        shut["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("disabled")),
+        "a recurring trigger has no consuming firing to name (§2.2): {shut}"
+    );
+    assert_eq!(firings(&g, &off_id), 0);
+
+    // Under Require approval a pending snapshot refuses and buffers nothing, so
+    // the same request id is a new request once it is approved (§2.3).
+    let (status, gated_policy) = g.api(
+        "T4",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"trigger_code_policy":"REQUIRE_APPROVAL"}"#),
+    );
+    assert_eq!(status, 200, "{gated_policy}");
+    let gated_script = script(&g, "t4-gated", "env");
+    let (exit, gated) = g.cli_json(
+        "T4",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            &tau,
+            "--name",
+            "t4-gated",
+            "--brief",
+            "a script the user has not approved",
+            "--code",
+            &gated_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{gated}");
+    let gated_id = gated["id"].as_str().expect("id").to_owned();
+    let snapshot = gated["code"]["snapshot_id"]
+        .as_str()
+        .expect("a snapshot")
+        .to_owned();
+    assert_eq!(gated["code"]["approval"], "PENDING");
+    let (exit, unapproved) = invoke(&mut g, "T4", &tau, "t4-gated", "r-gated", &[]);
+    assert_eq!(exit, 1, "{unapproved}");
+    assert_eq!(unapproved["code"], "TRIGGER_UNAPPROVED");
+    assert_eq!(firings(&g, &gated_id), 0);
+    let (status, approved) = g.api(
+        "T4",
+        &endpoint,
+        "POST",
+        &decide(&tau_id, &snapshot),
+        Some(approve),
+    );
+    assert_eq!(status, 200, "{approved}");
+    assert_eq!(
+        firings(&g, &gated_id),
+        0,
+        "the refusal buffered nothing to release (§2.2)"
+    );
+    let (exit, now_allowed) = invoke(&mut g, "T4", &tau, "t4-gated", "r-gated", &[]);
+    assert_eq!(exit, 0, "{now_allowed}");
+    assert_eq!(now_allowed["outcome"], "ACCEPTED");
+    assert_eq!(
+        now_allowed["firing"]["code_snapshot_id"],
+        snapshot.as_str(),
+        "the firing names the approved snapshot: {now_allowed}"
+    );
+    let gated_firing = now_allowed["firing"]["id"].as_str().expect("id").to_owned();
+    await_execution(&g, &gated_firing, Duration::from_secs(20));
+    let (status, restored) = g.api(
+        "T4",
+        &endpoint,
+        "PUT",
+        policies,
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{restored}");
+
+    // Form refusals, each with the firings count re-read after it.
+    let long_id = "a".repeat(129);
+    let huge_file = g.out.join("t4-input.txt");
+    fs::write(&huge_file, "x".repeat(262_145)).expect("the oversized input");
+    let huge_path = huge_file.display().to_string();
+    let before = firings(&g, &note_id);
+    let malformed: Vec<(&str, i32, Vec<&str>)> = vec![
+        (
+            "a 129-byte request id",
+            1,
+            vec![
+                "--json",
+                "trigger",
+                "invoke",
+                &tau,
+                "t1-note",
+                "--request-id",
+                &long_id,
+            ],
+        ),
+        (
+            "a request id with a space",
+            1,
+            vec![
+                "--json",
+                "trigger",
+                "invoke",
+                &tau,
+                "t1-note",
+                "--request-id",
+                "r 1",
+            ],
+        ),
+        (
+            "a 262,145-byte input",
+            1,
+            vec![
+                "--json",
+                "trigger",
+                "invoke",
+                &tau,
+                "t1-note",
+                "--request-id",
+                "r-huge",
+                "--input-file",
+                &huge_path,
+            ],
+        ),
+        (
+            "both input flags",
+            2,
+            vec![
+                "--json",
+                "trigger",
+                "invoke",
+                &tau,
+                "t1-note",
+                "--request-id",
+                "r-both",
+                "--input",
+                "x",
+                "--input-file",
+                &huge_path,
+            ],
+        ),
+    ];
+    for (what, expected, args) in &malformed {
+        let (exit, stdout, stderr) = g.cli(args);
+        assert_eq!(exit, *expected, "{what}: {stdout}{stderr}");
+        if *expected == 1 {
+            assert_eq!(
+                parse(stdout.trim())["code"],
+                "INVOCATION_INVALID",
+                "{what}: {stdout}"
+            );
+        }
+        assert_eq!(firings(&g, &note_id), before, "{what} wrote a firing");
+    }
+    g.note(
+        "T4",
+        "an unknown name, a deleted trigger, a disabled one, a pending snapshot, and four malformed requests were all refused with their own code and left no firing; approving the snapshot released nothing, and the same request id was then accepted against it",
+        json!({
+            "unknown": unknown["code"], "deleted": gone["code"], "disabled": shut["code"],
+            "unapproved": unapproved["code"], "approved_firing": gated_firing,
+            "malformed": malformed.iter().map(|(what, _, _)| *what).collect::<Vec<_>>(),
+        }),
+    );
+
+    // --- T5 — duplicates survive restart ------------------------------------
+    let (exit, before_restart) = invoke(
+        &mut g,
+        "T5",
+        &tau,
+        "t1-note",
+        "r-restart",
+        &["--input", "carried across the restart"],
+    );
+    assert_eq!(exit, 0, "{before_restart}");
+    assert_eq!(before_restart["outcome"], "ACCEPTED");
+    let restart_firing = before_restart["firing"]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    let restart_prompt = result_prompts(&g, &tau_id, &restart_firing);
+    assert_eq!(restart_prompt.len(), 1);
+    g.stop("T5", daemon24);
+    let daemon25 = g.spawn("T5");
+    endpoint = daemon25.endpoint.clone();
+    let recovery = g.recoveries().last().expect("a RECOVERY").clone();
+    for nothing in ["executions_lost", "sessions_lost", "prompts_unknown"] {
+        assert_eq!(
+            recovery[nothing],
+            json!([]),
+            "a clean stop leaves nothing lost: {recovery}"
+        );
+    }
+    let (exit, after_restart) = invoke(
+        &mut g,
+        "T5",
+        &tau,
+        "t1-note",
+        "r-restart",
+        &["--input", "carried across the restart"],
+    );
+    assert_eq!(exit, 0, "{after_restart}");
+    assert_eq!(after_restart["outcome"], "DUPLICATE");
+    assert_eq!(after_restart["firing"]["id"], restart_firing.as_str());
+    let (status, replayed) = g.api(
+        "T5",
+        &endpoint,
+        "GET",
+        &format!("/desks/{tau_id}/firings/{restart_firing}"),
+        None,
+    );
+    assert_eq!(status, 200, "{replayed}");
+    assert_eq!(replayed["request_id"], "r-restart");
+    assert_eq!(replayed["input"], "carried across the restart");
+    assert_eq!(
+        result_prompts(&g, &tau_id, &restart_firing),
+        restart_prompt,
+        "a replay queues no second prompt"
+    );
+    let (_, survived) = g.cli_json(
+        "T5",
+        &["--json", "prompt", "show", &tau, &restart_prompt[0]],
+    );
+    assert!(
+        matches!(survived["state"].as_str(), Some("QUEUED" | "FAILED")),
+        "{survived}"
+    );
+    g.stop("T5", daemon25);
+    g.note(
+        "T5",
+        "an accepted request answered its original firing after a clean stop and a restart, with the input intact, no second prompt, and a RECOVERY that lost nothing",
+        json!({ "firing": restart_firing, "recovery": recovery, "prompt": restart_prompt }),
+    );
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-A6 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-T5 complete", json!({ "evidence": evidence }));
 }
