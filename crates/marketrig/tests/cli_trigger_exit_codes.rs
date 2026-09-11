@@ -17,13 +17,16 @@ const FIRING: &str = "01997f00-0000-7000-8000-00000000000c";
 const DESKS: &str =
     r#"{"desks":[{"id":"01997f00-0000-7000-8000-00000000000a","name":"alpha","state":"READY"}]}"#;
 
-const TRIGGERS: &str = r#"{"triggers":[{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","source":"SCHEDULED","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"created_at_ns":10,"updated_at_ns":10},{"id":"01997f00-0000-7000-8000-00000000000d","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"weekday","source":"SCHEDULED","recurrence":"RECURRING","brief":"Trade the open.","schedule":{"rrule":"FREQ=DAILY;BYHOUR=9","dtstart":"2026-09-03T09:30:00","tz":"America/New_York"},"enabled":false,"revision":2,"created_at_ns":11,"updated_at_ns":12}]}"#;
+const TRIGGERS: &str = r#"{"triggers":[{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"created_at_ns":10,"updated_at_ns":10},{"id":"01997f00-0000-7000-8000-00000000000d","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"weekday","recurrence":"RECURRING","brief":"Trade the open.","enabled":false,"revision":2,"created_at_ns":11,"updated_at_ns":12}]}"#;
 
-const TRIGGER_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","source":"SCHEDULED","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"code":{"snapshot_id":"01997f00-0000-7000-8000-0000000000ee","suffix":".py","argv":["{script}"],"timeout_secs":300,"fingerprint":"e3b0","approval":"APPROVED","decided_at_ns":10,"approved_at_ns":10,"source_bytes":9,"source":"print(1)\n"},"created_at_ns":10,"updated_at_ns":10}"#;
+const TRIGGER_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000b","desk_id":"01997f00-0000-7000-8000-00000000000a","name":"morning","recurrence":"ONE_OFF","brief":"Check the tape.","context":"AAPL.XNAS","schedule":{"at_ns":1780000000000000000},"enabled":true,"revision":1,"next_occurrence_ns":1780000000000000000,"code":{"snapshot_id":"01997f00-0000-7000-8000-0000000000ee","suffix":".py","argv":["{script}"],"timeout_secs":300,"fingerprint":"e3b0","approval":"APPROVED","decided_at_ns":10,"approved_at_ns":10,"source_bytes":9,"source":"print(1)\n"},"created_at_ns":10,"updated_at_ns":10}"#;
 
-const FIRINGS: &str = r#"{"firings":[{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000005,"trigger_revision":1,"brief":"Check the tape.","execution":{"state":"COMPLETE","outcome":"EXITED","exit_code":0}},{"id":"01997f00-0000-7000-8000-00000000000e","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1779999999940000000,"accepted_at_ns":1779999999940000003,"trigger_revision":1,"brief":"Check the tape."}]}"#;
+const FIRINGS: &str = r#"{"firings":[{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000005,"trigger_revision":1,"brief":"Check the tape.","request_id":"r1","input_bytes":5,"execution":{"state":"COMPLETE","outcome":"EXITED","exit_code":0}},{"id":"01997f00-0000-7000-8000-00000000000e","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1779999999940000000,"accepted_at_ns":1779999999940000003,"trigger_revision":1,"brief":"Check the tape."}]}"#;
 
-const FIRING_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000005,"trigger_revision":1,"brief":"Check the tape.","execution":{"outcome":"EXITED","stdout":"ok\n"}}"#;
+const FIRING_RESOURCE: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000005,"trigger_revision":1,"brief":"Check the tape.","request_id":"r1","input_bytes":5,"input":"hello","execution":{"outcome":"EXITED","stdout":"ok\n"}}"#;
+
+/// `201 {outcome: ACCEPTED, firing}` — the route's own body (§2.4).
+const ACCEPTED: &str = r#"{"outcome":"ACCEPTED","firing":{"id":"01997f00-0000-7000-8000-00000000000c","desk_id":"01997f00-0000-7000-8000-00000000000a","trigger_id":"01997f00-0000-7000-8000-00000000000b","occurrence_ns":1780000000000000000,"accepted_at_ns":1780000000000000000,"trigger_revision":1,"brief":"Check the tape.","request_id":"r1","input_bytes":5,"input":"hello"}}"#;
 
 /// Every documented route of §8, answered from canned resources.
 fn respond(route: &str, _: &str) -> (u16, &'static str) {
@@ -39,6 +42,9 @@ fn respond(route: &str, _: &str) -> (u16, &'static str) {
         }
         "GET /desks/01997f00-0000-7000-8000-00000000000a/triggers/01997f00-0000-7000-8000-00000000000b/firings" => {
             (200, FIRINGS)
+        }
+        "POST /desks/01997f00-0000-7000-8000-00000000000a/triggers/01997f00-0000-7000-8000-00000000000b/invocations" => {
+            (201, ACCEPTED)
         }
         "GET /desks/01997f00-0000-7000-8000-00000000000a/firings/01997f00-0000-7000-8000-00000000000c" => {
             (200, FIRING_RESOURCE)
@@ -396,8 +402,6 @@ fn usage_errors_exit_two() {
             "--rrule",
             "FREQ=DAILY",
         ],
-        // no schedule at all on create
-        vec!["trigger", "create", "alpha", "--name", "n", "--brief", "b"],
         // the two exclusive clearing flags
         vec![
             "trigger",
@@ -416,6 +420,16 @@ fn usage_errors_exit_two() {
             "--no-code",
             "--code",
             binary,
+        ],
+        // `--no-schedule` beside a schedule shape
+        vec![
+            "trigger",
+            "update",
+            "alpha",
+            "morning",
+            "--no-schedule",
+            "--at",
+            "2026-09-03T14:00:00Z",
         ],
         // a code option without the file it decorates
         vec![
@@ -531,16 +545,21 @@ fn human_output_carries_the_documented_rows_and_fields() {
             "weekday\tRECURRING\tfalse\t\t01997f00-0000-7000-8000-00000000000d".to_string(),
         ]
     );
+    assert!(
+        !stdout(&list).contains("SCHEDULED"),
+        "a trigger has no source (`event-triggers` §1): {list:?}"
+    );
 
     // Firings: id, occurrence, accepted, outcome — one level down into the
-    // execution summary, blank while there is none.
+    // execution summary, blank while there is none — then the request id,
+    // blank on a scheduled firing (`event-triggers` §5).
     let firings = marketrig(root.path(), &["trigger", "firings", DESK, TRIGGER]);
     assert_eq!(code(&firings), 0, "{firings:?}");
     assert_eq!(
         lines(&firings),
         [
-            format!("{FIRING}\t1780000000000000000\t1780000000000000005\tEXITED"),
-            "01997f00-0000-7000-8000-00000000000e\t1779999999940000000\t1779999999940000003\t"
+            format!("{FIRING}\t1780000000000000000\t1780000000000000005\tEXITED\tr1"),
+            "01997f00-0000-7000-8000-00000000000e\t1779999999940000000\t1779999999940000003\t\t"
                 .to_string(),
         ]
     );
@@ -556,7 +575,6 @@ fn human_output_carries_the_documented_rows_and_fields() {
             format!("id: {TRIGGER}"),
             format!("desk_id: {DESK}"),
             "name: morning".to_string(),
-            "source: SCHEDULED".to_string(),
             "recurrence: ONE_OFF".to_string(),
             "brief: Check the tape.".to_string(),
             "context: AAPL.XNAS".to_string(),
@@ -596,10 +614,256 @@ fn human_output_carries_the_documented_rows_and_fields() {
             "accepted_at_ns: 1780000000000000005".to_string(),
             "trigger_revision: 1".to_string(),
             "brief: Check the tape.".to_string(),
+            // The invocation's own fields print like any other (§5).
+            "request_id: r1".to_string(),
+            "input_bytes: 5".to_string(),
+            "input: hello".to_string(),
             format!(
                 "execution: {}",
                 json!({ "outcome": "EXITED", "stdout": "ok\n" })
             ),
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// cli::trigger_invoke_exit_codes and cli::trigger_invoke_output
+// (`event-triggers` §5, §8)
+// ---------------------------------------------------------------------------
+
+/// §5: exit 0 on `ACCEPTED` and `DUPLICATE` alike, 1 on a refusal envelope, 2
+/// on the usage errors, 3 with no daemon; and `create`'s optional schedule with
+/// `update --no-schedule`.
+#[test]
+fn trigger_invoke_exit_codes() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, requests) = fake_daemon(respond);
+    write_endpoint(root.path(), port);
+
+    // ACCEPTED: the documented body, resolved by name through the listing.
+    let accepted = marketrig(
+        root.path(),
+        &[
+            "trigger",
+            "invoke",
+            "alpha",
+            "morning",
+            "--request-id",
+            "r1",
+            "--input",
+            "hello",
+        ],
+    );
+    assert_eq!(code(&accepted), 0, "{accepted:?}");
+    assert_eq!(
+        sent(&requests),
+        [
+            ("GET /health".to_string(), Value::Null),
+            ("GET /desks".to_string(), Value::Null),
+            (format!("GET /desks/{DESK}/triggers"), Value::Null),
+            (
+                format!("POST /desks/{DESK}/triggers/{TRIGGER}/invocations"),
+                json!({ "request_id": "r1", "input": "hello" }),
+            ),
+        ]
+    );
+
+    // `--input-file` carries the file's text; a request id alone carries none.
+    let file = root.path().join("findings.txt");
+    std::fs::write(&file, "three\nlines\nhere\n").expect("write input");
+    let from_file = marketrig(
+        root.path(),
+        &[
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r2",
+            "--input-file",
+            file.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_eq!(code(&from_file), 0, "{from_file:?}");
+    assert_eq!(
+        sent(&requests)[1].1,
+        json!({ "request_id": "r2", "input": "three\nlines\nhere\n" })
+    );
+    let bare = marketrig(
+        root.path(),
+        &["trigger", "invoke", DESK, TRIGGER, "--request-id", "r3"],
+    );
+    assert_eq!(code(&bare), 0, "{bare:?}");
+    assert_eq!(sent(&requests)[1].1, json!({ "request_id": "r3" }));
+
+    // A schedule-less create, and `--no-schedule` as an explicit null.
+    let free = marketrig(
+        root.path(),
+        &[
+            "trigger", "create", DESK, "--name", "review", "--brief", "Read it.",
+        ],
+    );
+    assert_eq!(code(&free), 0, "{free:?}");
+    assert_eq!(
+        sent(&requests)[1].1,
+        json!({ "name": "review", "brief": "Read it." }),
+        "no schedule key at all"
+    );
+    let detach = marketrig(
+        root.path(),
+        &["trigger", "update", DESK, TRIGGER, "--no-schedule"],
+    );
+    assert_eq!(code(&detach), 0, "{detach:?}");
+    assert_eq!(sent(&requests)[1].1, json!({ "schedule": null }));
+
+    // Usage errors, diagnosed before any daemon is contacted (exit 2).
+    let missing = root.path().join("absent.txt");
+    let binary = root.path().join("binary.txt");
+    std::fs::write(&binary, [0x70, 0x79, 0xff, 0xfe, 0x0a]).expect("write binary");
+    for args in [
+        // both input flags at once
+        vec![
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r",
+            "--input",
+            "x",
+            "--input-file",
+            missing.to_str().expect("utf-8 path"),
+        ],
+        // an input file that is not there, and one that is not UTF-8
+        vec![
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r",
+            "--input-file",
+            missing.to_str().expect("utf-8 path"),
+        ],
+        vec![
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r",
+            "--input-file",
+            binary.to_str().expect("utf-8 path"),
+        ],
+        // no request id at all
+        vec!["trigger", "invoke", DESK, TRIGGER],
+    ] {
+        let output = marketrig(root.path(), &args);
+        assert_eq!(code(&output), 2, "{args:?} -> {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).starts_with("error: "),
+            "{args:?} -> {output:?}"
+        );
+    }
+
+    // A DUPLICATE is success: exit 0, the outcome the only difference.
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, _) = fake_daemon(|route, _| match route {
+        "GET /health" => (200, health_ok()),
+        "GET /desks" => (200, DESKS),
+        _ => (200, r#"{"outcome":"DUPLICATE","firing":{"id":"f-1"}}"#),
+    });
+    write_endpoint(root.path(), port);
+    let duplicate = marketrig(
+        root.path(),
+        &["trigger", "invoke", DESK, TRIGGER, "--request-id", "r1"],
+    );
+    assert_eq!(code(&duplicate), 0, "a replay is success: {duplicate:?}");
+
+    // A refusal is the envelope on exit 1.
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, _) = fake_daemon(|route, _| match route {
+        "GET /health" => (200, health_ok()),
+        _ => (
+            409,
+            r#"{"code":"TRIGGER_DISABLED","message":"This trigger is consumed by firing f-1."}"#,
+        ),
+    });
+    write_endpoint(root.path(), port);
+    let refused = marketrig(
+        root.path(),
+        &["trigger", "invoke", DESK, TRIGGER, "--request-id", "r1"],
+    );
+    assert_eq!(code(&refused), 1, "{refused:?}");
+    assert_eq!(
+        String::from_utf8(refused.stderr).expect("utf-8 stderr"),
+        "error: TRIGGER_DISABLED: This trigger is consumed by firing f-1.\n"
+    );
+
+    // No daemon at all is exit 3.
+    let root = tempfile::tempdir().expect("tempdir");
+    let output = marketrig(
+        root.path(),
+        &["trigger", "invoke", DESK, TRIGGER, "--request-id", "r1"],
+    );
+    assert_eq!(code(&output), 3, "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).starts_with("error: DAEMON_UNREACHABLE: "),
+        "{output:?}"
+    );
+}
+
+/// §5: `outcome:` then the firing's own `field: value` lines; `--json` is the
+/// route's body verbatim.
+#[test]
+fn trigger_invoke_output() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, _) = fake_daemon(respond);
+    write_endpoint(root.path(), port);
+
+    let human = marketrig(
+        root.path(),
+        &[
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r1",
+            "--input",
+            "hello",
+        ],
+    );
+    assert_eq!(code(&human), 0, "{human:?}");
+    assert_eq!(
+        lines(&human),
+        [
+            "outcome: ACCEPTED".to_string(),
+            format!("id: {FIRING}"),
+            format!("desk_id: {DESK}"),
+            format!("trigger_id: {TRIGGER}"),
+            "occurrence_ns: 1780000000000000000".to_string(),
+            "accepted_at_ns: 1780000000000000000".to_string(),
+            "trigger_revision: 1".to_string(),
+            "brief: Check the tape.".to_string(),
+            "request_id: r1".to_string(),
+            "input_bytes: 5".to_string(),
+            "input: hello".to_string(),
+        ]
+    );
+
+    let json = marketrig(
+        root.path(),
+        &[
+            "--json",
+            "trigger",
+            "invoke",
+            DESK,
+            TRIGGER,
+            "--request-id",
+            "r1",
+        ],
+    );
+    assert_eq!(code(&json), 0, "{json:?}");
+    assert_eq!(stdout(&json).trim(), ACCEPTED);
 }

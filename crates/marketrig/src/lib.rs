@@ -233,8 +233,8 @@ enum DeskCommand {
 
 #[derive(Subcommand)]
 enum TriggerCommand {
-    /// Define a trigger. Exactly one schedule shape is required.
-    #[command(group = clap::ArgGroup::new("schedule").required(true).args(["at", "rrule"]))]
+    /// Define a trigger. A schedule is optional: without one the trigger is
+    /// recurring and runs only when something invokes it.
     Create {
         /// Desk name or UUID.
         desk: String,
@@ -281,6 +281,10 @@ enum TriggerCommand {
         no_context: bool,
         #[command(flatten)]
         schedule: ScheduleArgs,
+        /// Detach the schedule; the trigger keeps its recurrence and runs only
+        /// when something invokes it.
+        #[arg(long, conflicts_with_all = ["at", "rrule", "dtstart", "tz"])]
+        no_schedule: bool,
         #[command(flatten)]
         code: CodeArgs,
         /// Detach the code snapshot.
@@ -307,6 +311,24 @@ enum TriggerCommand {
         desk: String,
         /// Trigger name or UUID.
         trigger: String,
+    },
+    /// Fire a trigger now, once per distinct request id. Repeating a request id
+    /// answers its original firing (`event-triggers` §5).
+    Invoke {
+        /// Desk name or UUID.
+        desk: String,
+        /// Trigger name or UUID.
+        trigger: String,
+        /// The producer's own stable identity for this piece of work; repeating
+        /// it is safe.
+        #[arg(long = "request-id", value_name = "ID")]
+        request_id: String,
+        /// Raw input carried to the firing, verbatim.
+        #[arg(long, value_name = "TEXT")]
+        input: Option<String>,
+        /// Read the input from this file instead.
+        #[arg(long = "input-file", value_name = "FILE", conflicts_with = "input")]
+        input_file: Option<PathBuf>,
     },
     /// List one trigger's firings, newest first.
     Firings {
@@ -491,6 +513,7 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 | TriggerCommand::Enable { desk, .. }
                 | TriggerCommand::Disable { desk, .. }
                 | TriggerCommand::Delete { desk, .. }
+                | TriggerCommand::Invoke { desk, .. }
                 | TriggerCommand::Firings { desk, .. }
                 | TriggerCommand::Firing { desk, .. } => desk,
             };
@@ -512,6 +535,12 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
                 TriggerCommand::Delete { trigger, .. } => {
                     let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
                     endpoint.delete(&format!("{triggers}/{id}"))
+                }
+                // A deleted trigger is reachable by UUID only, which is how an
+                // old request stays a duplicate (`event-triggers` §5).
+                TriggerCommand::Invoke { trigger, .. } => {
+                    let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
+                    endpoint.post(&format!("{triggers}/{id}/invocations"), body)
                 }
                 TriggerCommand::Firings { trigger, .. } => {
                     let id = resolve(&endpoint, &triggers, "trigger", trigger)?;
@@ -633,11 +662,27 @@ fn trigger_body(command: &TriggerCommand) -> Option<Value> {
                 body.insert("code".to_string(), code);
             }
         }
+        TriggerCommand::Invoke {
+            request_id,
+            input,
+            input_file,
+            ..
+        } => {
+            body.insert("request_id".to_string(), json!(request_id));
+            // The file is read before the daemon is contacted, as `--code` is:
+            // the CLI cannot carry an unreadable or non-UTF-8 one (§5).
+            if let Some(path) = input_file {
+                body.insert("input".to_string(), json!(input_text(path)));
+            } else if let Some(input) = input {
+                body.insert("input".to_string(), json!(input));
+            }
+        }
         TriggerCommand::Update {
             brief,
             context,
             no_context,
             schedule,
+            no_schedule,
             code,
             no_code,
             ..
@@ -654,6 +699,9 @@ fn trigger_body(command: &TriggerCommand) -> Option<Value> {
             if let Some(schedule) = schedule_json(schedule) {
                 body.insert("schedule".to_string(), schedule);
             }
+            if *no_schedule {
+                body.insert("schedule".to_string(), Value::Null);
+            }
             if let Some(code) = code_json(code) {
                 body.insert("code".to_string(), code);
             }
@@ -663,7 +711,7 @@ fn trigger_body(command: &TriggerCommand) -> Option<Value> {
             if body.is_empty() {
                 usage(
                     "trigger update needs at least one of --brief, --context, --no-context, \
-                     a schedule, --code, or --no-code",
+                     a schedule, --no-schedule, --code, or --no-code",
                 );
             }
         }
@@ -676,6 +724,20 @@ fn trigger_body(command: &TriggerCommand) -> Option<Value> {
         _ => return None,
     }
     Some(Value::Object(body))
+}
+
+/// `--input-file`'s text, read before the daemon is contacted: unreadable or
+/// not UTF-8 is a usage error (exit 2), which outranks `DAEMON_UNREACHABLE`
+/// exactly as `--code`'s does (`event-triggers` §5).
+fn input_text(path: &Path) -> String {
+    let source = std::fs::read(path).unwrap_or_else(|e| {
+        usage(format!(
+            "cannot read the input file {}: {e}",
+            path.display()
+        ))
+    });
+    String::from_utf8(source)
+        .unwrap_or_else(|_| usage(format!("the input file {} is not UTF-8", path.display())))
 }
 
 /// `--at` or the recurring trio; clap has already rejected any other shape.
@@ -829,7 +891,14 @@ const LISTS: [(&str, &[&str]); 9] = [
     ),
     (
         "firings",
-        &["id", "occurrence_ns", "accepted_at_ns", "execution.outcome"],
+        &[
+            "id",
+            "occurrence_ns",
+            "accepted_at_ns",
+            "execution.outcome",
+            // Blank on a scheduled firing (`event-triggers` §5).
+            "request_id",
+        ],
     ),
     (
         "prompts",
@@ -841,7 +910,7 @@ const LISTS: [(&str, &[&str]); 9] = [
 /// ordered union covers every resource the CLI reads — a field the resource at
 /// hand does not carry is simply skipped — and anything the daemon adds that
 /// this list does not name follows, so nothing is silently dropped.
-const FIELDS: [&str; 30] = [
+const FIELDS: [&str; 33] = [
     "id",
     "desk_id",
     "name",
@@ -856,6 +925,9 @@ const FIELDS: [&str; 30] = [
     "brief",
     "context",
     "code_snapshot_id",
+    "request_id",
+    "input_bytes",
+    "input",
     "execution",
     "schedule",
     "enabled",
@@ -895,6 +967,19 @@ fn emit(json: bool, body: &str) {
         }
         return;
     }
+    // An invocation answers its outcome and the firing it is about
+    // (`event-triggers` §2.4), the one body that is not itself a resource.
+    if let (Some(outcome), Some(firing)) = (value["outcome"].as_str(), value.get("firing")) {
+        println!("outcome: {outcome}");
+        fields(firing);
+        return;
+    }
+    fields(&value);
+}
+
+/// One resource as `field: value` lines in the daemon's own key order; anything
+/// [`FIELDS`] does not name follows, so nothing is silently dropped.
+fn fields(value: &serde_json::Value) {
     for field in FIELDS {
         if !value[field].is_null() {
             println!("{field}: {}", text(&value[field]));

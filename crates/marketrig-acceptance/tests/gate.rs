@@ -2255,7 +2255,6 @@ fn gate() {
     let once_id = once["id"].as_str().expect("id").to_owned();
     assert_eq!(once["desk_id"], gamma_id.as_str());
     assert_eq!(once["name"], "g21-once");
-    assert_eq!(once["source"], "SCHEDULED");
     assert_eq!(once["recurrence"], "ONE_OFF");
     assert_eq!(once["brief"], "the code-free one-off");
     assert_eq!(once["enabled"], true);
