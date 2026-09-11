@@ -974,6 +974,45 @@ export type TriggerFiringsResponses = {
     200: unknown;
 };
 
+export type InvokeTriggerData = {
+    body: unknown;
+    path: {
+        desk_id: string;
+        trigger_id: string;
+    };
+    query?: never;
+    url: '/desks/{desk_id}/triggers/{trigger_id}/invocations';
+};
+
+export type InvokeTriggerErrors = {
+    /**
+     * INVOCATION_INVALID
+     */
+    400: Envelope;
+    401: Envelope;
+    /**
+     * DESK_NOT_FOUND, TRIGGER_NOT_FOUND
+     */
+    404: Envelope;
+    /**
+     * TRIGGER_DISABLED, TRIGGER_UNAPPROVED, TRIGGER_ELAPSED
+     */
+    409: Envelope;
+};
+
+export type InvokeTriggerError = InvokeTriggerErrors[keyof InvokeTriggerErrors];
+
+export type InvokeTriggerResponses = {
+    /**
+     * DUPLICATE: the original firing
+     */
+    200: unknown;
+    /**
+     * ACCEPTED: a new firing
+     */
+    201: unknown;
+};
+
 export type EventsData = {
     body?: never;
     path?: never;

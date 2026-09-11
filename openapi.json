@@ -2118,6 +2118,96 @@
         }
       }
     },
+    "/desks/{desk_id}/triggers/{trigger_id}/invocations": {
+      "post": {
+        "summary": "`POST /desks/{desk_id}/triggers/{trigger_id}/invocations` (`event-triggers`\n§2): one firing per distinct accepted request, the original firing on a\nreplay. The R2 attribution headers are not read here — a trigger's own code\nmay invoke another trigger, and that provenance is the `request_id` the\nproducer chose (§2.1).",
+        "operationId": "invoke_trigger",
+        "parameters": [
+          {
+            "name": "desk_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "DUPLICATE: the original firing",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "201": {
+            "description": "ACCEPTED: a new firing",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "INVOCATION_INVALID",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "DESK_NOT_FOUND, TRIGGER_NOT_FOUND",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "TRIGGER_DISABLED, TRIGGER_UNAPPROVED, TRIGGER_ELAPSED",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/events": {
       "get": {
         "summary": "One path, two answers: a request that upgrades becomes the tail socket,\nwhich authenticates in its first frame; anything else is the listing, which\ntakes the header bearer like every other route (§4.2, §4.3, §4.4).",
