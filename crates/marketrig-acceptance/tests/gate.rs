@@ -8127,6 +8127,23 @@ fn gate() {
 
     // ======================================================================
     // Trigger invocation (`event-triggers` feature SPEC §7.1, per ET-1–ET-7).
+    // ponytail: rustfmt recurses once per statement and one 8,000-line
+    // body overflows its 1 MB main-thread stack on Windows, so T1–T5 live
+    // in their own function; split again when the next milestone lands.
+    invocation(&mut g, &stamp, &missing);
+
+    let evidence = g.out.display().to_string();
+    g.note("gate", "G1-T5 complete", json!({ "evidence": evidence }));
+}
+
+fn invocation(g: &mut Harness, stamp: &str, missing: &str) {
+    let discover = |runtime: &str| format!("/runtimes/{runtime}/discover");
+    let now = || marketrig_acceptance::now_secs() as i64;
+    let gamma = format!("gamma-{stamp}");
+    let runner = g.trigger_code.display().to_string();
+    let policies = "/settings/policies";
+    let approve = r#"{"decision":"APPROVE"}"#;
+    let decide = |desk_id: &str, id: &str| format!("/desks/{desk_id}/approvals/{id}");
     // T1–T5 continue the chain on the same root, on a fresh daemon and a fresh
     // desk, with **no runtime registered**: both rows are pointed at a path
     // that does not exist, so the dispatcher resolves every prompt these
@@ -8137,10 +8154,10 @@ fn gate() {
     // ======================================================================
     let tau = format!("tau-{stamp}");
     let daemon24 = g.spawn("T1");
-    endpoint = daemon24.endpoint.clone();
+    let mut endpoint = daemon24.endpoint.clone();
     for runtime in ["codex", "claude"] {
         let (status, unavailable) =
-            g.api("T1", &endpoint, "POST", &discover(runtime), Some(&missing));
+            g.api("T1", &endpoint, "POST", &discover(runtime), Some(missing));
         assert_eq!(status, 200, "{unavailable}");
         assert_eq!(unavailable["state"], "UNAVAILABLE", "{unavailable}");
     }
@@ -8191,9 +8208,9 @@ fn gate() {
         note.get("next_occurrence_ns").is_none(),
         "a schedule-less trigger is never due (§1): {note}"
     );
-    assert_eq!(projected(&g, &note_id), None);
+    assert_eq!(projected(g, &note_id), None);
 
-    let (exit, accepted) = invoke(&mut g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
+    let (exit, accepted) = invoke(g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
     assert_eq!(exit, 0, "{accepted}");
     assert_eq!(accepted["outcome"], "ACCEPTED");
     let first = accepted["firing"].clone();
@@ -8206,7 +8223,7 @@ fn gate() {
         first["occurrence_ns"], first["accepted_at_ns"],
         "an invoked firing's occurrence is its acceptance (§2.2): {first}"
     );
-    let queued = result_prompts(&g, &tau_id, &first_id);
+    let queued = result_prompts(g, &tau_id, &first_id);
     assert_eq!(
         queued.len(),
         1,
@@ -8225,7 +8242,7 @@ fn gate() {
         "{prompt}"
     );
 
-    let (exit, replay) = invoke(&mut g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
+    let (exit, replay) = invoke(g, "T1", &tau, "t1-note", "r1", &["--input", "hello"]);
     assert_eq!(exit, 0, "a replay is success (§5): {replay}");
     assert_eq!(replay["outcome"], "DUPLICATE");
     assert_eq!(
@@ -8233,7 +8250,7 @@ fn gate() {
         "the original firing answers (§2.4)"
     );
     let (exit, other_content) = invoke(
-        &mut g,
+        g,
         "T1",
         &tau,
         "t1-note",
@@ -8247,8 +8264,8 @@ fn gate() {
         "identity, not content, is the contract (§2.3): {other_content}"
     );
     std::thread::sleep(Duration::from_secs(2));
-    assert_eq!(firings(&g, &note_id), 1, "two replays wrote nothing");
-    assert_eq!(result_prompts(&g, &tau_id, &first_id).len(), 1);
+    assert_eq!(firings(g, &note_id), 1, "two replays wrote nothing");
+    assert_eq!(result_prompts(g, &tau_id, &first_id).len(), 1);
 
     // Fifty distinct requests while the first prompt is still unresolved: fifty
     // firings in acceptance order, fifty prompts, no refusal (§2.3). Driven
@@ -8271,9 +8288,9 @@ fn gate() {
         assert_eq!(body["outcome"], "ACCEPTED", "{request}: {body}");
         burst.push(body["firing"]["id"].as_str().expect("id").to_owned());
     }
-    assert_eq!(firings(&g, &note_id), 51);
+    assert_eq!(firings(g, &note_id), 51);
     assert_eq!(
-        firing_ids(&g, &note_id)[1..],
+        firing_ids(g, &note_id)[1..],
         burst[..],
         "the firings are in acceptance order (§2.3)"
     );
@@ -8292,7 +8309,7 @@ fn gate() {
     fs::write(&large_file, "x".repeat(200_000)).expect("the large input");
     let large_path = large_file.display().to_string();
     let (exit, large) = invoke(
-        &mut g,
+        g,
         "T1",
         &tau,
         "t1-note",
@@ -8303,7 +8320,7 @@ fn gate() {
     assert_eq!(large["outcome"], "ACCEPTED");
     assert_eq!(large["firing"]["input_bytes"], json!(200_000));
     let large_id = large["firing"]["id"].as_str().expect("id").to_owned();
-    let large_prompt = result_prompts(&g, &tau_id, &large_id).remove(0);
+    let large_prompt = result_prompts(g, &tau_id, &large_id).remove(0);
     let (_, oversize) = g.cli_json("T1", &["--json", "prompt", "show", &tau, &large_prompt]);
     assert_eq!(
         oversize["payload"]["invocation"],
@@ -8347,7 +8364,7 @@ fn gate() {
     );
     assert_eq!(exit, 0, "{elsewhere}");
     let elsewhere_id = elsewhere["id"].as_str().expect("id").to_owned();
-    assert_eq!(firings(&g, &elsewhere_id), 0);
+    assert_eq!(firings(g, &elsewhere_id), 0);
     let (exit, none) = g.cli_json(
         "T1",
         &["--json", "trigger", "firings", &gamma, &elsewhere_id],
@@ -8365,7 +8382,7 @@ fn gate() {
     );
 
     // --- T2 — the document --------------------------------------------------
-    let doc_script = script(&g, "t2-env", "env");
+    let doc_script = script(g, "t2-env", "env");
     let doc_input = "three lines\nof made-up\nfindings";
     let (exit, probe) = g.cli_json(
         "T2",
@@ -8389,18 +8406,11 @@ fn gate() {
     assert_eq!(exit, 0, "{probe}");
     let probe_id = probe["id"].as_str().expect("id").to_owned();
     assert_eq!(probe["recurrence"], "RECURRING");
-    let (exit, ran) = invoke(
-        &mut g,
-        "T2",
-        &tau,
-        "t2-env",
-        "r-doc",
-        &["--input", doc_input],
-    );
+    let (exit, ran) = invoke(g, "T2", &tau, "t2-env", "r-doc", &["--input", doc_input]);
     assert_eq!(exit, 0, "{ran}");
     assert_eq!(ran["outcome"], "ACCEPTED");
     let doc_firing = ran["firing"]["id"].as_str().expect("id").to_owned();
-    await_execution(&g, &doc_firing, Duration::from_secs(20));
+    await_execution(g, &doc_firing, Duration::from_secs(20));
     let (_, reported) = g.cli_json("T2", &["--json", "trigger", "firing", &tau, &doc_firing]);
     assert_eq!(reported["execution"]["outcome"], "EXITED");
     assert_eq!(reported["execution"]["exit_code"], 0);
@@ -8427,7 +8437,7 @@ fn gate() {
         ),
         1
     );
-    let summarized = result_prompts(&g, &tau_id, &doc_firing);
+    let summarized = result_prompts(g, &tau_id, &doc_firing);
     assert_eq!(summarized.len(), 1);
     let (_, summary) = g.cli_json("T2", &["--json", "prompt", "show", &tau, &summarized[0]]);
     assert_eq!(summary["payload"]["execution"]["outcome"], "EXITED");
@@ -8466,7 +8476,7 @@ fn gate() {
     assert_eq!(exit, 0, "{ahead}");
     let ahead_id = ahead["id"].as_str().expect("id").to_owned();
     assert_eq!(ahead["recurrence"], "ONE_OFF");
-    let (exit, taken) = invoke(&mut g, "T3", &tau, "t3-ahead", "r-ahead", &[]);
+    let (exit, taken) = invoke(g, "T3", &tau, "t3-ahead", "r-ahead", &[]);
     assert_eq!(exit, 0, "{taken}");
     assert_eq!(taken["outcome"], "ACCEPTED");
     for absent in ["input", "input_bytes"] {
@@ -8481,9 +8491,9 @@ fn gate() {
         "an invoked one-off is consumed in the same unit (§2.2): {consumed}"
     );
     assert!(consumed.get("next_occurrence_ns").is_none(), "{consumed}");
-    assert_eq!(projected(&g, &ahead_id), None);
+    assert_eq!(projected(g, &ahead_id), None);
     std::thread::sleep(Duration::from_secs(8));
-    assert_eq!(firings(&g, &ahead_id), 1, "the schedule never fired it");
+    assert_eq!(firings(g, &ahead_id), 1, "the schedule never fired it");
     assert!(
         !g.events().iter().any(|event| event.kind == "TRIGGER_MISSED"
             && event.payload["trigger_id"] == ahead_id.as_str()),
@@ -8509,8 +8519,8 @@ fn gate() {
     );
     assert_eq!(exit, 0, "{scheduled}");
     let scheduled_id = scheduled["id"].as_str().expect("id").to_owned();
-    let scheduled_firing = await_firing(&g, &scheduled_id, 0);
-    let (exit, spent) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    let scheduled_firing = await_firing(g, &scheduled_id, 0);
+    let (exit, spent) = invoke(g, "T3", &tau, "t3-scheduled", "r-a", &[]);
     assert_eq!(exit, 1, "{spent}");
     assert_eq!(spent["code"], "TRIGGER_DISABLED");
     assert!(
@@ -8522,21 +8532,21 @@ fn gate() {
     let (exit, reenabled) =
         g.cli_json("T3", &["--json", "trigger", "enable", &tau, "t3-scheduled"]);
     assert_eq!(exit, 0, "{reenabled}");
-    let (exit, second) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    let (exit, second) = invoke(g, "T3", &tau, "t3-scheduled", "r-a", &[]);
     assert_eq!(exit, 0, "{second}");
     assert_eq!(
         second["outcome"], "ACCEPTED",
         "the refusal stored nothing, so the same id is a new request (§2.2)"
     );
     let second_firing = second["firing"]["id"].as_str().expect("id").to_owned();
-    let (exit, third) = invoke(&mut g, "T3", &tau, "t3-scheduled", "r-a", &[]);
+    let (exit, third) = invoke(g, "T3", &tau, "t3-scheduled", "r-a", &[]);
     assert_eq!(exit, 0, "{third}");
     assert_eq!(third["outcome"], "DUPLICATE");
     assert_eq!(third["firing"]["id"], second_firing.as_str());
     let (_, twice) = g.cli_json("T3", &["--json", "trigger", "show", &tau, "t3-scheduled"]);
     assert_eq!(twice["enabled"], false, "{twice}");
     assert_eq!(
-        firing_ids(&g, &scheduled_id),
+        firing_ids(g, &scheduled_id),
         vec![scheduled_firing.clone(), second_firing.clone()],
         "one scheduled firing and one invoked (§1)"
     );
@@ -8572,10 +8582,10 @@ fn gate() {
     let (exit, back) = g.cli_json("T3", &["--json", "trigger", "enable", &tau, "t3-elapsed"]);
     assert_eq!(exit, 0, "{back}");
     assert!(back.get("next_occurrence_ns").is_none(), "{back}");
-    let (exit, refused) = invoke(&mut g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
+    let (exit, refused) = invoke(g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
     assert_eq!(exit, 1, "{refused}");
     assert_eq!(refused["code"], "TRIGGER_ELAPSED");
-    assert_eq!(firings(&g, &elapsed_id), 0);
+    assert_eq!(firings(g, &elapsed_id), 0);
     let (exit, detached) = g.cli_json(
         "T3",
         &[
@@ -8593,7 +8603,7 @@ fn gate() {
         "--no-schedule detaches it (§1): {detached}"
     );
     assert_eq!(detached["recurrence"], "ONE_OFF", "{detached}");
-    let (exit, invocable) = invoke(&mut g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
+    let (exit, invocable) = invoke(g, "T3", &tau, "t3-elapsed", "r-elapsed", &[]);
     assert_eq!(exit, 0, "{invocable}");
     assert_eq!(invocable["outcome"], "ACCEPTED");
 
@@ -8622,16 +8632,16 @@ fn gate() {
     let rule_id = rule["id"].as_str().expect("id").to_owned();
     let due = rule["next_occurrence_ns"].as_i64().expect("a candidate");
     for request in ["r-d1", "r-d2"] {
-        let (exit, run) = invoke(&mut g, "T3", &tau, "t3-rule", request, &[]);
+        let (exit, run) = invoke(g, "T3", &tau, "t3-rule", request, &[]);
         assert_eq!(exit, 0, "{run}");
         assert_eq!(run["outcome"], "ACCEPTED", "{run}");
         assert_eq!(
-            projected(&g, &rule_id),
+            projected(g, &rule_id),
             Some(due),
             "an invocation leaves the projection where it was ({request})"
         );
     }
-    assert_eq!(firings(&g, &rule_id), 2);
+    assert_eq!(firings(g, &rule_id), 2);
     let (_, untouched) = g.cli_json("T3", &["--json", "trigger", "show", &tau, "t3-rule"]);
     assert_eq!(untouched["enabled"], true, "{untouched}");
     assert_eq!(untouched["next_occurrence_ns"], json!(due), "{untouched}");
@@ -8641,13 +8651,13 @@ fn gate() {
         "T3",
         "a one-off invoked before its instant was consumed and never fired or missed, one the schedule had already fired refused by name until it was re-enabled and then took a new request and its replay, one disabled through its own instant stayed TRIGGER_ELAPSED until --no-schedule detached it, and a minutely rule fired twice on request with its projection unmoved",
         json!({
-            "ahead": ahead_id, "scheduled": firing_ids(&g, &scheduled_id),
+            "ahead": ahead_id, "scheduled": firing_ids(g, &scheduled_id),
             "elapsed": refused, "rule_due": due,
         }),
     );
 
     // --- T4 — refusals buffer nothing ---------------------------------------
-    let (exit, unknown) = invoke(&mut g, "T4", &tau, "t4-nobody", "r-unknown", &[]);
+    let (exit, unknown) = invoke(g, "T4", &tau, "t4-nobody", "r-unknown", &[]);
     assert_eq!(exit, 1, "{unknown}");
     assert_eq!(unknown["code"], "TRIGGER_NOT_FOUND");
 
@@ -8668,13 +8678,13 @@ fn gate() {
     let doomed_id = doomed["id"].as_str().expect("id").to_owned();
     let (exit, deleted) = g.cli_json("T4", &["--json", "trigger", "delete", &tau, "t4-gone"]);
     assert_eq!(exit, 0, "{deleted}");
-    let (exit, gone) = invoke(&mut g, "T4", &tau, "t4-gone", "r-gone", &[]);
+    let (exit, gone) = invoke(g, "T4", &tau, "t4-gone", "r-gone", &[]);
     assert_eq!(exit, 1, "{gone}");
     assert_eq!(
         gone["code"], "TRIGGER_NOT_FOUND",
         "a deleted trigger leaves the listing the name resolves through (§5)"
     );
-    assert_eq!(firings(&g, &doomed_id), 0);
+    assert_eq!(firings(g, &doomed_id), 0);
 
     let (exit, off) = g.cli_json(
         "T4",
@@ -8693,7 +8703,7 @@ fn gate() {
     let off_id = off["id"].as_str().expect("id").to_owned();
     let (exit, disabled) = g.cli_json("T4", &["--json", "trigger", "disable", &tau, "t4-off"]);
     assert_eq!(exit, 0, "{disabled}");
-    let (exit, shut) = invoke(&mut g, "T4", &tau, "t4-off", "r-off", &[]);
+    let (exit, shut) = invoke(g, "T4", &tau, "t4-off", "r-off", &[]);
     assert_eq!(exit, 1, "{shut}");
     assert_eq!(shut["code"], "TRIGGER_DISABLED");
     assert!(
@@ -8702,7 +8712,7 @@ fn gate() {
             .is_some_and(|m| m.contains("disabled")),
         "a recurring trigger has no consuming firing to name (§2.2): {shut}"
     );
-    assert_eq!(firings(&g, &off_id), 0);
+    assert_eq!(firings(g, &off_id), 0);
 
     // Under Require approval a pending snapshot refuses and buffers nothing, so
     // the same request id is a new request once it is approved (§2.3).
@@ -8714,7 +8724,7 @@ fn gate() {
         Some(r#"{"trigger_code_policy":"REQUIRE_APPROVAL"}"#),
     );
     assert_eq!(status, 200, "{gated_policy}");
-    let gated_script = script(&g, "t4-gated", "env");
+    let gated_script = script(g, "t4-gated", "env");
     let (exit, gated) = g.cli_json(
         "T4",
         &[
@@ -8741,10 +8751,10 @@ fn gate() {
         .expect("a snapshot")
         .to_owned();
     assert_eq!(gated["code"]["approval"], "PENDING");
-    let (exit, unapproved) = invoke(&mut g, "T4", &tau, "t4-gated", "r-gated", &[]);
+    let (exit, unapproved) = invoke(g, "T4", &tau, "t4-gated", "r-gated", &[]);
     assert_eq!(exit, 1, "{unapproved}");
     assert_eq!(unapproved["code"], "TRIGGER_UNAPPROVED");
-    assert_eq!(firings(&g, &gated_id), 0);
+    assert_eq!(firings(g, &gated_id), 0);
     let (status, approved) = g.api(
         "T4",
         &endpoint,
@@ -8754,11 +8764,11 @@ fn gate() {
     );
     assert_eq!(status, 200, "{approved}");
     assert_eq!(
-        firings(&g, &gated_id),
+        firings(g, &gated_id),
         0,
         "the refusal buffered nothing to release (§2.2)"
     );
-    let (exit, now_allowed) = invoke(&mut g, "T4", &tau, "t4-gated", "r-gated", &[]);
+    let (exit, now_allowed) = invoke(g, "T4", &tau, "t4-gated", "r-gated", &[]);
     assert_eq!(exit, 0, "{now_allowed}");
     assert_eq!(now_allowed["outcome"], "ACCEPTED");
     assert_eq!(
@@ -8767,7 +8777,7 @@ fn gate() {
         "the firing names the approved snapshot: {now_allowed}"
     );
     let gated_firing = now_allowed["firing"]["id"].as_str().expect("id").to_owned();
-    await_execution(&g, &gated_firing, Duration::from_secs(20));
+    await_execution(g, &gated_firing, Duration::from_secs(20));
     let (status, restored) = g.api(
         "T4",
         &endpoint,
@@ -8782,7 +8792,7 @@ fn gate() {
     let huge_file = g.out.join("t4-input.txt");
     fs::write(&huge_file, "x".repeat(262_145)).expect("the oversized input");
     let huge_path = huge_file.display().to_string();
-    let before = firings(&g, &note_id);
+    let before = firings(g, &note_id);
     let malformed: Vec<(&str, i32, Vec<&str>)> = vec![
         (
             "a 129-byte request id",
@@ -8853,7 +8863,7 @@ fn gate() {
                 "{what}: {stdout}"
             );
         }
-        assert_eq!(firings(&g, &note_id), before, "{what} wrote a firing");
+        assert_eq!(firings(g, &note_id), before, "{what} wrote a firing");
     }
     g.note(
         "T4",
@@ -8867,7 +8877,7 @@ fn gate() {
 
     // --- T5 — duplicates survive restart ------------------------------------
     let (exit, before_restart) = invoke(
-        &mut g,
+        g,
         "T5",
         &tau,
         "t1-note",
@@ -8880,7 +8890,7 @@ fn gate() {
         .as_str()
         .expect("id")
         .to_owned();
-    let restart_prompt = result_prompts(&g, &tau_id, &restart_firing);
+    let restart_prompt = result_prompts(g, &tau_id, &restart_firing);
     assert_eq!(restart_prompt.len(), 1);
     g.stop("T5", daemon24);
     let daemon25 = g.spawn("T5");
@@ -8894,7 +8904,7 @@ fn gate() {
         );
     }
     let (exit, after_restart) = invoke(
-        &mut g,
+        g,
         "T5",
         &tau,
         "t1-note",
@@ -8915,7 +8925,7 @@ fn gate() {
     assert_eq!(replayed["request_id"], "r-restart");
     assert_eq!(replayed["input"], "carried across the restart");
     assert_eq!(
-        result_prompts(&g, &tau_id, &restart_firing),
+        result_prompts(g, &tau_id, &restart_firing),
         restart_prompt,
         "a replay queues no second prompt"
     );
@@ -8933,7 +8943,4 @@ fn gate() {
         "an accepted request answered its original firing after a clean stop and a restart, with the input intact, no second prompt, and a RECOVERY that lost nothing",
         json!({ "firing": restart_firing, "recovery": recovery, "prompt": restart_prompt }),
     );
-
-    let evidence = g.out.display().to_string();
-    g.note("gate", "G1-T5 complete", json!({ "evidence": evidence }));
 }
