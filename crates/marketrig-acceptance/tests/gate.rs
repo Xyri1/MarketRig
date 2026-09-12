@@ -1576,7 +1576,23 @@ fn gate() {
         Some(&limit("g14-taker-aapl", "AAPL.XNAS", "BUY", "5", "999.00")),
     );
     assert_eq!(status, 201, "{taker}");
-    assert_eq!(taker["outcome"]["status"], "PARTIALLY_FILLED", "{taker}");
+    // Only a *fully* marketable order answers with its fill: the venue reverts a
+    // partially matched order to a resting copy before its `OrderFilled` is
+    // drained, so the synchronous outcome here is `ACCEPTED` or
+    // `PARTIALLY_FILLED` depending on which turn the read lands in. The order's
+    // own state is the authoritative one, so that is what is waited on.
+    assert!(
+        ["ACCEPTED", "PARTIALLY_FILLED"].contains(&taker["outcome"]["status"].as_str().unwrap()),
+        "{taker}"
+    );
+    within(
+        Duration::from_secs(10),
+        "the marketable limit's partial fill",
+        || {
+            g.call(&endpoint, "GET", &orders_path, None).1["orders"][0]["status"]
+                == "PARTIALLY_FILLED"
+        },
+    );
     let (status, taker_cancelled) = g.api(
         "G14",
         &endpoint,

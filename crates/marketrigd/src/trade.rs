@@ -32,7 +32,9 @@ use nautilus_common::messages::execution::{CancelOrder, SubmitOrder, TradingComm
 use nautilus_common::msgbus::{self, MessagingSwitchboard, TypedHandler};
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::accounts::AccountAny;
-use nautilus_model::enums::{OmsType, OrderSide, OrderStatus, OrderType, TimeInForce};
+use nautilus_model::enums::{
+    LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, TimeInForce,
+};
 use nautilus_model::events::{OrderEventAny, PositionClosed, PositionEvent};
 use nautilus_model::identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId};
 use nautilus_model::orders::{Order, OrderAny};
@@ -1166,6 +1168,23 @@ fn settled_submit(context: &NodeContext, client_order_id: ClientOrderId) -> Opti
             | OrderStatus::Emulated
             | OrderStatus::Released
     ) {
+        return None;
+    }
+    // A limit order the matching engine matched *in full* on arrival is written
+    // into the node's cache as `Accepted` synchronously — the engine replaces the
+    // cached order with its own accepted copy — while the `OrderFilled` it has
+    // already generated is still queued on the node's execution-event channel,
+    // which the runner drains in later turns and yields between. Reading the
+    // cache in that window would answer `ACCEPTED` for an order the sandbox has
+    // filled, and §4.2 says a marketable order answers with its fill. The venue
+    // leaves `Taker` on that copy only when it matched the whole order and
+    // dropped it from its book (`nautilus-execution-0.62.0`
+    // `matching_engine/mod.rs:3311-3330`); a partial or empty match reverts the
+    // copy to `Maker`, so this waits exactly where a fill is certain to arrive
+    // and never where one may not.
+    if order.status() == OrderStatus::Accepted
+        && order.liquidity_side() == Some(LiquiditySide::Taker)
+    {
         return None;
     }
     Some(Settled {

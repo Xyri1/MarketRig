@@ -1516,32 +1516,38 @@ fn snapshot(entry: &'static Entry, last: &str, prev_close: &str, volume: u64) ->
 }
 
 /// Hands one item to the production observation path — the very call `cn_cycle`
-/// makes — on the node thread, without waiting for it.
+/// makes — on the node thread, without waiting for it. The answer fires when
+/// that call has returned; a caller that does not care drops it.
 #[cfg(test)]
-fn observation(node: &Node, observed: Observed, evidence: Result<(), Reason>, at_ns: u64) {
+fn observation(
+    node: &Node,
+    observed: Observed,
+    evidence: Result<(), Reason>,
+    at_ns: u64,
+) -> std::sync::mpsc::Receiver<()> {
+    let (applied, done) = std::sync::mpsc::channel();
     node.call(move |context| {
         let cache = CacheView::new(Rc::clone(&context.cache));
         let exec = Rc::clone(&context.cn);
         tokio::task::spawn_local(async move {
             cycle_observation(&observed, evidence, &cache, &exec, at_ns).await;
+            let _ = applied.send(());
         });
     })
     .expect("the node answers");
+    done
 }
 
-/// [`observation`], waiting for the publication it planned to have settled.
+/// [`observation`], waiting for the cycle itself to have run — state the node
+/// already held (an unready instrument, a stamp from an earlier observation)
+/// says nothing about whether *this* item was applied, so nothing here infers
+/// it. The cycle's own publications are bounded by [`WAIT_TIMEOUT`].
 #[cfg(test)]
+#[track_caller]
 fn observe_on_node(node: &Node, observed: Observed, evidence: Result<(), Reason>, at_ns: u64) {
-    let instrument_id = InstrumentId::from(observed.entry.instrument_id);
-    observation(node, observed, evidence, at_ns);
-    within(10, "the observation's plan is published", || {
-        node.call(move |context| {
-            let mut exec = context.cn.borrow_mut();
-            let inst = exec.inst(instrument_id);
-            !inst.busy && (inst.ts_last >= at_ns || inst.readiness.is_err())
-        })
-        .expect("the node answers")
-    });
+    observation(node, observed, evidence, at_ns)
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the observation's cycle ran");
 }
 
 /// One order through the production submit path.
