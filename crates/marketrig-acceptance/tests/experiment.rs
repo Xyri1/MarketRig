@@ -2530,12 +2530,18 @@ mod console {
             // (`ESC[?9001h`, relayed with the session's own output) and the
             // dead session never switches it back, so this console does, or
             // every later keypress in the operator's window is echoed as a
-            // key report. Harmless elsewhere; a terminal that never saw the
-            // mode ignores the reset.
+            // key report. The runtime does the same on Unix — bracketed paste,
+            // focus reporting, mouse, the alternate screen, and the kitty and
+            // modifyOtherKeys keyboard protocols Claude Code enables — and the
+            // daemon stops it before it sends its own "off" sequences (seen
+            // after the macOS Claude E8 cell). Harmless elsewhere; a terminal
+            // that never saw a mode ignores the reset.
             {
                 use std::io::Write as _;
                 let mut out = std::io::stdout();
-                let _ = out.write_all(b"\x1b[?9001l");
+                let _ = out.write_all(
+                    b"\x1b[?9001l\x1b[<u\x1b[>4;0m\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1049l\x1b[?25h",
+                );
                 let _ = out.flush();
             }
             self.saved.restore();
