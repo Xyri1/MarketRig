@@ -283,7 +283,7 @@ This milestone realizes the choices recorded per D11, D13, D34, D49, and D68. Kr
 - The firing document and result prompt carry the input; the CLI gains `invoke`, `--no-schedule`, and the optional schedule on `create`.
 - Gate T1–T5 after A6 and the attended E8 after E7, per the feature SPEC §7–§8.
 
-Allocate the implementation slice only when implementation starts. Localization and packaging follow within R7.
+**Trigger invocation delivered; slice 015 frozen (2026-09-12):** [Slice 015](slices/015-trigger-invocation.md) implemented all four items on 2026-09-11 (migration 10, the invocation route and its acceptance unit, the firing document's and result prompt's `invocation`, `marketrig trigger invoke`, `--no-schedule`, and the optional schedule). The gate runs T1–T5 after A6 on both platforms (macOS `gate-1789136795`, Windows `gate-1789187554`), E8 passed on all four cells on 2026-09-12 (macOS `experiment-e8-codex-1789186208` and `experiment-e8-claude-1789186381`, Windows `experiment-e8-codex-1789186977` and `experiment-e8-claude-1789187037`; Codex 0.154.0, Claude Code 2.1.269), and CI is green on both platforms at 0d3c94f. Two defects found on the way and fixed in the slice: the Claude Code session leaves Unix terminal modes switched on when the daemon stops it, so the experiment's console detach resets them; and `gate()` outgrew rustfmt's 1 MB main-thread stack on Windows, so T1–T5 run from their own function. Localization and packaging follow within R7.
 
 Expected outcomes:
 
