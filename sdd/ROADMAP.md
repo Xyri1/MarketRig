@@ -285,6 +285,13 @@ This milestone realizes the choices recorded per D11, D13, D34, D49, and D68. Kr
 
 **Trigger invocation delivered; slice 015 frozen (2026-09-12):** [Slice 015](slices/015-trigger-invocation.md) implemented all four items on 2026-09-11 (migration 10, the invocation route and its acceptance unit, the firing document's and result prompt's `invocation`, `marketrig trigger invoke`, `--no-schedule`, and the optional schedule). The gate runs T1–T5 after A6 on both platforms (macOS `gate-1789136795`, Windows `gate-1789187554`), E8 passed on all four cells on 2026-09-12 (macOS `experiment-e8-codex-1789186208` and `experiment-e8-claude-1789186381`, Windows `experiment-e8-codex-1789186977` and `experiment-e8-claude-1789187037`; Codex 0.154.0, Claude Code 2.1.269), and CI is green on both platforms at 0d3c94f. Two defects found on the way and fixed in the slice: the Claude Code session leaves Unix terminal modes switched on when the daemon stops it, so the experiment's console detach resets them; and `gate()` outgrew rustfmt's 1 MB main-thread stack on Windows, so T1–T5 run from their own function. Localization and packaging follow within R7.
 
+**Localization design complete 2026-09-12** — [`features/localization/`](features/localization/PRD.md) (PRD, DECISIONS LZ-1 … LZ-7, SPEC): the mechanics root §4.5 deferred; [slice 016](slices/016-localization.md) is Active (2026-09-12). The work the slice owns:
+
+- Migration 11: a nullable `locale` column on `installation_settings`, and `GET`/`PUT /settings/locale` as the one resource the daemon reads it through and for nothing else (LZ-1).
+- The webview detects the language once by BCP 47 lookup over `navigator.languages`, stores it before applying it, and re-detects never (LZ-2); `zh-Hans.json` mirrors `en.json` key for key and placeholder for placeholder, switched through vue-i18n's global locale from one `applyLocale` (LZ-3); a **Language** select heads the Settings tab, which is the onboarding language step.
+- The shell's `set_locale` re-texts the tray from a six-string label table; notifications follow the catalog with no code change (LZ-4).
+- Gate L1 after T5 compares the agent-facing artifacts byte for byte under both locales (LZ-5); one CLI check pins UTF-8 output (LZ-6); fonts and input methods are the platform's, confirmed on the packaged smoke's `zh-Hans` run (LZ-7), which is the evidence line's desktop half.
+
 Expected outcomes:
 
 - direct trigger invocation through `marketrig`, desk- and trigger-scoped request identity, duplicate suppression across restart, and one-off consumption through either entry path (per D34);
