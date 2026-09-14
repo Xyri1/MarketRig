@@ -190,13 +190,65 @@ pub fn spawn_and_wait(
     }
 }
 
-/// The tray's disabled "n pending approvals" line, held so `set_tray_pending`
-/// can retext it. `None` until `setup` builds the tray.
-#[derive(Default)]
-pub struct TrayPending(pub Mutex<Option<MenuItem<tauri::Wry>>>);
+/// The three tray menu items, the locale they carry, and the last
+/// pending count, so `set_locale` and `set_tray_pending` can each re-text from
+/// what the other left. The items are `None` until `setup` builds the tray.
+pub struct Tray(pub Mutex<TrayState>);
 
-pub fn pending_label(n: u32) -> String {
-    format!("{n} pending approvals")
+pub struct TrayState {
+    open: Option<MenuItem<tauri::Wry>>,
+    pending: Option<MenuItem<tauri::Wry>>,
+    quit: Option<MenuItem<tauri::Wry>>,
+    locale: &'static str,
+    n: u32,
+}
+
+/// The shell starts English; the webview calls `set_locale` after it has read
+/// the daemon's setting (feature SPEC §3.1).
+impl Default for TrayState {
+    fn default() -> Self {
+        TrayState {
+            open: None,
+            pending: None,
+            quit: None,
+            locale: "en",
+            n: 0,
+        }
+    }
+}
+
+impl Default for Tray {
+    fn default() -> Self {
+        Tray(Mutex::new(TrayState::default()))
+    }
+}
+
+pub enum Item {
+    Open,
+    Pending,
+    Quit,
+}
+
+/// The two shipped tags and nothing else (feature SPEC §3.1).
+pub fn parse_locale(locale: &str) -> Result<&'static str, String> {
+    match locale {
+        "en" => Ok("en"),
+        "zh-Hans" => Ok("zh-Hans"),
+        other => Err(format!("VALIDATION: unsupported locale {other:?}")),
+    }
+}
+
+/// The tray's six labels. Six strings do not justify a catalog format on the
+/// Rust side (LZ-4); an unknown locale reads English.
+pub fn tray_label(locale: &str, item: Item, n: u32) -> String {
+    match (locale, item) {
+        ("zh-Hans", Item::Open) => "打开 MarketRig".to_string(),
+        ("zh-Hans", Item::Pending) => format!("{n} 项待审批"),
+        ("zh-Hans", Item::Quit) => "退出 MarketRig".to_string(),
+        (_, Item::Open) => "Open MarketRig".to_string(),
+        (_, Item::Pending) => format!("{n} pending approvals"),
+        (_, Item::Quit) => "Quit MarketRig".to_string(),
+    }
 }
 
 #[tauri::command]
@@ -228,11 +280,14 @@ fn start_daemon() -> Result<Endpoint, String> {
 }
 
 #[tauri::command]
-fn set_tray_pending(n: u32, app: AppHandle, pending: State<'_, TrayPending>) -> Result<(), String> {
-    let label = pending_label(n);
-    if let Some(item) = pending.0.lock().unwrap().as_ref() {
+fn set_tray_pending(n: u32, app: AppHandle, tray: State<'_, Tray>) -> Result<(), String> {
+    let mut state = tray.0.lock().unwrap();
+    state.n = n;
+    let label = tray_label(state.locale, Item::Pending, n);
+    if let Some(item) = state.pending.as_ref() {
         item.set_text(&label).map_err(|e| e.to_string())?;
     }
+    drop(state);
     if let Some(tray) = app.tray_by_id("main") {
         #[cfg(target_os = "macos")]
         tray.set_title(if n > 0 { Some(n.to_string()) } else { None })
@@ -240,6 +295,36 @@ fn set_tray_pending(n: u32, app: AppHandle, pending: State<'_, TrayPending>) -> 
         #[cfg(target_os = "windows")]
         tray.set_tooltip(Some(&label)).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// The webview's language, applied to the tray (feature SPEC §3.1). The shell
+/// reads no setting itself (per D66): the webview, which has it, tells it.
+#[tauri::command]
+fn set_locale(locale: String, app: AppHandle, tray: State<'_, Tray>) -> Result<(), String> {
+    let locale = parse_locale(&locale)?;
+    let mut state = tray.0.lock().unwrap();
+    state.locale = locale;
+    let n = state.n;
+    for (item, which) in [
+        (&state.open, Item::Open),
+        (&state.pending, Item::Pending),
+        (&state.quit, Item::Quit),
+    ] {
+        if let Some(item) = item {
+            item.set_text(tray_label(locale, which, n))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    drop(state);
+    #[cfg(target_os = "windows")]
+    if let Some(icon) = app.tray_by_id("main") {
+        icon.set_tooltip(Some(&tray_label(locale, Item::Pending, n)))
+            .map_err(|e| e.to_string())?;
+    }
+    // The macOS tray title is the count in digits, which no locale changes.
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
     Ok(())
 }
 
@@ -311,11 +396,12 @@ pub fn run() {
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
                 .build(),
         )
-        .manage(TrayPending::default())
+        .manage(Tray::default())
         .invoke_handler(tauri::generate_handler![
             read_endpoint,
             start_daemon,
             set_tray_pending,
+            set_locale,
             exit_app
         ])
         // Close hides the window; the tray keeps the app reachable (§5).
@@ -332,12 +418,36 @@ pub fn run() {
                     window.hide()?;
                 }
             }
-            // ponytail: English tray labels in R5; R6's `set_locale` rebuilds them.
-            let open = MenuItem::with_id(app, "open", "Open MarketRig", true, None::<&str>)?;
-            let pending = MenuItem::with_id(app, "pending", pending_label(0), false, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit MarketRig", true, None::<&str>)?;
+            // English until the webview's startup calls `set_locale` (LZ-4).
+            let en = TrayState::default().locale;
+            let open = MenuItem::with_id(
+                app,
+                "open",
+                tray_label(en, Item::Open, 0),
+                true,
+                None::<&str>,
+            )?;
+            let pending = MenuItem::with_id(
+                app,
+                "pending",
+                tray_label(en, Item::Pending, 0),
+                false,
+                None::<&str>,
+            )?;
+            let quit = MenuItem::with_id(
+                app,
+                "quit",
+                tray_label(en, Item::Quit, 0),
+                true,
+                None::<&str>,
+            )?;
             let menu = Menu::with_items(app, &[&open, &pending, &quit])?;
-            *app.state::<TrayPending>().0.lock().unwrap() = Some(pending);
+            *app.state::<Tray>().0.lock().unwrap() = TrayState {
+                open: Some(open),
+                pending: Some(pending),
+                quit: Some(quit),
+                ..TrayState::default()
+            };
             let mut tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -506,8 +616,31 @@ mod tests {
     }
 
     #[test]
-    fn tray_label() {
-        assert_eq!(pending_label(0), "0 pending approvals");
-        assert_eq!(pending_label(3), "3 pending approvals");
+    fn tray_labels_cover_both_locales_and_counts() {
+        assert_eq!(TrayState::default().locale, "en");
+        for (n, en, zh) in [
+            (0u32, "0 pending approvals", "0 项待审批"),
+            (1, "1 pending approvals", "1 项待审批"),
+            (12, "12 pending approvals", "12 项待审批"),
+        ] {
+            assert_eq!(tray_label("en", Item::Open, n), "Open MarketRig");
+            assert_eq!(tray_label("en", Item::Pending, n), en);
+            assert_eq!(tray_label("en", Item::Quit, n), "Quit MarketRig");
+            assert_eq!(tray_label("zh-Hans", Item::Open, n), "打开 MarketRig");
+            assert_eq!(tray_label("zh-Hans", Item::Pending, n), zh);
+            assert_eq!(tray_label("zh-Hans", Item::Quit, n), "退出 MarketRig");
+        }
+    }
+
+    /// `set_locale` itself needs an `AppHandle`, which no unit test can build;
+    /// its validation is `parse_locale`, which every call goes through first.
+    #[test]
+    fn parse_locale_takes_the_two_shipped_tags_only() {
+        assert_eq!(parse_locale("en").unwrap(), "en");
+        assert_eq!(parse_locale("zh-Hans").unwrap(), "zh-Hans");
+        for bad in ["zh", "zh-Hant", "zh-hans", "", "en-US"] {
+            let err = parse_locale(bad).unwrap_err();
+            assert!(err.starts_with("VALIDATION: "), "{bad}: {err}");
+        }
     }
 }

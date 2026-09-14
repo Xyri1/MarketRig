@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The one window's capability (feature SPEC §5). The four app commands are not listed: in Tauri 2 a capability gates plugin commands only, and commands registered through generate_handler! on the app itself are always reachable from the window.",
+  "description": "The one window's capability (feature SPEC §5). The five app commands are not listed: in Tauri 2 a capability gates plugin commands only, and commands registered through generate_handler! on the app itself are always reachable from the window.",
   "windows": ["main"],
   "permissions": [
     "core:default",
