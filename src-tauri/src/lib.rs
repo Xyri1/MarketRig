@@ -205,13 +205,15 @@ pub struct TrayState {
 
 /// The shell starts English; the webview calls `set_locale` after it has read
 /// the daemon's setting (feature SPEC §3.1).
+const DEFAULT_LOCALE: &str = "en";
+
 impl Default for TrayState {
     fn default() -> Self {
         TrayState {
             open: None,
             pending: None,
             quit: None,
-            locale: "en",
+            locale: DEFAULT_LOCALE,
             n: 0,
         }
     }
@@ -419,7 +421,7 @@ pub fn run() {
                 }
             }
             // English until the webview's startup calls `set_locale` (LZ-4).
-            let en = TrayState::default().locale;
+            let en = DEFAULT_LOCALE;
             let open = MenuItem::with_id(
                 app,
                 "open",
@@ -617,7 +619,12 @@ mod tests {
 
     #[test]
     fn tray_labels_cover_both_locales_and_counts() {
-        assert_eq!(TrayState::default().locale, "en");
+        // Never `TrayState::default()` here: a test that touches a type holding
+        // a `MenuItem` links Tauri's Win32 stack into the unittest exe, which
+        // carries no Common Controls v6 manifest, and the Windows loader then
+        // dies `STATUS_ENTRYPOINT_NOT_FOUND` on `TaskDialogIndirect` before
+        // any test runs.
+        assert_eq!(DEFAULT_LOCALE, "en");
         for (n, en, zh) in [
             (0u32, "0 pending approvals", "0 项待审批"),
             (1, "1 pending approvals", "1 项待审批"),
