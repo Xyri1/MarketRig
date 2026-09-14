@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import { application, standin } from "../wdio.conf";
 import { endpointPath, running } from "./wipe";
+import zhHans from "../src/locales/zh-Hans.json" with { type: "json" };
 
 /** The one desk; the stand-in's script reads its quotes resource by this name. */
 const DESK = "smoke";
@@ -147,6 +148,17 @@ describe("the packaged desktop", () => {
     expect(await $('[data-testid="openviking-retry"]').isExisting()).toBe(
       false,
     );
+
+    // The rest of the run is in Simplified Chinese (localization SPEC §6.2):
+    // the Language select writes the setting and applies it, so the second
+    // launch of step 3 comes up in zh-Hans too.
+    await $('[data-testid="language"]').selectByAttribute("value", "zh-Hans");
+    await until(
+      "the Settings heading in zh-Hans",
+      async () =>
+        (await textOf('[data-testid="runtimes-title"]')) ===
+        zhHans.settings.runtimes.title,
+    );
   });
 
   it("2 — registers the stand-in runtime, starts a desk, and shows its banner", async () => {
@@ -221,6 +233,18 @@ describe("the packaged desktop", () => {
     // daemon registered for it and prints the answer as its first PTY line.
     await until("the stand-in's banner in the well", async () =>
       (await wellText()).includes("MCP_READ"),
+    );
+
+    // Chinese typed into the well reaches the desk's PTY as UTF-8 over the
+    // terminal socket, and the tty echoes it straight back (localization SPEC
+    // §5). The keys go to xterm's hidden textarea, whose `insertText` input
+    // event is the same path an input method's committed text takes.
+    // ponytail: the echo is the tty line discipline's, not the stand-in's —
+    // it never reads its stdin, so no `INPUT n:` line is ever a keystroke's. A
+    // stand-in that echoed its own stdin would prove the read side too.
+    await $(".xterm-helper-textarea").addValue("你好");
+    await until("the typed Chinese to echo in the well", async () =>
+      (await wellText()).includes("你好"),
     );
   });
 

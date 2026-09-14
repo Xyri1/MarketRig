@@ -1,0 +1,186 @@
+{
+  "app": {
+    "name": "MarketRig"
+  },
+  "daemon": {
+    "starting": "正在启动 MarketRig 守护进程…",
+    "unavailable": "无法连接 MarketRig 守护进程。",
+    "retry": "重试"
+  },
+  "desks": {
+    "empty": "还没有交易台。创建一个，开始一名交易员。",
+    "new": "新建交易台",
+    "create": "创建交易台",
+    "name": "交易台名称",
+    "namePlaceholder": "交易台名称",
+    "runtime": "运行时",
+    "retry": "重试",
+    "attention": "这个交易台在等你。"
+  },
+  "session": {
+    "live": "会话进行中",
+    "none": "没有会话",
+    "start": "启动",
+    "continue": "继续",
+    "interrupt": "中断",
+    "interruptUnsupported": "Claude Code 没有结构化的中断。",
+    "exit": "退出",
+    "switch": "切换运行时"
+  },
+  "well": {
+    "noSession": "没有会话。启动一个，或继续上一个。"
+  },
+  "panel": {
+    "tabs": "交易台面板",
+    "collapse": "收起",
+    "expand": "展开",
+    "desk": "交易台",
+    "triggers": "触发器",
+    "approvals": "审批",
+    "activity": "动态",
+    "settings": "设置",
+    "deskShort": "台",
+    "triggersShort": "触",
+    "approvalsShort": "审",
+    "activityShort": "动",
+    "settingsShort": "设"
+  },
+  "desk": {
+    "quotes": "行情",
+    "book": "盘口",
+    "positions": "持仓",
+    "orders": "未成交订单",
+    "empty": {
+      "quotes": "暂无行情。",
+      "book": "暂无盘口。",
+      "positions": "暂无持仓。",
+      "orders": "没有未成交订单。"
+    }
+  },
+  "triggers": {
+    "empty": "还没有触发器。",
+    "enable": "启用",
+    "disable": "停用"
+  },
+  "activity": {
+    "more": "加载更多"
+  },
+  "common": {
+    "cancel": "取消"
+  },
+  "approvals": {
+    "empty": "没有待审批的请求。",
+    "kind": {
+      "TRIGGER_CODE": "触发器代码",
+      "PAPER_ORDER": "模拟订单"
+    },
+    "showCode": "显示代码",
+    "hideCode": "隐藏代码",
+    "approve": "批准",
+    "deny": "拒绝"
+  },
+  "settings": {
+    "language": {
+      "title": "语言",
+      "en": "English",
+      "zhHans": "简体中文"
+    },
+    "runtimes": {
+      "title": "运行时",
+      "discover": "查找",
+      "retry": "重试",
+      "path": "可执行文件的路径",
+      "submit": "使用此路径"
+    },
+    "openviking": {
+      "title": "记忆",
+      "python": "Python 3.12 的路径",
+      "node": "Node 22 或更高版本的路径",
+      "setup": "设置",
+      "retry": "重试"
+    },
+    "memory": {
+      "title": "记忆服务商",
+      "baseUrl": "基础 URL",
+      "apiKey": "API key",
+      "keySet": "已保存一个 API key。",
+      "keyUnset": "尚未保存 API key。",
+      "llmModel": "语言模型",
+      "embeddingModel": "嵌入模型",
+      "save": "保存服务商"
+    },
+    "hithink": {
+      "title": "HiThink",
+      "apiKey": "API key",
+      "keySet": "已保存一个 API key。",
+      "keyUnset": "尚未保存 API key。",
+      "save": "保存 API key",
+      "remove": "删除 API key",
+      "aShareFeed": "A 股行情使用 HiThink"
+    },
+    "policies": {
+      "title": "审批",
+      "triggerCode": "触发器代码",
+      "paperOrder": "模拟订单",
+      "delivery": "投递"
+    },
+    "policy": {
+      "ALWAYS_ALLOW": "始终允许",
+      "REQUIRE_APPROVAL": "需要审批"
+    },
+    "delivery": {
+      "QUEUE": "排入下一轮",
+      "STEER": "介入当前这一轮"
+    },
+    "autostart": {
+      "title": "开机启动",
+      "label": "登录时启动 MarketRig"
+    },
+    "quit": "退出 MarketRig"
+  },
+  "dialog": {
+    "denyTitle": "拒绝这个请求吗？",
+    "deny": "拒绝",
+    "quitTitle": "退出 MarketRig 吗？",
+    "quit": "退出",
+    "cancel": "取消"
+  },
+  "notify": {
+    "APPROVAL_REQUESTED": {
+      "title": "{desk}：需要审批",
+      "body": "{detail}"
+    },
+    "SESSION_ATTENTION": {
+      "title": "{desk}：会话在等你",
+      "body": "{detail}"
+    },
+    "PROMPT_FAILED": {
+      "title": "{desk}：有一条提示没有送达",
+      "body": "{detail}"
+    },
+    "DESK_FAILED": {
+      "title": "{desk}：交易台失败了",
+      "body": "{detail}"
+    },
+    "TRADING_NODE_FAILED": {
+      "title": "{desk}：交易节点失败了",
+      "body": "{detail}"
+    },
+    "RUNTIME_UNAVAILABLE": {
+      "title": "有一个运行时不可用",
+      "body": "{detail}"
+    },
+    "CONTROL_PLANE_LOST": {
+      "title": "有一条运行时控制通道断了",
+      "body": "{detail}"
+    },
+    "OPENVIKING_UNAVAILABLE": {
+      "title": "记忆不可用",
+      "body": "{detail}"
+    },
+    "TRIGGER_MISSED": {
+      "title": "{desk}：有一个触发器错过了",
+      "body": "{detail}"
+    }
+  }
+}

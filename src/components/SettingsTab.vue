@@ -31,6 +31,7 @@ import {
   openvikingRetry,
   openvikingSetup,
   policies,
+  putLocale,
   putPolicies,
   runtimeDiscover,
   runtimeRetry,
@@ -47,8 +48,9 @@ import type {
 import { useDaemon } from "../composables/useDaemon";
 import { useEvents } from "../composables/useEvents";
 import { selectTrigger } from "../deskState";
+import { applyLocale, LOCALES, type Locale } from "../locale";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { on } = useEvents();
 const { quit } = useDaemon();
 
@@ -197,6 +199,20 @@ async function setPolicy(field: string, value: string): Promise<void> {
   await loadPolicies();
 }
 
+/**
+ * The daemon holds the choice and `applyLocale` shows it (feature SPEC §2.5).
+ * A refusal snaps the native select back to the language still in force.
+ */
+async function setLanguage(event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement;
+  const next = select.value as Locale;
+  if (refused((await putLocale({ body: { locale: next } })).error)) {
+    select.value = locale.value;
+    return;
+  }
+  await applyLocale(next);
+}
+
 async function toggleAutostart(on: boolean): Promise<void> {
   await (on ? enable() : disable());
   autostart.value = await isEnabled();
@@ -247,7 +263,30 @@ onMounted(async () => {
 <template>
   <div class="flex flex-col gap-6 p-4">
     <section class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted">{{ t("settings.runtimes.title") }}</p>
+      <p class="text-xs text-ink-muted">{{ t("settings.language.title") }}</p>
+      <select
+        class="self-start rounded-control border border-line px-2 py-1"
+        data-testid="language"
+        :value="locale"
+        :aria-label="t('settings.language.title')"
+        @change="setLanguage($event)"
+      >
+        <option v-for="value in LOCALES" :key="value" :value="value">
+          {{
+            t(
+              value === "en"
+                ? "settings.language.en"
+                : "settings.language.zhHans",
+            )
+          }}
+        </option>
+      </select>
+    </section>
+
+    <section class="flex flex-col gap-2">
+      <p class="text-xs text-ink-muted" data-testid="runtimes-title">
+        {{ t("settings.runtimes.title") }}
+      </p>
       <div
         v-for="row in rows"
         :key="row.runtime"

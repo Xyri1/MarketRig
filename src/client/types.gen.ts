@@ -128,6 +128,15 @@ export type HithinkProvider = {
 };
 
 /**
+ * The `GET`/`PUT /settings/locale` body (`localization` §1.2): `null` until
+ * the desktop has detected a language and written it. Nothing the agent reads
+ * takes a locale, so this is the whole surface the column has.
+ */
+export type Locale = {
+    locale?: string | null;
+};
+
+/**
  * `GET /openviking/candidates` (§1.1): what the fixed-list search found, or
  * `null` where nothing on the list validated. Nothing is stored.
  */
@@ -1395,6 +1404,45 @@ export type RuntimeRetryResponses = {
 };
 
 export type RuntimeRetryResponse = RuntimeRetryResponses[keyof RuntimeRetryResponses];
+
+export type LocaleData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/settings/locale';
+};
+
+export type LocaleErrors = {
+    401: Envelope;
+};
+
+export type LocaleError = LocaleErrors[keyof LocaleErrors];
+
+export type LocaleResponses = {
+    200: Locale;
+};
+
+export type LocaleResponse = LocaleResponses[keyof LocaleResponses];
+
+export type PutLocaleData = {
+    body: Locale;
+    path?: never;
+    query?: never;
+    url: '/settings/locale';
+};
+
+export type PutLocaleErrors = {
+    400: Envelope;
+    401: Envelope;
+};
+
+export type PutLocaleError = PutLocaleErrors[keyof PutLocaleErrors];
+
+export type PutLocaleResponses = {
+    200: Locale;
+};
+
+export type PutLocaleResponse = PutLocaleResponses[keyof PutLocaleResponses];
 
 export type PoliciesData = {
     body?: never;

@@ -44,6 +44,29 @@ export function installFakeDaemon(routes: Record<string, FakeRoute>): void {
   }) as typeof fetch;
 }
 
+/**
+ * `GET`/`PUT /settings/locale`, the one-row setting the fake daemon holds
+ * (localization feature SPEC §1.2); a test spreads these into its routes and
+ * reads `writes` to count what the desktop wrote.
+ */
+export const fakeLocale: { value: string | null; writes: string[] } = {
+  value: null,
+  writes: [],
+};
+
+export const localeRoutes: Record<string, FakeRoute> = {
+  "GET /settings/locale": () => ({
+    status: 200,
+    body: { locale: fakeLocale.value },
+  }),
+  "PUT /settings/locale": (request) => {
+    const { locale } = JSON.parse(request.body ?? "{}") as { locale: string };
+    fakeLocale.writes.push(locale);
+    fakeLocale.value = locale;
+    return { status: 200, body: { locale } };
+  },
+};
+
 type Listener = ((event: unknown) => void) | null;
 
 /** The `WebSocket` the composables see; the test drives it by hand. */

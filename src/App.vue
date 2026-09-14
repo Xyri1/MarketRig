@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { list } from "./client";
+import { list, locale, putLocale } from "./client";
 import type { Desk } from "./client";
+import { applyLocale, detectLocale, type Locale } from "./locale";
 import { useApprovals } from "./composables/useApprovals";
 import { useDaemon } from "./composables/useDaemon";
 import { useEvents } from "./composables/useEvents";
@@ -48,6 +49,23 @@ async function refresh(): Promise<void> {
   }
 }
 
+/**
+ * The stored language, or the one detected from the system and written once
+ * (feature SPEC §2.2). A failed write applies the detected value anyway for
+ * this run and leaves the column null for the next launch to try again.
+ */
+async function startLocale(): Promise<void> {
+  const stored = (await locale()).data?.locale as Locale | null | undefined;
+  if (stored) return applyLocale(stored);
+  const detected = detectLocale(navigator.languages);
+  try {
+    await putLocale({ body: { locale: detected } });
+  } catch {
+    // The daemon is the one that remembers; this run renders either way.
+  }
+  await applyLocale(detected);
+}
+
 on(
   [
     "DESK_CREATED",
@@ -66,6 +84,7 @@ watch(status, (now) => {
   connect(endpoint.value.port, endpoint.value.bearer);
   void refresh();
   void refetchApprovals();
+  void startLocale();
 });
 
 onMounted(() => {

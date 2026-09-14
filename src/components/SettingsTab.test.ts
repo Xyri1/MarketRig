@@ -13,9 +13,13 @@ import { flushPromises } from "@vue/test-utils";
 import { enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   FakeWebSocket,
+  fakeLocale,
   installFakeDaemon,
   installFakeWebSocket,
+  localeRoutes,
 } from "../test/fakeDaemon";
+import zhHans from "../locales/zh-Hans.json";
+import i18n from "../i18n";
 import { client } from "../client/client.gen";
 import { useEvents } from "../composables/useEvents";
 import { mountWithI18n } from "../test/mountWithI18n";
@@ -57,9 +61,14 @@ let runtimes: unknown[] = [];
 let ov: Record<string, unknown>;
 let candidates: Record<string, unknown>;
 let setupAnswer: () => { status: number; body?: unknown };
+let localeAnswer: (locale: string) => { status: number; body?: unknown };
 
 beforeEach(() => {
   put = null;
+  fakeLocale.value = null;
+  fakeLocale.writes = [];
+  localeAnswer = (locale) => ({ status: 200, body: { locale } });
+  i18n.global.locale.value = "en";
   hithinkSent = null;
   hithink = hithinkRow();
   vi.mocked(enable).mockClear();
@@ -73,6 +82,12 @@ beforeEach(() => {
   setupAnswer = () => ({ status: 202, body: { state: "PROVISIONING" } });
   client.setConfig({ baseUrl: "http://127.0.0.1:7100" });
   installFakeDaemon({
+    ...localeRoutes,
+    "PUT /settings/locale": (request) => {
+      const { locale } = JSON.parse(request.body ?? "{}") as { locale: string };
+      fakeLocale.writes.push(locale);
+      return localeAnswer(locale);
+    },
     "GET /runtimes": () => ({ status: 200, body: { runtimes } }),
     "GET /memory/provider": () => ({
       status: 200,
@@ -117,7 +132,8 @@ it("shows delivery as a disabled select whose Steer item is disabled", async () 
   const wrapper = mountWithI18n(SettingsTab);
   await flushPromises();
 
-  const select = wrapper.get("select");
+  // The Language select is the tab's first; delivery is the disabled one.
+  const select = wrapper.get("select[disabled]");
   expect(select.attributes("disabled")).toBeDefined();
   const options = select.findAll("option");
   expect(options.map((o) => o.text())).toEqual([
@@ -150,6 +166,37 @@ it("sends only the changed policy field", async () => {
   await flushPromises();
 
   expect(put).toBe('{"paper_order_policy":"ALWAYS_ALLOW"}');
+});
+
+it("writes the chosen language and renders it", async () => {
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  await wrapper.get('[data-testid="language"]').setValue("zh-Hans");
+  await flushPromises();
+
+  expect(fakeLocale.writes).toEqual(["zh-Hans"]);
+  expect(i18n.global.locale.value).toBe("zh-Hans");
+  expect(wrapper.get('[data-testid="runtimes-title"]').text()).toBe(
+    zhHans.settings.runtimes.title,
+  );
+});
+
+it("snaps the language select back when the daemon refuses", async () => {
+  localeAnswer = () => ({
+    status: 400,
+    body: { code: "VALIDATION", message: "not a shipped catalog" },
+  });
+  const wrapper = mountWithI18n(SettingsTab);
+  await flushPromises();
+
+  const select = wrapper.get('[data-testid="language"]');
+  await select.setValue("zh-Hans");
+  await flushPromises();
+
+  expect(i18n.global.locale.value).toBe("en");
+  expect((select.element as HTMLSelectElement).value).toBe("en");
+  expect(wrapper.text()).toContain("not a shipped catalog");
 });
 
 it("turns autostart on once when no runtime is AVAILABLE yet", async () => {

@@ -80,6 +80,11 @@
     "deny": "Deny"
   },
   "settings": {
+    "language": {
+      "title": "Language",
+      "en": "English",
+      "zhHans": "简体中文"
+    },
     "runtimes": {
       "title": "Runtimes",
       "discover": "Discover",

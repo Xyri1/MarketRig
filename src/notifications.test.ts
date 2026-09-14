@@ -16,6 +16,8 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 
 import { installFakeWebSocket, FakeWebSocket } from "./test/fakeDaemon";
 import { useEvents } from "./composables/useEvents";
+import { applyLocale } from "./locale";
+import zhHans from "./locales/zh-Hans.json";
 import { installNotifications } from "./notifications";
 
 const { connect, disconnect } = useEvents();
@@ -66,6 +68,21 @@ it("notifies an approval request only while the window is away", async () => {
 
   stop();
   disconnect();
+});
+
+it("sends the title in the language applied at the time", async () => {
+  await applyLocale("zh-Hans");
+  const stop = installNotifications(new Map([["d-1", "alpha"]]));
+
+  emit("DESK_FAILED", { failure_code: "WORKSPACE_UNWRITABLE" });
+  await vi.waitFor(() => expect(sendNotification).toHaveBeenCalledTimes(1));
+  expect(sendNotification.mock.calls[0][0].title).toBe(
+    zhHans.notify.DESK_FAILED.title.replace("{desk}", "alpha"),
+  );
+
+  stop();
+  disconnect();
+  await applyLocale("en");
 });
 
 it("never notifies a routine result", async () => {

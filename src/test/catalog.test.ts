@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parse } from "@vue/compiler-sfc";
 import en from "../locales/en.json";
+import zhHans from "../locales/zh-Hans.json";
 
 // Every rendered component, as raw source. Vite's glob keeps this free of node:fs.
 const sources: Record<string, string> = {
@@ -58,6 +59,42 @@ function lookup(key: string): unknown {
       en,
     );
 }
+
+/** Every leaf of a catalog as `a.b.c` → its string (feature SPEC §7.5). */
+function leaves(tree: unknown, at = "", found = new Map<string, string>()) {
+  if (typeof tree === "string") found.set(at, tree);
+  else
+    for (const [key, value] of Object.entries(tree as Record<string, unknown>))
+      leaves(value, at ? `${at}.${key}` : key, found);
+  return found;
+}
+
+function placeholders(text: string): string[] {
+  return [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
+}
+
+describe("the two catalogs", () => {
+  const english = leaves(en);
+  const chinese = leaves(zhHans);
+
+  it("carry the same keys", () => {
+    expect([...chinese.keys()].sort()).toEqual([...english.keys()].sort());
+  });
+
+  it("carry the same placeholders in every leaf", () => {
+    for (const [key, text] of english) {
+      expect(placeholders(chinese.get(key) ?? ""), key).toEqual(
+        placeholders(text),
+      );
+    }
+  });
+
+  it("name each language in its own language, identically", () => {
+    for (const key of ["settings.language.en", "settings.language.zhHans"]) {
+      expect(chinese.get(key)).toBe(english.get(key));
+    }
+  });
+});
 
 describe("the en catalog", () => {
   it("has at least one component to check", () => {

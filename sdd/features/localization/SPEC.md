@@ -90,7 +90,7 @@ The one function startup and the Settings control call. Outside Tauri (Vitest, a
 `src/locales/zh-Hans.json` carries every key of `en.json` with the same nesting; `src/i18n.ts` becomes:
 
 ```ts
-export default createI18n<[MessageSchema], "en" | "zh-Hans">({
+export default createI18n<[MessageSchema], "en" | "zh-Hans", false>({
   legacy: false,
   locale: "en",
   fallbackLocale: "en",
@@ -98,7 +98,7 @@ export default createI18n<[MessageSchema], "en" | "zh-Hans">({
 });
 ```
 
-Placeholders are vue-i18n named interpolation, `{desk}` and `{detail}`, and every string that has one in `en` has the same names in `zh-Hans`. Word order differs between the languages, so a placeholder's position is free; its presence is not.
+The third type parameter is vue-i18n 11's `Legacy` flag, which defaults to `true`; `false` is what types `i18n.global.locale` as the `WritableComputedRef` that `applyLocale` assigns. Placeholders are vue-i18n named interpolation, `{desk}` and `{detail}`, and every string that has one in `en` has the same names in `zh-Hans`. Word order differs between the languages, so a placeholder's position is free; its presence is not.
 
 Never translated, in either catalog or anywhere the frontend composes text: `MarketRig`, desk names, instrument identifiers, currency codes, `codex` and `claude`, provider names (`HiThink`, `OpenViking`), event kinds, error codes, policy values as codes. Their human labels (`Always allow` → `始终允许`) are catalog entries; the codes behind them are not.
 
@@ -106,7 +106,7 @@ Financial values render the daemon's decimal text unchanged (root §4.5). The de
 
 ### 2.5 The Language control
 
-The first section of the Settings tab, above **Runtimes**, titled by `settings.language.title`; one native `<select>` whose two options are labelled in their own language, `English` and `简体中文`, as literals under keys `settings.language.en` and `settings.language.zhHans` whose values are identical in both catalogs. Changing it calls `PUT /settings/locale` and, on `200`, `applyLocale`; on failure the select snaps back and the daemon-unavailable banner already covers the cause. Because Settings is auto-selected while no runtime is `AVAILABLE`, this section is the onboarding language step the roadmap names, with no wizard added.
+The first section of the Settings tab, above **Runtimes**, titled by `settings.language.title`; one native `<select>` whose two options are labelled in their own language, `English` and `简体中文`, as literals under keys `settings.language.en` and `settings.language.zhHans` whose values are identical in both catalogs. Changing it calls `PUT /settings/locale` and, on `200`, `applyLocale`; on failure the select snaps back (the handler resets the element's own `value`, because the bound locale never changed and Vue re-renders nothing) and the daemon-unavailable banner already covers the cause. Because Settings is auto-selected while no runtime is `AVAILABLE`, this section is the onboarding language step the roadmap names, with no wizard added.
 
 ## 3. Tray and notifications (LZ-4, LZ-3)
 
@@ -150,7 +150,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ## 5. Fonts and input (LZ-7)
 
-`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run types `你好` into the well and asserts those bytes reached the stand-in's input (its banner echoes `INPUT n:` lines, as smoke step 3 already relies on). Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
+`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run types `你好` into xterm's hidden textarea (the `insertText` path an input method's committed text takes) and asserts those bytes come back in the well: the pty's line discipline echoes them, which proves the socket carried the UTF-8 both ways. The stand-in never reads its stdin — its `INPUT n:` lines are delivered prompts, not keystrokes — so a stand-in echo is not available. Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
 
 ## Surfaces
 
@@ -173,7 +173,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ### 6.2 The packaged smoke in `zh-Hans`
 
-`pnpm smoke` gains, between its steps 1 and 2: `PUT /settings/locale {zh-Hans}` through the bearer; the Settings heading reads the `zh-Hans` value of `settings.runtimes.title`; the smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the stand-in's `INPUT` echo of those bytes. The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
+`pnpm smoke` gains, at the end of its step 1: the Language select (`data-testid="language"`) is set to `zh-Hans`, which is the §2.5 path (`PUT` then `applyLocale`) and the only one that re-renders a running webview, since nothing pushes a locale change to it; the Settings heading (`data-testid="runtimes-title"`) then reads the `zh-Hans` value of `settings.runtimes.title`, and step 3's second launch comes up in `zh-Hans` from the stored column. The smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the pty's echo of those bytes (§5). The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
 
 ## 7. Required checks
 
