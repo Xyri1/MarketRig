@@ -237,12 +237,14 @@ describe("the packaged desktop", () => {
 
     // Chinese typed into the well reaches the desk's PTY as UTF-8 over the
     // terminal socket, and the tty echoes it straight back (localization SPEC
-    // §5). The keys go to xterm's hidden textarea, whose `insertText` input
-    // event is the same path an input method's committed text takes.
+    // §5). Clicking the well focuses xterm's hidden textarea, and the key
+    // actions go to whatever has focus — xterm's textarea is zero-sized, so a
+    // send-keys on the element itself may be refused as not interactable.
     // ponytail: the echo is the tty line discipline's, not the stand-in's —
     // it never reads its stdin, so no `INPUT n:` line is ever a keystroke's. A
     // stand-in that echoed its own stdin would prove the read side too.
-    await $(".xterm-helper-textarea").addValue("你好");
+    await $('[data-testid="well"]').click();
+    await browser.keys("你好");
     await until("the typed Chinese to echo in the well", async () =>
       (await wellText()).includes("你好"),
     );

@@ -22,7 +22,7 @@ Nullable; the one row's value is `NULL` after the migration. `updated_at_ns` is 
 | `GET /settings/locale` | —                                 | `200 { "locale": "en" \| "zh-Hans" \| null }`      |
 | `PUT /settings/locale` | `{ "locale": "en" \| "zh-Hans" }` | `200` the resource; anything else `400 VALIDATION` |
 
-Both are `#[utoipa::path]` routes with a `ToSchema` body so the generated client carries the type; both need the bearer like every route. A write that does not change the value still answers `200` and stamps nothing. No event is published and no CLI command exists.
+Both are `#[utoipa::path]` routes over one `ToSchema` struct, the resource's own `{ locale: string | null }`, so the generated client carries the shape; the two-value enumeration is enforced by the daemon (and by the frontend's `Locale` type), not by the schema. Both need the bearer like every route. A write that does not change the value still answers `200` and stamps nothing. No event is published and no CLI command exists.
 
 ### 1.3 Scenarios
 
@@ -146,11 +146,11 @@ The agent-facing artifacts, each produced under both locales by L1 (§6.1) and c
 
 No code path in the three Rust binaries reads `installation_settings.locale` but `GET /settings/locale`; the SQL that reads it appears once.
 
-UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交易复盘`, runs `trigger show` in plain and `--json` form with stdout as a pipe, and asserts the exact UTF-8 bytes of the brief in both; the check runs on both CI platforms.
+UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交易复盘`, runs `trigger show` in plain and `--json` form with stdout as a pipe, and asserts the exact UTF-8 bytes of the brief in both, and a second check asserts the same bytes in the `trigger create` request body the argument became; both run on both CI platforms.
 
 ## 5. Fonts and input (LZ-7)
 
-`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run types `你好` into xterm's hidden textarea (the `insertText` path an input method's committed text takes) and asserts those bytes come back in the well: the pty's line discipline echoes them, which proves the socket carried the UTF-8 both ways. The stand-in never reads its stdin — its `INPUT n:` lines are delivered prompts, not keystrokes — so a stand-in echo is not available. Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
+`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run clicks the well and sends `你好` through WebDriver's key actions to the focused element, xterm's hidden textarea (a send-keys on that zero-sized element itself may be refused as not interactable), and asserts those bytes come back in the well: the pty's line discipline echoes them, which proves the socket carried the UTF-8 both ways. The stand-in never reads its stdin — its `INPUT n:` lines are delivered prompts, not keystrokes — so a stand-in echo is not available. Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
 
 ## Surfaces
 
@@ -173,7 +173,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ### 6.2 The packaged smoke in `zh-Hans`
 
-`pnpm smoke` gains, at the end of its step 1: the Language select (`data-testid="language"`) is set to `zh-Hans`, which is the §2.5 path (`PUT` then `applyLocale`) and the only one that re-renders a running webview, since nothing pushes a locale change to it; the Settings heading (`data-testid="runtimes-title"`) then reads the `zh-Hans` value of `settings.runtimes.title`, and step 3's second launch comes up in `zh-Hans` from the stored column. The smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the pty's echo of those bytes (§5). The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
+`pnpm smoke` gains, at the end of its step 1: the Language select (`data-testid="language"`) is set to `zh-Hans`, which is the §2.5 path (`PUT` then `applyLocale`) and the only one that re-renders a running webview, since nothing pushes a locale change to it; the Settings heading (`data-testid="runtimes-title"`) then reads the `zh-Hans` value of `settings.runtimes.title`. (Step 3's second launch focuses the existing window and reloads nothing, so it re-reads no column and asserts no language.) The smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the pty's echo of those bytes (§5). The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
 
 ## 7. Required checks
 
@@ -182,7 +182,7 @@ Module checks (`cargo test -p marketrigd` unless named; fakes allowed):
 1. `store` — migration 11 on a migration-10 database keeps every row, adds the nullable column at `NULL`, and rejects `'zh'` and `'zh-Hant'` through the `CHECK`.
 2. `policy::locale` — `GET` answers `null` on a fresh root; `PUT` each valid value then `GET`; `VALIDATION` on the three bad bodies of §1.3; the value after a daemon restart.
 3. `marketrig` (`cargo test -p marketrig`) — the UTF-8 pipe check of §4, both platforms.
-4. `marketrig-desktop` (`cargo test -p marketrig-desktop`) — `tray_label` for every `(locale, item)` and `n ∈ {0, 1, 12}`; `set_locale("zh")` is refused.
+4. `marketrig-desktop` (`cargo test -p marketrig-desktop`) — `tray_label` for every `(locale, item)` and `n ∈ {0, 1, 12}`; `"zh"` is refused through `parse_locale`, the one validation every `set_locale` call goes through, because a unit test cannot build the `AppHandle` the command takes without the `tauri::test` feature.
 5. Frontend, through `pnpm check`:
    - `src/test/catalog.test.ts` — the existing bare-string and existing-key checks, plus: the key sets of `en.json` and `zh-Hans.json` are equal; for every leaf, the `{name}` placeholder sets are equal; the two `settings.language.*` values are identical in both.
    - `src/locale.test.ts` — the table of §2.1; `applyLocale` sets the global locale and `documentElement.lang` and swallows a rejected `invoke`.
