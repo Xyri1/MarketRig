@@ -17,7 +17,7 @@ import ApprovalsTab from "./components/ApprovalsTab.vue";
 import SettingsTab from "./components/SettingsTab.vue";
 import { installNotifications, installQuitListener } from "./notifications";
 
-const { t } = useI18n();
+const { t, locale: active } = useI18n();
 const { status, endpoint, error, boot, retry } = useDaemon();
 const { connect, on, attention } = useEvents();
 const { byDesk, refetch: refetchApprovals } = useApprovals();
@@ -55,7 +55,12 @@ async function refresh(): Promise<void> {
  * this run and leaves the column null for the next launch to try again.
  */
 async function startLocale(): Promise<void> {
+  // A Language change made while these requests are in flight wins: the
+  // shell starts in `en`, so anything else is the operator's own choice, and
+  // startup neither overwrites it nor stores its detection over it.
+  const untouched = () => active.value === "en";
   const stored = (await locale()).data?.locale as Locale | null | undefined;
+  if (!untouched()) return;
   if (stored) return applyLocale(stored);
   const detected = detectLocale(navigator.languages);
   try {
@@ -63,7 +68,7 @@ async function startLocale(): Promise<void> {
   } catch {
     // The daemon is the one that remembers; this run renders either way.
   }
-  await applyLocale(detected);
+  if (untouched()) await applyLocale(detected);
 }
 
 on(

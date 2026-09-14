@@ -150,9 +150,17 @@ describe("the packaged desktop", () => {
     );
 
     // The rest of the run is in Simplified Chinese (localization SPEC §6.2):
-    // the Language select writes the setting and applies it, so the second
-    // launch of step 3 comes up in zh-Hans too.
-    await $('[data-testid="language"]').selectByAttribute("value", "zh-Hans");
+    // the Language select writes the setting and applies it. The value is set
+    // and its `change` dispatched from the page, because a `<select>` in
+    // WKWebView opens a native menu that a WebDriver option click reaches
+    // only sometimes.
+    await browser.execute(() => {
+      const select = document.querySelector(
+        '[data-testid="language"]',
+      ) as HTMLSelectElement;
+      select.value = "zh-Hans";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
     await until(
       "the Settings heading in zh-Hans",
       async () =>
@@ -237,14 +245,27 @@ describe("the packaged desktop", () => {
 
     // Chinese typed into the well reaches the desk's PTY as UTF-8 over the
     // terminal socket, and the tty echoes it straight back (localization SPEC
-    // §5). Clicking the well focuses xterm's hidden textarea, and the key
-    // actions go to whatever has focus — xterm's textarea is zero-sized, so a
-    // send-keys on the element itself may be refused as not interactable.
+    // §5). The text arrives the way an input method commits it: an `input`
+    // event of type `insertText` on xterm's hidden textarea, which xterm turns
+    // into terminal data. WebKit's WebDriver delivers no CJK through key
+    // actions, and the zero-sized textarea refuses send-keys, so the smoke
+    // dispatches that event itself; the popup is the operator's eyes (LZ-7).
     // ponytail: the echo is the tty line discipline's, not the stand-in's —
     // it never reads its stdin, so no `INPUT n:` line is ever a keystroke's. A
     // stand-in that echoed its own stdin would prove the read side too.
-    await $('[data-testid="well"]').click();
-    await browser.keys("你好");
+    await browser.execute(() => {
+      const textarea = document.querySelector(
+        ".xterm-helper-textarea",
+      ) as HTMLTextAreaElement;
+      textarea.focus();
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          data: "你好",
+          inputType: "insertText",
+          bubbles: true,
+        }),
+      );
+    });
     await until("the typed Chinese to echo in the well", async () =>
       (await wellText()).includes("你好"),
     );
@@ -360,33 +381,26 @@ describe("the packaged desktop", () => {
     });
     // The smoke trades on the real feed: off-hours it has no price, and the
     // sandbox's own outcome for a market order is then MARKET_PRICE_UNAVAILABLE.
-    // The position is required only while the feed quotes the instrument.
-    const quotes = await api<{
-      quotes: { instrument_id: string; health: string }[];
-    }>("GET", `/desks/${deskId}/market/quotes`);
-    const priced = quotes.body.quotes.some(
-      (q) => q.instrument_id === "AAPL.XNAS" && q.health !== "UNAVAILABLE",
-    );
+    // The outcome decides the branch, not a quotes read: the desk's node
+    // prices only from observations made after it started, so the daemon's
+    // cache can hold a price the node has not seen at approval time.
+    let status: string | undefined;
+    await until("the sandbox's own outcome for the buy", async () => {
+      const { body } = await api<{
+        actions: { action_id: string; outcome?: { status?: string } }[];
+      }>("GET", `/desks/${deskId}/history/actions`);
+      status = body.actions.find((row) => row.action_id === "smoke-buy")
+        ?.outcome?.status;
+      return status === "FILLED" || status === "DENIED";
+    });
     await $('[data-testid="tab-desk"]').click();
-    if (priced) {
+    if (status === "FILLED") {
       await until("the filled position in the Desk tab", async () =>
         (await textOf('[data-testid="desk-positions"]')).includes("AAPL.XNAS"),
       );
     } else {
       console.log(
-        "smoke: AAPL.XNAS has no price; the sandbox's denial is the outcome",
-      );
-      await until(
-        "the sandbox's own MARKET_PRICE_UNAVAILABLE outcome",
-        async () => {
-          const { body } = await api<{
-            actions: { action_id: string; outcome?: { status?: string } }[];
-          }>("GET", `/desks/${deskId}/history/actions`);
-          return body.actions.some(
-            (row) =>
-              row.action_id === "smoke-buy" && row.outcome?.status === "DENIED",
-          );
-        },
+        "smoke: AAPL.XNAS had no price in the node; the sandbox's denial is the outcome",
       );
     }
 

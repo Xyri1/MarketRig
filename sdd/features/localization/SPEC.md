@@ -71,7 +71,7 @@ Startup calls it with `navigator.languages`. Adding a catalog is one entry in `L
 
 ### 2.2 Startup
 
-After `useDaemon` has authenticated health, `App.vue` reads `GET /settings/locale`. A value is applied. `null` is detected from `navigator.languages` by §2.1, written through `PUT /settings/locale`, then applied; a failed write applies the detected value anyway for this run and leaves the column `null` for the next launch to try again. The `en` catalog is what renders until the read answers, which is the same English R5 renders today.
+After `useDaemon` has authenticated health, `App.vue` reads `GET /settings/locale`. A value is applied. `null` is detected from `navigator.languages` by §2.1, written through `PUT /settings/locale`, then applied; a failed write applies the detected value anyway for this run and leaves the column `null` for the next launch to try again. A Language change made while the read or the write is in flight wins: the shell starts in `en`, so a global locale that is no longer `en` is the operator's choice, and startup then neither applies its result nor stores its detection (the smoke's first step changes the language on a freshly wiped root, which is exactly that window). The `en` catalog is what renders until the read answers, which is the same English R5 renders today.
 
 ### 2.3 `applyLocale`
 
@@ -150,7 +150,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ## 5. Fonts and input (LZ-7)
 
-`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run clicks the well and sends `你好` through WebDriver's key actions to the focused element, xterm's hidden textarea (a send-keys on that zero-sized element itself may be refused as not interactable), and asserts those bytes come back in the well: the pty's line discipline echoes them, which proves the socket carried the UTF-8 both ways. The stand-in never reads its stdin — its `INPUT n:` lines are delivered prompts, not keystrokes — so a stand-in echo is not available. Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
+`--font-ui` and `--font-terminal` stay as `src/style.css` sets them; nothing is bundled. The smoke's `zh-Hans` run delivers `你好` the way an input method commits text — an `input` event of type `insertText` dispatched on xterm's hidden textarea, which xterm turns into terminal data — because WebKit's WebDriver delivers no CJK through key actions and the zero-sized textarea refuses send-keys; it then asserts those bytes come back in the well: the pty's line discipline echoes them, which proves the socket carried the UTF-8 both ways. The stand-in never reads its stdin — its `INPUT n:` lines are delivered prompts, not keystrokes — so a stand-in echo is not available. Rendering quality and the OS input-method popup are confirmed by the operator on the packaged application and written into the slice's evidence line.
 
 ## Surfaces
 
@@ -173,7 +173,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ### 6.2 The packaged smoke in `zh-Hans`
 
-`pnpm smoke` gains, at the end of its step 1: the Language select (`data-testid="language"`) is set to `zh-Hans`, which is the §2.5 path (`PUT` then `applyLocale`) and the only one that re-renders a running webview, since nothing pushes a locale change to it; the Settings heading (`data-testid="runtimes-title"`) then reads the `zh-Hans` value of `settings.runtimes.title`. (Step 3's second launch focuses the existing window and reloads nothing, so it re-reads no column and asserts no language.) The smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the pty's echo of those bytes (§5). The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
+`pnpm smoke` gains, at the end of its step 1: the Language select (`data-testid="language"`) is set to `zh-Hans` and its `change` event dispatched from the page (a `<select>` in WKWebView opens a native menu that a WebDriver option click reaches only sometimes), which is the §2.5 path (`PUT` then `applyLocale`) and the only one that re-renders a running webview, since nothing pushes a locale change to it; the Settings heading (`data-testid="runtimes-title"`) then reads the `zh-Hans` value of `settings.runtimes.title`. (Step 3's second launch focuses the existing window and reloads nothing, so it re-reads no column and asserts no language.) The smoke keeps selecting by `data-testid`, so no other label is read, and the one text assertion imports `src/locales/zh-Hans.json` rather than repeating the string. Step 2 additionally types `你好` into the well and waits for the pty's echo of those bytes (§5). The R5 `en` smoke is not rerun: the `zh-Hans` run drives the same steps and is the R7 evidence line's desktop half. One run per platform, operator-run, recorded in the slice.
 
 ## 7. Required checks
 

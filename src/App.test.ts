@@ -69,6 +69,18 @@ it("detects the system language once, writes it, and renders it", async () => {
   expect(wrapper.text()).toContain(zhHans.desks.empty);
 });
 
+it("never overwrites a language chosen before the startup read answers", async () => {
+  systemLanguages(["en-US"]);
+  const wrapper = mountWithI18n(App);
+  // The operator picks Chinese before `GET /settings/locale` has answered.
+  i18n.global.locale.value = "zh-Hans";
+  await flushPromises();
+  await flushPromises();
+  expect(fakeLocale.writes).toEqual([]);
+  expect(i18n.global.locale.value).toBe("zh-Hans");
+  wrapper.unmount();
+});
+
 it("writes nothing when the daemon already holds a language", async () => {
   fakeLocale.value = "en";
   systemLanguages(["zh-CN"]);
