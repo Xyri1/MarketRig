@@ -142,7 +142,7 @@ The agent-facing artifacts, each produced under both locales by L1 (§6.1) and c
 5. one error envelope, `GET /desks/<unknown>` → `DESK_NOT_FOUND`, and one CLI error line, `marketrig desk show <unknown>`;
 6. `marketrigd --openapi`;
 7. the `marketrig-mcp` resource and tool listing, read through the adapter's stdio `resources/list` and `tools/list`;
-8. the daemon's stderr lines for the steps above, after the timestamps are stripped.
+8. the daemon's own log lines for the steps above (`target` under `marketrigd`, from the log root, since the daemon's standard error is empty by design; the HTTP stack's trace lines carry ports and connection counts and are not compared), after the timestamps are stripped.
 
 No code path in the three Rust binaries reads `installation_settings.locale` but `GET /settings/locale`; the SQL that reads it appears once.
 

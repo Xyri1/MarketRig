@@ -9050,8 +9050,9 @@ fn l1_artifacts(
     feed: &standin::Feed,
     desk: &str,
 ) -> Vec<(String, String)> {
-    let stderr_path = g.daemon_stderr();
-    let stderr_before = fs::metadata(&stderr_path).map_or(0, |file| file.len()) as usize;
+    // The daemon's standard error is empty by design: its lines go to the log
+    // root, which this half's slice of is item (8).
+    let log_before = logs(g).len();
 
     // (1) The seeds. Creation writes `AGENTS.md`; the skills arrive through the
     // OpenViking projection behind it (`openviking-continuity` §5.3).
@@ -9146,17 +9147,27 @@ fn l1_artifacts(
     let result_prompt = result_prompts(g, &desk_id, &firing).remove(0);
 
     // (3) An EVALUATION prompt: one USD round trip on the stand-in feed closes
-    // a cycle and queues it in the same unit (G13's path). Both halves move by
-    // one scripted step, so the realized figure is the same text in each.
+    // a cycle and queues it in the same unit (G13's path).
     let quotes_path = format!("/desks/{desk_id}/market/quotes");
     let orders_path = format!("/desks/{desk_id}/orders");
     let (status, _) = g.api("L1", endpoint, "GET", &quotes_path, None);
     assert_eq!(status, 200);
-    let opening = feed.price("AAPL");
-    within(Duration::from_secs(90), "AAPL's first observation", || {
-        quote_of(&g.call(endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["last"]
-            == opening.as_str()
-    });
+    // A node prices market orders from the observations made after it
+    // started, not from what the daemon's cache held before: each order waits
+    // for one scripted tick to advance AAPL's sequence, which counts per
+    // daemon and instrument, so the second half's node sees a fresh quote too.
+    let sequence = |g: &Harness| {
+        quote_of(&g.call(endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["sequence"]
+            .as_u64()
+            .unwrap_or(0)
+    };
+    let seen = sequence(g);
+    feed.tick("AAPL");
+    within(
+        Duration::from_secs(90),
+        "AAPL's observation after the node started",
+        || sequence(g) > seen,
+    );
     let (status, bought) = g.api(
         "L1",
         endpoint,
@@ -9166,15 +9177,10 @@ fn l1_artifacts(
     );
     assert_eq!(status, 201, "{bought}");
     assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
-    let closing = feed.tick("AAPL");
-    within(
-        Duration::from_secs(90),
-        "AAPL's observation after the buy",
-        || {
-            quote_of(&g.call(endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["last"]
-                == closing.as_str()
-        },
-    );
+    // No tick between the two fills: the node applies an observation a moment
+    // after the cache's sequence moves, so a tick here would leave the sell's
+    // price to timing and the realized figure with it. Flat at the same price
+    // is a closed cycle all the same, and `0.00` is the same text in each half.
     let (status, sold) = g.api(
         "L1",
         endpoint,
@@ -9283,12 +9289,17 @@ fn l1_artifacts(
     artifacts.push(("mcp-resources".to_string(), resources));
     artifacts.push(("mcp-tools".to_string(), tools));
 
-    // (8) What this half put on the daemon's standard error.
-    let written = fs::read_to_string(&stderr_path).unwrap_or_default();
-    artifacts.push((
-        "daemon-stderr".to_string(),
-        without_timestamps(written.get(stderr_before..).unwrap_or_default()),
-    ));
+    // (8) What this half put in the daemon's log: its own lines, not the
+    // HTTP stack's TRACE noise of ports and connection counts.
+    let written = logs(g);
+    let own: String = written
+        .get(log_before..)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(r#""target":"marketrigd"#))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    artifacts.push(("daemon-log".to_string(), without_timestamps(&own)));
 
     artifacts
         .into_iter()
@@ -9382,7 +9393,7 @@ fn localization(g: &mut Harness, stamp: &str, missing: &str, feed: &standin::Fee
     g.stop("L1", daemon26);
     g.note(
         "L1",
-        "every agent-facing artifact of §4 came out byte-identical under zh-Hans and en: the seeded AGENTS.md and skills, the firing document, the TRIGGER_RESULT and EVALUATION prompt rows, the CLI's help and desk output, both not-found answers, the OpenAPI document, the adapter's resource and tool listing, and the daemon's own standard error",
+        "every agent-facing artifact of §4 came out byte-identical under zh-Hans and en: the seeded AGENTS.md and skills, the firing document, the TRIGGER_RESULT and EVALUATION prompt rows, the CLI's help and desk output, both not-found answers, the OpenAPI document, the adapter's resource and tool listing, and the daemon's own log lines",
         json!({ "artifacts": zh.iter().map(|(name, _)| name).collect::<Vec<_>>() }),
     );
 }

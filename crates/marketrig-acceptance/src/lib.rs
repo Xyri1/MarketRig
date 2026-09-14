@@ -627,13 +627,6 @@ impl Harness {
         self.out.join("data").join("runtime").join("endpoint.json")
     }
 
-    /// The stderr file of the daemon this harness started last — the file
-    /// [`Harness::spawn`] created, for a scenario that reads back what one
-    /// daemon wrote there.
-    pub fn daemon_stderr(&self) -> PathBuf {
-        self.out.join(format!("marketrigd-{}.stderr", self.daemons))
-    }
-
     pub fn children_path(&self) -> PathBuf {
         self.out.join("data").join("runtime").join("children.json")
     }
