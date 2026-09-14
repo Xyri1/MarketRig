@@ -561,6 +561,13 @@ impl Harness {
         self.clock_ns = Some(now_ns);
     }
 
+    /// Puts the next daemon back on the ordinary live clock — what a scenario
+    /// that trades on the stand-in feed needs once the controlled-clock
+    /// scenarios have seeded one.
+    pub fn live_clock(&mut self) {
+        self.clock_ns = None;
+    }
+
     /// Moves every started node's clock to `now_ns` through the seam's own
     /// route and dispatches the time events that releases — the gate's only way
     /// to cross a session boundary, since no scenario may wait on wall-clock
@@ -618,6 +625,13 @@ impl Harness {
 
     pub fn endpoint_path(&self) -> PathBuf {
         self.out.join("data").join("runtime").join("endpoint.json")
+    }
+
+    /// The stderr file of the daemon this harness started last — the file
+    /// [`Harness::spawn`] created, for a scenario that reads back what one
+    /// daemon wrote there.
+    pub fn daemon_stderr(&self) -> PathBuf {
+        self.out.join(format!("marketrigd-{}.stderr", self.daemons))
     }
 
     pub fn children_path(&self) -> PathBuf {

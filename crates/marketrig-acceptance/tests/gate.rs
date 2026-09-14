@@ -8148,8 +8148,12 @@ fn gate() {
     // in their own function; split again when the next milestone lands.
     invocation(&mut g, &stamp, &missing);
 
+    // Byte-identity under both locales (`localization` feature SPEC §6.1, per
+    // LZ-5), in its own function for the same reason.
+    localization(&mut g, &stamp, &missing, &feed);
+
     let evidence = g.out.display().to_string();
-    g.note("gate", "G1-T5 complete", json!({ "evidence": evidence }));
+    g.note("gate", "G1-L1 complete", json!({ "evidence": evidence }));
 }
 
 fn invocation(g: &mut Harness, stamp: &str, missing: &str) {
@@ -8958,5 +8962,427 @@ fn invocation(g: &mut Harness, stamp: &str, missing: &str) {
         "T5",
         "an accepted request answered its original firing after a clean stop and a restart, with the input intact, no second prompt, and a RECOVERY that lost nothing",
         json!({ "firing": restart_firing, "recovery": recovery, "prompt": restart_prompt }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// L1 — byte-identity under both locales (`localization` feature SPEC §4, §6.1,
+// per LZ-5, LZ-6)
+// ---------------------------------------------------------------------------
+
+/// An id no desk has, so both halves ask for the same missing desk and read
+/// back the same envelope.
+const UNKNOWN_DESK: &str = "01997f00-0000-7000-8000-0000000000ff";
+
+/// Whether `text` opens with a canonical 8-4-4-4-12 UUID.
+fn starts_with_uuid(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 36 {
+        return false;
+    }
+    let mut at = 0;
+    for (nth, group) in [8usize, 4, 4, 4, 12].into_iter().enumerate() {
+        if nth > 0 {
+            if bytes[at] != b'-' {
+                return false;
+            }
+            at += 1;
+        }
+        if !bytes[at..at + group].iter().all(u8::is_ascii_hexdigit) {
+            return false;
+        }
+        at += group;
+    }
+    true
+}
+
+/// Everything one half mints, replaced by a placeholder: its desk's name (which
+/// the workspace path embeds), every canonical UUID, and every run of thirteen
+/// or more digits, which is how a nanosecond instant spells itself. What
+/// survives is exactly the text the two locales must agree on.
+fn anonymize(text: &str, desk: &str) -> String {
+    let named = text.replace(desk, "<desk>");
+    let mut out = String::with_capacity(named.len());
+    let mut rest = named.as_str();
+    while let Some(first) = rest.chars().next() {
+        if starts_with_uuid(rest) {
+            out.push_str("<uuid>");
+            rest = &rest[36..];
+            continue;
+        }
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits >= 13 {
+            out.push_str("<ns>");
+            rest = &rest[digits..];
+            continue;
+        }
+        out.push(first);
+        rest = &rest[first.len_utf8()..];
+    }
+    out
+}
+
+/// The daemon writes JSONL whose first field is the instant, which two halves
+/// differ in by construction (§4 item 8).
+fn without_timestamps(text: &str) -> String {
+    const FIELD: &str = r#""timestamp":""#;
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(FIELD) {
+        out.push_str(&rest[..start]);
+        out.push_str(r#""timestamp":"<at>""#);
+        rest = match rest[start + FIELD.len()..].find('"') {
+            Some(end) => &rest[start + FIELD.len() + end + 1..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One locale's half of L1: a desk with its seeded files, one invoked
+/// code-bearing firing, one closed round trip, and every agent-facing artifact
+/// §4 lists, each with this half's own identifiers substituted out. The two
+/// halves run the same steps in the same order, so the pairs line up by index.
+fn l1_artifacts(
+    g: &mut Harness,
+    endpoint: &marketrig_acceptance::Endpoint,
+    feed: &standin::Feed,
+    desk: &str,
+) -> Vec<(String, String)> {
+    let stderr_path = g.daemon_stderr();
+    let stderr_before = fs::metadata(&stderr_path).map_or(0, |file| file.len()) as usize;
+
+    // (1) The seeds. Creation writes `AGENTS.md`; the skills arrive through the
+    // OpenViking projection behind it (`openviking-continuity` §5.3).
+    let (exit, created) = g.cli_json("L1", &["--json", "desk", "create", desk]);
+    assert_eq!(exit, 0, "{created}");
+    let desk_id = created["id"].as_str().expect("id").to_owned();
+    let workspace = g.workspace(desk);
+    let skills_dir = workspace.join(".agents").join("skills");
+    within(
+        Duration::from_secs(120),
+        "the desk's seeded skills projection",
+        || projected_names(&skills_dir) == SEEDED_SKILLS,
+    );
+    let mut seeded: Vec<(String, String)> = Vec::new();
+    let mut dirs = vec![skills_dir.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                seeded.push((
+                    path.strip_prefix(&skills_dir)
+                        .expect("a projected file under the skills root")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}")),
+                ));
+            }
+        }
+    }
+    seeded.sort();
+    let mut artifacts: Vec<(String, String)> = vec![
+        (
+            "seeded-agents-md".to_string(),
+            fs::read_to_string(workspace.join("AGENTS.md")).expect("the desk's AGENTS.md"),
+        ),
+        (
+            "seeded-skills".to_string(),
+            seeded
+                .into_iter()
+                .map(|(relative, contents)| format!("--- {relative}\n{contents}"))
+                .collect(),
+        ),
+    ];
+
+    // (2) The firing document the child was handed, and the TRIGGER_RESULT
+    // prompt row the execution queued (T2's path).
+    let runner = g.trigger_code.display().to_string();
+    let doc_script = script(g, &format!("l1-{desk}"), "env");
+    let (exit, probe) = g.cli_json(
+        "L1",
+        &[
+            "--json",
+            "trigger",
+            "create",
+            desk,
+            "--name",
+            "l1-doc",
+            "--brief",
+            "report the document the daemon handed the child",
+            "--code",
+            &doc_script,
+            "--arg",
+            &runner,
+            "--arg",
+            "{script}",
+        ],
+    );
+    assert_eq!(exit, 0, "{probe}");
+    let (exit, ran) = invoke(
+        g,
+        "L1",
+        desk,
+        "l1-doc",
+        "r-l1",
+        &["--input", "three lines\nof made-up\nfindings"],
+    );
+    assert_eq!(exit, 0, "{ran}");
+    let firing = ran["firing"]["id"].as_str().expect("id").to_owned();
+    await_execution(g, &firing, Duration::from_secs(30));
+    let (_, reported) = g.cli_json("L1", &["--json", "trigger", "firing", desk, &firing]);
+    assert_eq!(reported["execution"]["outcome"], "EXITED", "{reported}");
+    let document = parse(
+        reported["execution"]["stdout"]
+            .as_str()
+            .expect("the captured standard output")
+            .trim(),
+    )["document"]
+        .clone();
+    artifacts.push(("firing-document".to_string(), document.to_string()));
+    let result_prompt = result_prompts(g, &desk_id, &firing).remove(0);
+
+    // (3) An EVALUATION prompt: one USD round trip on the stand-in feed closes
+    // a cycle and queues it in the same unit (G13's path). Both halves move by
+    // one scripted step, so the realized figure is the same text in each.
+    let quotes_path = format!("/desks/{desk_id}/market/quotes");
+    let orders_path = format!("/desks/{desk_id}/orders");
+    let (status, _) = g.api("L1", endpoint, "GET", &quotes_path, None);
+    assert_eq!(status, 200);
+    let opening = feed.price("AAPL");
+    within(Duration::from_secs(90), "AAPL's first observation", || {
+        quote_of(&g.call(endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["last"]
+            == opening.as_str()
+    });
+    let (status, bought) = g.api(
+        "L1",
+        endpoint,
+        "POST",
+        &orders_path,
+        Some(&order("l1-buy-aapl", "AAPL.XNAS", "BUY", "MARKET", "1")),
+    );
+    assert_eq!(status, 201, "{bought}");
+    assert_eq!(bought["outcome"]["status"], "FILLED", "{bought}");
+    let closing = feed.tick("AAPL");
+    within(
+        Duration::from_secs(90),
+        "AAPL's observation after the buy",
+        || {
+            quote_of(&g.call(endpoint, "GET", &quotes_path, None).1, "AAPL.XNAS")["last"]
+                == closing.as_str()
+        },
+    );
+    let (status, sold) = g.api(
+        "L1",
+        endpoint,
+        "POST",
+        &orders_path,
+        Some(&order("l1-sell-aapl", "AAPL.XNAS", "SELL", "MARKET", "1")),
+    );
+    assert_eq!(status, 201, "{sold}");
+    assert_eq!(sold["outcome"]["status"], "FILLED", "{sold}");
+    let evaluations = |g: &Harness| {
+        g.column(
+            "SELECT id FROM prompts WHERE desk_id = ?1 AND kind = 'EVALUATION' \
+             ORDER BY created_at_ns, id",
+            &[&desk_id],
+        )
+    };
+    within(
+        Duration::from_secs(60),
+        "the closed cycle's EVALUATION prompt",
+        || evaluations(g).len() == 1,
+    );
+    let evaluation = evaluations(g).remove(0);
+
+    // Both prompt rows are read only once the dispatcher has resolved them:
+    // with no runtime registered that is `RUNTIME_UNAVAILABLE`, and a row read
+    // mid-resolution would differ between the halves for that reason alone.
+    for prompt in [&result_prompt, &evaluation] {
+        within(
+            Duration::from_secs(60),
+            &format!("prompt {prompt} to resolve"),
+            || prompt_state(g, prompt).0 == "FAILED",
+        );
+        assert_eq!(
+            prompt_state(g, prompt).1.as_deref(),
+            Some("RUNTIME_UNAVAILABLE")
+        );
+        let (_, shown) = g.cli_json("L1", &["--json", "prompt", "show", desk, prompt]);
+        let kind = shown["kind"].as_str().expect("kind").to_ascii_lowercase();
+        artifacts.push((format!("{kind}-prompt"), shown.to_string()));
+    }
+
+    // (4) The CLI's own text, (5) the two not-found answers, (6) the OpenAPI
+    // document, and (7) the adapter's listing.
+    for (name, args) in [
+        ("cli-help", vec!["--help"]),
+        ("cli-trigger-help", vec!["trigger", "--help"]),
+        ("cli-desk-show", vec!["desk", "show", desk]),
+        ("cli-desk-show-json", vec!["--json", "desk", "show", desk]),
+    ] {
+        let (exit, stdout, stderr) = g.cli(&args);
+        assert_eq!(exit, 0, "{name}: {stdout}{stderr}");
+        artifacts.push((name.to_string(), stdout));
+    }
+    let (status, envelope) = g.call(endpoint, "GET", &format!("/desks/{UNKNOWN_DESK}"), None);
+    assert_eq!(status, 404, "{envelope}");
+    assert_eq!(envelope["code"], "DESK_NOT_FOUND", "{envelope}");
+    artifacts.push(("desk-not-found-envelope".to_string(), envelope.to_string()));
+    let (exit, _, stderr) = g.cli(&["desk", "show", UNKNOWN_DESK]);
+    assert_eq!(exit, 1, "{stderr}");
+    artifacts.push(("cli-desk-not-found".to_string(), stderr));
+
+    let daemond = g.daemond.clone();
+    let openapi = g
+        .command(&daemond)
+        .arg("--openapi")
+        .output()
+        .expect("run marketrigd --openapi");
+    assert!(openapi.status.success(), "marketrigd --openapi failed");
+    artifacts.push((
+        "openapi".to_string(),
+        String::from_utf8_lossy(&openapi.stdout).into_owned(),
+    ));
+
+    let adapter = g.mcp.clone();
+    let data_root = g.out.clone();
+    let desk_name = desk.to_string();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("a runtime for the harness's MCP client");
+    let (resources, tools) = runtime.block_on(async {
+        let command = tokio::process::Command::new(&adapter).configure(|command| {
+            command
+                .arg("--desk")
+                .arg(&desk_name)
+                .env("MARKETRIG_TEST_DATA_ROOT", &data_root);
+        });
+        let service =
+            ().serve(TokioChildProcess::new(command).expect("spawn marketrig-mcp"))
+                .await
+                .expect("initialize the MCP session");
+        let resources = serde_json::to_string_pretty(
+            &service
+                .list_resources(None)
+                .await
+                .expect("list the resources"),
+        )
+        .expect("the resource listing as JSON");
+        let tools =
+            serde_json::to_string_pretty(&service.list_tools(None).await.expect("list the tools"))
+                .expect("the tool listing as JSON");
+        let _ = service.cancel().await;
+        (resources, tools)
+    });
+    artifacts.push(("mcp-resources".to_string(), resources));
+    artifacts.push(("mcp-tools".to_string(), tools));
+
+    // (8) What this half put on the daemon's standard error.
+    let written = fs::read_to_string(&stderr_path).unwrap_or_default();
+    artifacts.push((
+        "daemon-stderr".to_string(),
+        without_timestamps(written.get(stderr_before..).unwrap_or_default()),
+    ));
+
+    artifacts
+        .into_iter()
+        .map(|(name, text)| (name, anonymize(&text, desk)))
+        .collect()
+}
+
+/// L1 — every agent-facing artifact of §4, produced once under `zh-Hans` and
+/// once under `en` on one daemon, byte-identical pair by pair.
+fn localization(g: &mut Harness, stamp: &str, missing: &str, feed: &standin::Feed) {
+    // A1–A6 left a controlled clock seeded; L1 trades one US round trip on the
+    // stand-in feed, which is R1's ordinary live clock (G13's path).
+    g.live_clock();
+    let daemon26 = g.spawn("L1");
+    let endpoint = daemon26.endpoint.clone();
+    // As T1–T5 do, no runtime is registered: every prompt these halves queue
+    // resolves `RUNTIME_UNAVAILABLE`, and the texts compared are the rows.
+    for runtime in ["codex", "claude"] {
+        let (status, unavailable) = g.api(
+            "L1",
+            &endpoint,
+            "POST",
+            &format!("/runtimes/{runtime}/discover"),
+            Some(missing),
+        );
+        assert_eq!(status, 200, "{unavailable}");
+        assert_eq!(unavailable["state"], "UNAVAILABLE", "{unavailable}");
+    }
+    let (status, ungated) = g.api(
+        "L1",
+        &endpoint,
+        "PUT",
+        "/settings/policies",
+        Some(r#"{"trigger_code_policy":"ALWAYS_ALLOW"}"#),
+    );
+    assert_eq!(status, 200, "{ungated}");
+    within(
+        Duration::from_secs(120),
+        "this daemon's OpenViking child",
+        || g.call(&endpoint, "GET", "/openviking", None).1["child"] == json!("READY"),
+    );
+
+    let mut halves: Vec<Vec<(String, String)>> = Vec::new();
+    for (locale, half) in [("zh-Hans", "zh"), ("en", "en")] {
+        let (status, written) = g.api(
+            "L1",
+            &endpoint,
+            "PUT",
+            "/settings/locale",
+            Some(&json!({ "locale": locale }).to_string()),
+        );
+        assert_eq!(status, 200, "{written}");
+        assert_eq!(written["locale"], locale);
+        let desk = format!("l1-{half}-{stamp}");
+        let artifacts = l1_artifacts(g, &endpoint, feed, &desk);
+        for (name, text) in &artifacts {
+            g.write_evidence(&format!("l1-{half}-{name}.txt"), text);
+        }
+        halves.push(artifacts);
+    }
+
+    let (zh, en) = (&halves[0], &halves[1]);
+    assert_eq!(zh.len(), en.len());
+    for ((name, under_zh), (also, under_en)) in zh.iter().zip(en) {
+        assert_eq!(name, also, "the two halves collected different artifacts");
+        // Two `String`s are equal exactly when their bytes are; the raw halves
+        // are in the bundle beside this line, so a mismatch is inspectable.
+        assert_eq!(
+            under_zh, under_en,
+            "{name} is not byte-identical under the two locales"
+        );
+        g.note(
+            "L1",
+            &format!("{name} byte-identical"),
+            json!({ "artifact": name, "bytes": under_zh.len() }),
+        );
+    }
+    // §4 item 3's other half: an `ORIENTATION` row exists only after an
+    // activation (R3 §6.1) and its text is rendered at delivery time, so with
+    // no runtime registered there is nothing to read — and no route or CLI
+    // exposes the renderer. Recorded rather than invented.
+    g.note(
+        "L1",
+        "ORIENTATION text not collectable: the row is inserted by an activation alone and its text is rendered at delivery, exposed by no route or CLI",
+        json!({ "artifact": "orientation-prompt", "collected": false }),
+    );
+
+    let (status, left) = g.api("L1", &endpoint, "GET", "/settings/locale", None);
+    assert_eq!(status, 200, "{left}");
+    assert_eq!(left["locale"], "en", "L1 leaves the locale at en");
+    g.stop("L1", daemon26);
+    g.note(
+        "L1",
+        "every agent-facing artifact of §4 came out byte-identical under zh-Hans and en: the seeded AGENTS.md and skills, the firing document, the TRIGGER_RESULT and EVALUATION prompt rows, the CLI's help and desk output, both not-found answers, the OpenAPI document, the adapter's resource and tool listing, and the daemon's own standard error",
+        json!({ "artifacts": zh.iter().map(|(name, _)| name).collect::<Vec<_>>() }),
     );
 }

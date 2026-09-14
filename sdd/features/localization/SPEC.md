@@ -137,7 +137,7 @@ The agent-facing artifacts, each produced under both locales by L1 (§6.1) and c
 
 1. the seeded `AGENTS.md` and every seeded skill file of a desk created under that locale;
 2. the firing document `trigger-code` receives for a code-bearing trigger, and the `TRIGGER_RESULT` prompt text read from the prompt row;
-3. an `EVALUATION` prompt text and an `ORIENTATION` prompt text from the prompt rows;
+3. an `EVALUATION` prompt text from the prompt rows (an `ORIENTATION` row exists only after an activation and its text is rendered at delivery, so with no runtime registered L1 has none to read and records that as an observation);
 4. `marketrig --help`, `marketrig trigger --help`, and the plain and `--json` output of `marketrig desk show`;
 5. one error envelope, `GET /desks/<unknown>` → `DESK_NOT_FOUND`, and one CLI error line, `marketrig desk show <unknown>`;
 6. `marketrigd --openapi`;
@@ -169,7 +169,7 @@ UTF-8: one module check in `marketrig` creates a trigger whose `--brief` is `交
 
 ### 6.1 Gate scenario (continuing the chain after T5)
 
-**L1 — byte-identity under both locales.** `PUT /settings/locale {zh-Hans}`; create desk `l1-zh` with the seeded skills; create one code-bearing trigger and invoke it (T1's path) so a firing document, an execution, and a `TRIGGER_RESULT` prompt exist; close one round trip on the stand-in feed so an `EVALUATION` prompt exists (G13's path); collect the eight artifact groups of §4. `PUT /settings/locale {en}`; repeat with desk `l1-en`; compare each pair after substituting the two desk ids and names, the two trigger ids, firing ids, prompt ids, and request ids, and stripping stderr timestamps. Every pair is byte-equal. `GET /settings/locale` answers `en` at the end so the later scenarios see the seeded default's equivalent. The gate registers no runtime here, as T1–T5 do not, so every queued prompt resolves `RUNTIME_UNAVAILABLE`; the texts under comparison are the stored prompt rows.
+**L1 — byte-identity under both locales.** `PUT /settings/locale {zh-Hans}`; create desk `l1-zh` with the seeded skills; create one code-bearing trigger and invoke it (T1's path) so a firing document, an execution, and a `TRIGGER_RESULT` prompt exist; close one round trip on the stand-in feed so an `EVALUATION` prompt exists (G13's path); collect the eight artifact groups of §4. `PUT /settings/locale {en}`; repeat with desk `l1-en`; compare each pair after substituting the desk name, every canonical UUID (desk, trigger, firing, prompt, execution, and daemon ids), and every nanosecond instant, and stripping stderr timestamps. Every pair is byte-equal. `GET /settings/locale` answers `en` at the end so the later scenarios see the seeded default's equivalent. The gate registers no runtime here, as T1–T5 do not, so every queued prompt resolves `RUNTIME_UNAVAILABLE`; the texts under comparison are the stored prompt rows.
 
 ### 6.2 The packaged smoke in `zh-Hans`
 
