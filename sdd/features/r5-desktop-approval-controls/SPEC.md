@@ -1,6 +1,6 @@
 # R5 — Desktop and approval controls: Feature SPEC
 
-_Decision basis: per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D60, D61, D62, D66, D68, D70, D71, D72, D75 and this feature's R5-1 … R5-8._ This document refines root `sdd/SPEC.md` §4.3, §4.4, §6.5, §8.3, §11.2, §12.3, §13.2, §14, §15, and §17. Where it names a Tauri, Hey API, utoipa, or xterm.js fact, the fact was verified on 2026-09-04 — and, for xterm.js, on 2026-09-06 — against the versions R5-7 pins.
+*Decision basis: per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D60, D61, D62, D66, D68, D70, D71, D72, D75 and this feature's R5-1 … R5-8.* This document refines root `sdd/SPEC.md` §4.3, §4.4, §6.5, §8.3, §11.2, §12.3, §13.2, §14, §15, and §17. Where it names a Tauri, Hey API, utoipa, or xterm.js fact, the fact was verified on 2026-09-04 — and, for xterm.js, on 2026-09-06 — against the versions R5-7 pins.
 
 ## 1. Workspace additions
 
@@ -12,9 +12,9 @@ _Decision basis: per D10, D26, D29, D30, D33, D52, D55, D56, D57, D58, D59, D60,
 
 ## 2. Policies (R5-1)
 
-| Route                    | Body                                                                     | Answers                                                                                                 |
-| ------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| `GET /settings/policies` | —                                                                        | `200 {trigger_code_policy, paper_order_policy, delivery_mode, steer_available: false, updated_at_ns}`   |
+| Route | Body | Answers |
+| --- | --- | --- |
+| `GET /settings/policies` | — | `200 {trigger_code_policy, paper_order_policy, delivery_mode, steer_available: false, updated_at_ns}` |
 | `PUT /settings/policies` | any subset of `{trigger_code_policy, paper_order_policy, delivery_mode}` | `200` the resource; `400 VALIDATION` (unknown field, unknown value, empty object); `409 STEER_DISABLED` |
 
 Vocabulary: `ALWAYS_ALLOW | REQUIRE_APPROVAL` for the two policies; `delivery_mode` admits only `QUEUE`. Each field that changes appends `POLICY_CHANGED {field, from, to}` (installation-wide, `desk_id` null) in the same unit as the update; a `PUT` that changes nothing writes nothing and answers `200`. The unit that inserts a code snapshot (§3.2) or a trading action (§3.3) reads its column with `SELECT … FROM installation_settings WHERE id = 1` inside its own transaction.
@@ -29,11 +29,11 @@ Scenarios:
 
 ### 3.1 The listing and the decision
 
-| Route                                                            | Body                                | Answers                                                                                                                                          |
-| ---------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /approvals?state=PENDING\|DECIDED\|ALL` (default `PENDING`) | —                                   | `200 {approvals: [Approval…]}` newest first by `requested_at_ns`; `400 VALIDATION` (any other `state`)                                           |
-| `GET /approvals/{id}`                                            | —                                   | `200` Approval with the snapshot's `source`; `404 APPROVAL_NOT_FOUND`                                                                            |
-| `POST /desks/{d}/approvals/{id}`                                 | `{"decision": "APPROVE" \| "DENY"}` | `200` Approval; `400 VALIDATION`; `404 APPROVAL_NOT_FOUND`; `409 APPROVAL_DECIDED`; `503 MARKET_UNAVAILABLE` (order approval, node cannot start) |
+| Route | Body | Answers |
+| --- | --- | --- |
+| `GET /approvals?state=PENDING\|DECIDED\|ALL` (default `PENDING`) | — | `200 {approvals: [Approval…]}` newest first by `requested_at_ns`; `400 VALIDATION` (any other `state`) |
+| `GET /approvals/{id}` | — | `200` Approval with the snapshot's `source`; `404 APPROVAL_NOT_FOUND` |
+| `POST /desks/{d}/approvals/{id}` | `{"decision": "APPROVE" \| "DENY"}` | `200` Approval; `400 VALIDATION`; `404 APPROVAL_NOT_FOUND`; `409 APPROVAL_DECIDED`; `503 MARKET_UNAVAILABLE` (order approval, node cannot start) |
 
 An **Approval** is `{kind: "TRIGGER_CODE" | "PAPER_ORDER", id, desk_id, desk_name, approval, requested_at_ns, decided_at_ns, detail}`; `id` is `code_snapshots.id` or `trading_actions.id`; `requested_at_ns` is the row's `created_at_ns`. For `TRIGGER_CODE`, `detail` is `{trigger_id, trigger_name, suffix, argv, timeout_secs, fingerprint, source_bytes}` plus `source` on the single read; for `PAPER_ORDER`, `detail` is `{action_id, source, trigger_id?, firing_id?, request}` where `request` is the stored submit body, plus `outcome` once the row has one. A record the policy never gated — `approval` is `ALWAYS_ALLOW` — is not an approval and no `state` lists it; `PENDING` lists `PENDING`, `DECIDED` lists `APPROVED` and `DENIED`, and `ALL` lists all three. A `TRIGGER_CODE` item names the trigger that holds the snapshot, or, once a patch has superseded it, the trigger of the last firing that ran it. The decision route resolves `id` in `code_snapshots` then `trading_actions`, both filtered by the path's desk; a decision on a row that is not `PENDING` is `409 APPROVAL_DECIDED` carrying the existing state in its message. Every decision appends `APPROVAL_DECIDED {kind, id, decision}` on the desk, in the unit that writes `approval` and `decided_at_ns`; every pending record's creation appends `APPROVAL_REQUESTED {kind, id, trigger_id | action_id}` on the desk. Neither route exists on the CLI, and no decision queues a prompt (per D70).
 
@@ -73,7 +73,7 @@ The node is neither started nor consulted. `APPROVE` starts the node lazily if n
 
 Recovery: a `PENDING` row is pure SQLite and survives any restart untouched; an `APPROVED` row whose `outcome` is still null after a crash is the same uncertain action R1 already leaves alone — never resubmitted, its record answering the replay.
 
-The seeded constitution (R4 feature SPEC §5.1) gains, under _The paper environment_, for desks created from R5 on:
+The seeded constitution (R4 feature SPEC §5.1) gains, under *The paper environment*, for desks created from R5 on:
 
 ```markdown
 The user may require approval of paper orders and of trigger code. A gated order answers
@@ -135,16 +135,16 @@ set_tray_pending(n)      -> () | Err(text)                            menu line 
 exit_app()               -> never returns                            app.exit(0)
 ```
 
-`start_daemon` spawns the sidecar with the daemon's normal environment and cwd the data root, `setsid` on macOS and `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows, never holding a handle that would kill it when the shell exits — the shell's crash must not take the daemon with it; the daemon's own `MARKETRIG_TEST_*` seam variables are inherited from the shell's environment untouched, which is how the packaged smoke would relocate a root if it ever needed to (it does not; it wipes the real one, §7.3). The bootstrap in the webview is: `read_endpoint` → `GET /health` with the bearer and a UUID match → on any failure `start_daemon` → verify again → show the panels or the _daemon unavailable_ state with a Retry.
+`start_daemon` spawns the sidecar with the daemon's normal environment and cwd the data root, `setsid` on macOS and `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows, never holding a handle that would kill it when the shell exits — the shell's crash must not take the daemon with it; the daemon's own `MARKETRIG_TEST_*` seam variables are inherited from the shell's environment untouched, which is how the packaged smoke would relocate a root if it ever needed to (it does not; it wipes the real one, §7.3). The bootstrap in the webview is: `read_endpoint` → `GET /health` with the bearer and a UUID match → on any failure `start_daemon` → verify again → show the panels or the *daemon unavailable* state with a Retry.
 
-Window and tray: `on_window_event(CloseRequested)` calls `api.prevent_close()` and `window.hide()`; `RunEvent::ExitRequested` is prevented so a hidden window keeps the app alive; the tray icon is built at setup with the menu _Open MarketRig_ / _0 pending approvals_ (disabled) / _Quit MarketRig_; _Open_ and a left click on the icon `unminimize`, `show`, `set_focus`; _Quit_ emits `marketrig://quit` to the webview, which runs `POST /quit`, polls `GET /health` until it fails or 10 s pass, then calls `exit_app` — the same sequence the window's own Quit control runs after its `AlertDialog`. The single-instance plugin's callback shows and focuses the window (a second launch never starts a second daemon: the shell it belongs to exits inside the plugin). Autostart uses the plugin with `args(["--hidden"])`; the app name is `MarketRig`; Settings shows its state through `isEnabled` and toggles it. The log plugin writes `MarketRig.log` to the platform log directory (`LogDir` target), rotated at 5 MiB keeping one file. On macOS the dock icon stays while hidden (no activation-policy change); a badge is not used.
+Window and tray: `on_window_event(CloseRequested)` calls `api.prevent_close()` and `window.hide()`; `RunEvent::ExitRequested` is prevented so a hidden window keeps the app alive; the tray icon is built at setup with the menu *Open MarketRig* / *0 pending approvals* (disabled) / *Quit MarketRig*; *Open* and a left click on the icon `unminimize`, `show`, `set_focus`; *Quit* emits `marketrig://quit` to the webview, which runs `POST /quit`, polls `GET /health` until it fails or 10 s pass, then calls `exit_app` — the same sequence the window's own Quit control runs after its `AlertDialog`. The single-instance plugin's callback shows and focuses the window (a second launch never starts a second daemon: the shell it belongs to exits inside the plugin). Autostart uses the plugin with `args(["--hidden"])`; the app name is `MarketRig`; Settings shows its state through `isEnabled` and toggles it. The log plugin writes `MarketRig.log` to the platform log directory (`LogDir` target), rotated at 5 MiB keeping one file. On macOS the dock icon stays while hidden (no activation-policy change); a badge is not used.
 
 Scenarios:
 
-- **Cold start from nothing.** No endpoint file: the window shows _Starting MarketRig…_, `start_daemon` returns within 30 s, health matches, desks load.
+- **Cold start from nothing.** No endpoint file: the window shows *Starting MarketRig…*, `start_daemon` returns within 30 s, health matches, desks load.
 - **Stale endpoint.** A file from a dead daemon: health fails to connect → `start_daemon` → a new UUID → verified.
-- **Close is hide.** Close → window hidden, `GET /health` still answers, the terminal socket still open (bytes counted by the frontend keep rising); tray _Open_ → the same webview, no reload, the counter continued.
-- **Quit is quit.** Tray _Quit_ → every open `agent_processes` row `QUIT`, the endpoint file gone, the shell process exited.
+- **Close is hide.** Close → window hidden, `GET /health` still answers, the terminal socket still open (bytes counted by the frontend keep rising); tray *Open* → the same webview, no reload, the counter continued.
+- **Quit is quit.** Tray *Quit* → every open `agent_processes` row `QUIT`, the endpoint file gone, the shell process exited.
 - **Second launch.** Launching the binary again while hidden → the window shows and focuses; one daemon.
 
 ## 6. The frontend (R5-7)
@@ -154,15 +154,9 @@ Scenarios:
 `package.json` pins `packageManager: pnpm@11.25.0+sha512.<hash>` and `engines.node: 24.18.0`; every dependency is exact. `openapi-ts.config.ts`:
 
 ```ts
-export default {
-  input: "openapi.json",
-  output: "src/client",
-  plugins: [
-    "@hey-api/typescript",
-    { name: "@hey-api/sdk", operations: { strategy: "flat" } },
-    { name: "@hey-api/client-fetch", runtimeConfigPath: "./src/hey-api.ts" },
-  ],
-};
+export default { input: 'openapi.json', output: 'src/client',
+  plugins: ['@hey-api/typescript', { name: '@hey-api/sdk', operations: { strategy: 'flat' } },
+            { name: '@hey-api/client-fetch', runtimeConfigPath: './src/hey-api.ts' }] };
 ```
 
 `openapi.json` is written by `cargo run -p marketrigd -- --openapi`, a daemon flag that prints the document and exits without touching a data root; the document comes from `utoipa_axum::router::OpenApiRouter` with `#[utoipa::path]` on every HTTP handler, `split_for_parts()` giving the served `Router`. A response that already has a struct is that struct, derived `ToSchema` — `Desk`, `Runtime`, the two memory rows and their status, `Resource`, `Approval`, `ActionRecord` — while a handler that composes its object, or takes a body it parses itself, declares that body untyped: the document describes the surface as it is and no type is invented for it. The three WebSocket routes are outside it, because utoipa cannot describe an upgrade: `/desks/{d}/terminal` and `/desks/{d}/channel` are absent altogether, and `/events` appears once, as its listing. `src/hey-api.ts` sets `baseUrl` and the `Authorization` header from `useDaemon` at runtime. `pnpm generate` runs both steps; `pnpm check` runs Prettier, ESLint, `vue-tsc --noEmit`, and Vitest. The error envelope is one `ToSchema` type and every route declares it for its non-2xx statuses, so generated calls carry typed codes.
@@ -202,13 +196,13 @@ The desktop uses terminal identity and absolute byte offsets from §6.5 to skip 
   240 px         flexible, min 480 px                       360 px, collapses to a 40 px rail
 ```
 
-- **Left.** Desk rows in creation order: a 2 px status gutter (live → `--state-live`, pending approvals → `--state-pending`, attention → `--state-attention`, `FAILED` or `UNAVAILABLE` workspace → `--state-failure`, else `--state-idle`), the name in the terminal stack, a pending-approval count, an attention dot. _New desk_ opens an inline form (name, runtime `Select`); a `FAILED` desk shows _Retry_. Selection is the accent.
-- **Center.** A header line — desk name, selected runtime, session state from `GET /desks/{d}/session`, and the §6.2 controls of root SPEC as buttons (_Start_ / _Continue_ when no process, _Interrupt_ disabled on Claude Code with its reason, _Exit_, _Switch runtime_ as a `Select`) — over the well. With no live session the well shows the last known screen if a presentation exists, else an empty well with _No session_ and the start controls.
-- **Right.** Reka UI `Tabs`: **Desk** — quotes, book, positions, open orders (`GET …/market/quotes`, `book`, `positions`, `orders`, refetched every 15 s while visible and on `APPROVAL_DECIDED` — the events tail has no trading kind, so a fill reaches the tab through the poll); **Triggers** — the listing with enable/disable, each trigger's `approval` when it has code, and the firings drawer; **Approvals** — the pending items across desks, newest first, each with kind, desk, request or code (source in a `<pre>` in the terminal stack), _Approve_ and _Deny_ (Deny behind `AlertDialog`); **Activity** — `GET /events?desk_id=` newest first, kind and payload, _Load more_ through `before`, live rows prepended by refetch; **Settings** — runtimes (path, version, state, _Discover_, _Retry_, an explicit-path field), memory child and provider (the R4 routes; discovery takes the child's executable path, as `POST /memory/discover` requires one, and the two model ids are typed into text inputs — the desktop does not call `GET /memory/provider/models`), policies (two `Select`s; delivery mode is a plain disabled `<select>` at _Queue next turn_ whose _Steer_ option is itself disabled, because a control that never opens needs no popover), autostart, and _Quit MarketRig_. The Settings tab is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
+- **Left.** Desk rows in creation order: a 2 px status gutter (live → `--state-live`, pending approvals → `--state-pending`, attention → `--state-attention`, `FAILED` or `UNAVAILABLE` workspace → `--state-failure`, else `--state-idle`), the name in the terminal stack, a pending-approval count, an attention dot. *New desk* opens an inline form (name, runtime `Select`); a `FAILED` desk shows *Retry*. Selection is the accent.
+- **Center.** A header line — desk name, selected runtime, session state from `GET /desks/{d}/session`, and the §6.2 controls of root SPEC as buttons (*Start* / *Continue* when no process, *Interrupt* disabled on Claude Code with its reason, *Exit*, *Switch runtime* as a `Select`) — over the well. With no live session the well shows the last known screen if a presentation exists, else an empty well with *No session* and the start controls.
+- **Right.** Reka UI `Tabs`: **Desk** — quotes, book, positions, open orders (`GET …/market/quotes`, `book`, `positions`, `orders`, refetched every 15 s while visible and on `APPROVAL_DECIDED` — the events tail has no trading kind, so a fill reaches the tab through the poll); **Triggers** — the listing with enable/disable, each trigger's `approval` when it has code, and the firings drawer; **Approvals** — the pending items across desks, newest first, each with kind, desk, request or code (source in a `<pre>` in the terminal stack), *Approve* and *Deny* (Deny behind `AlertDialog`); **Activity** — `GET /events?desk_id=` newest first, kind and payload, *Load more* through `before`, live rows prepended by refetch; **Settings** — runtimes (path, version, state, *Discover*, *Retry*, an explicit-path field), memory child and provider (the R4 routes; discovery takes the child's executable path, as `POST /memory/discover` requires one, and the two model ids are typed into text inputs — the desktop does not call `GET /memory/provider/models`), policies (two `Select`s; delivery mode is a plain disabled `<select>` at *Queue next turn* whose *Steer* option is itself disabled, because a control that never opens needs no popover), autostart, and *Quit MarketRig*. The Settings tab is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
 
 ### 6.4 Notifications
 
-Sent through `@tauri-apps/plugin-notification` (`isPermissionGranted` then `requestPermission` once, at first need) only while the window is hidden or unfocused, one per event, title and body from the `en` catalog with the desk name: `APPROVAL_REQUESTED` (_alpha: approval needed — market buy 100 AAPL.XNAS_), `SESSION_ATTENTION` (kinds other than `session_start`), `PROMPT_FAILED`, `DESK_FAILED`, `TRADING_NODE_FAILED`, `RUNTIME_UNAVAILABLE`, `CONTROL_PLANE_LOST`, `MEMORY_UNAVAILABLE`, `TRIGGER_MISSED`, and a `TRIGGER_RESULT` prompt whose execution `outcome` is not `EXITED` with code `0` (read through the firing route on `PROMPT_DELIVERED`) — deferred in R5, because that payload carries `prompt_id`, `kind`, `runtime`, and `native_session_id` and no firing id, so the firing route cannot be reached from the event. Routine results — fills, deliveries, retains — never notify (per D52). Click behaviour beyond the platform default stays deferred (root §18).
+Sent through `@tauri-apps/plugin-notification` (`isPermissionGranted` then `requestPermission` once, at first need) only while the window is hidden or unfocused, one per event, title and body from the `en` catalog with the desk name: `APPROVAL_REQUESTED` (*alpha: approval needed — market buy 100 AAPL.XNAS*), `SESSION_ATTENTION` (kinds other than `session_start`), `PROMPT_FAILED`, `DESK_FAILED`, `TRADING_NODE_FAILED`, `RUNTIME_UNAVAILABLE`, `CONTROL_PLANE_LOST`, `MEMORY_UNAVAILABLE`, `TRIGGER_MISSED`, and a `TRIGGER_RESULT` prompt whose execution `outcome` is not `EXITED` with code `0` (read through the firing route on `PROMPT_DELIVERED`) — deferred in R5, because that payload carries `prompt_id`, `kind`, `runtime`, and `native_session_id` and no firing id, so the firing route cannot be reached from the event. Routine results — fills, deliveries, retains — never notify (per D52). Click behaviour beyond the platform default stays deferred (root §18).
 
 ### 6.5 Tokens
 
@@ -216,46 +210,24 @@ Sent through `@tauri-apps/plugin-notification` (`isPermissionGranted` then `requ
 
 ```css
 @theme {
-  --font-ui:
-    system-ui, -apple-system, "Segoe UI Variable", "PingFang SC",
-    "Microsoft YaHei UI", sans-serif;
-  --font-terminal:
-    "SF Mono", Menlo, "Cascadia Mono", Consolas, ui-monospace, monospace;
-  --text-xs: 11px;
-  --text-sm: 12px;
-  --text-base: 13px;
-  --text-lg: 15px;
-  --text-xl: 18px;
+  --font-ui: system-ui, -apple-system, "Segoe UI Variable", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-terminal: "SF Mono", Menlo, "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-lg: 15px; --text-xl: 18px;
   --spacing: 4px;
-  --radius-control: 4px;
-  --radius-panel: 8px;
-  --radius-pill: 999px;
-  --color-ground: oklch(0.985 0.004 250);
-  --color-panel: oklch(0.965 0.005 250);
-  --color-line: oklch(0.88 0.008 250);
-  --color-ink: oklch(0.22 0.01 250);
-  --color-ink-muted: oklch(0.5 0.01 250);
-  --color-well: oklch(0.17 0.01 250);
-  --color-accent: oklch(0.55 0.15 265);
-  --color-accent-ink: oklch(0.99 0 0);
-  --color-state-live: oklch(0.62 0.17 150);
-  --color-state-pending: oklch(0.78 0.16 85);
-  --color-state-attention: oklch(0.68 0.19 55);
-  --color-state-failure: oklch(0.58 0.22 25);
+  --radius-control: 4px; --radius-panel: 8px; --radius-pill: 999px;
+  --color-ground: oklch(0.985 0.004 250);   --color-panel: oklch(0.965 0.005 250);
+  --color-line:   oklch(0.88  0.008 250);   --color-ink:   oklch(0.22  0.01  250);
+  --color-ink-muted: oklch(0.50 0.01 250);  --color-well:  oklch(0.17  0.01  250);
+  --color-accent:  oklch(0.55 0.15 265);    --color-accent-ink: oklch(0.99 0 0);
+  --color-state-live: oklch(0.62 0.17 150); --color-state-pending: oklch(0.78 0.16 85);
+  --color-state-attention: oklch(0.68 0.19 55); --color-state-failure: oklch(0.58 0.22 25);
   --color-state-idle: oklch(0.72 0.01 250);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-ground: oklch(0.19 0.01 250);
-    --color-panel: oklch(0.23 0.01 250);
-    --color-line: oklch(0.32 0.01 250);
-    --color-ink: oklch(0.92 0.005 250);
-    --color-ink-muted: oklch(0.65 0.01 250);
-    --color-well: oklch(0.14 0.01 250);
-    --color-accent: oklch(0.72 0.13 265);
-    --color-accent-ink: oklch(0.15 0.02 265);
-  }
-}
+@media (prefers-color-scheme: dark) { :root {
+  --color-ground: oklch(0.19 0.01 250); --color-panel: oklch(0.23 0.01 250); --color-line: oklch(0.32 0.01 250);
+  --color-ink: oklch(0.92 0.005 250);  --color-ink-muted: oklch(0.65 0.01 250); --color-well: oklch(0.14 0.01 250);
+  --color-accent: oklch(0.72 0.13 265); --color-accent-ink: oklch(0.15 0.02 265);
+} }
 ```
 
 Colour appears only through the five `state-*` roles, in the gutter, the attention dot, and the approval badge, and through `accent` for selection and focus rings; everything else is the neutral ramp. The terminal well is `--color-well` in both schemes; xterm.js's theme is derived from the tokens at mount. The gutter never animates; the only motion is the 120 ms opacity of a tab body. Type below 13 px is reserved for machine tokens in the terminal stack. Every prose string is `t('…')` from `src/locales/en.json`; a Vitest check fails on a bare string in a template (per D68) so R6 adds `zh-Hans.json` and nothing else.
@@ -273,17 +245,17 @@ The daemon now defaults `trigger_code_policy` to `REQUIRE_APPROVAL`, so G21's pr
 
 ### 7.2 Frontend checks
 
-Vitest with Vue Test Utils and jsdom, against a fake `fetch` and a fake `WebSocket`: `useDaemon` verifies UUID match and falls back to `start_daemon` once; `useEvents` sends the cursor on reconnect, dispatches by kind, and calls only refetches; `useTerminal` checks distinct per-desk instances, measurable opening, hidden dimensions, renderer fallback/context loss, replay completion before fitting, replay deduplication and gap rejection, ConPTY metadata, ConPTY caret parking during output bursts, pending-write limits, and disposal on `SESSION_EXITED`; a Node test uses real xterm and Unicode11 to check byte-split UTF-8, emoji, CJK, and combining widths before opening; `useApprovals` counts per desk and calls `set_tray_pending`; the Approvals tab renders both kinds and disables its buttons while a decision is in flight; the policy `Select` renders _Steer_ disabled; the catalog check finds no bare template string; the drift check is CI's `git diff --exit-code src/client` after `pnpm generate`.
+Vitest with Vue Test Utils and jsdom, against a fake `fetch` and a fake `WebSocket`: `useDaemon` verifies UUID match and falls back to `start_daemon` once; `useEvents` sends the cursor on reconnect, dispatches by kind, and calls only refetches; `useTerminal` checks distinct per-desk instances, measurable opening, hidden dimensions, renderer fallback/context loss, replay completion before fitting, replay deduplication and gap rejection, ConPTY metadata, ConPTY caret parking during output bursts, pending-write limits, and disposal on `SESSION_EXITED`; a Node test uses real xterm and Unicode11 to check byte-split UTF-8, emoji, CJK, and combining widths before opening; `useApprovals` counts per desk and calls `set_tray_pending`; the Approvals tab renders both kinds and disables its buttons while a decision is in flight; the policy `Select` renders *Steer* disabled; the catalog check finds no bare template string; the drift check is CI's `git diff --exit-code src/client` after `pnpm generate`.
 
 ### 7.3 The packaged smoke
 
 `pnpm smoke`, operator-run, refuses to start unless `MARKETRIG_SMOKE_WIPE=1`; it then quits any running MarketRig, deletes the per-user data root, the log root, and `~/.marketrig`, and drives the packaged application (`src-tauri` is a workspace member, so its artifacts land in the workspace `target/`: `target/release/bundle/macos/MarketRig.app/…` on macOS, and the bare `target/release/marketrig-desktop.exe` on Windows, whose build passes `--no-bundle`) through `@wdio/tauri-service` in `driverProvider: 'embedded'` mode on both platforms, one spec:
 
 1. the window appears; the daemon endpoint file exists and health answers with the bearer it carries; Settings is the auto-selected tab when `GET /runtimes` reports no `AVAILABLE` runtime (a first-launch machine), and is selected by the spec otherwise — the daemon discovers a real `codex` or `claude` on the login PATH at start, so an operator's machine usually is not a first launch;
-2. register `runtime-standin` (built by `cargo build -p marketrig-acceptance`) as `codex` through the explicit-path field; create desk `smoke`; _Start_; the well shows the stand-in's banner;
+2. register `runtime-standin` (built by `cargo build -p marketrig-acceptance`) as `codex` through the explicit-path field; create desk `smoke`; *Start*; the well shows the stand-in's banner;
 3. hide the window through the window plugin's `hide` command (a WebDriver close destroys the window instead of requesting a close, and the capability grants no `allow-close`, so the shell's close-hides branch is confirmed by hand, not by the smoke; the WebDriver session stays attached to the hidden webview); create through REST a code-free one-off trigger 2 s ahead, whose `TRIGGER_RESULT` the stand-in echoes into the terminal; launch the binary a second time; the window is visible again (`is_visible` through the window plugin), the same webview (a marker set in `window` before hiding is still there), and the well contains the bytes written while hidden;
-4. set paper orders to _Require approval_; `POST /desks/{d}/orders` with the bearer → the Approvals tab shows one item and the desk row's pending badge reads 1 (the tray's count is the same `useApprovals` total, and a Tauri command has no DOM for WebDriver to read); _Approve_ → the action reads `APPROVED` in history and the smoke waits for the sandbox's own outcome: `FILLED` → the Desk tab shows the position; `DENIED` (off-hours, or a node that has not yet observed the instrument, since a node prices only from observations made after it started and the daemon's quote cache is no proof of that) → accepted as the authoritative answer; a second order → _Deny_ → `DENIED` in history actions;
-5. _Quit MarketRig_ through the Settings tab → the endpoint file is gone, no `marketrigd` or `runtime-standin` process survives, the application process has exited.
+4. set paper orders to *Require approval*; `POST /desks/{d}/orders` with the bearer → the Approvals tab shows one item and the desk row's pending badge reads 1 (the tray's count is the same `useApprovals` total, and a Tauri command has no DOM for WebDriver to read); *Approve* → the action reads `APPROVED` in history and, while the real feed quotes the instrument, the Desk tab shows the position (off-hours the sandbox's own outcome is `MARKET_PRICE_UNAVAILABLE`, which the smoke accepts as the authoritative answer); a second order → *Deny* → `DENIED` in history actions;
+5. *Quit MarketRig* through the Settings tab → the endpoint file is gone, no `marketrigd` or `runtime-standin` process survives, the application process has exited.
 
 The bundle it drives is built with the `wdio` Cargo feature, which compiles the embedded WebDriver server `driverProvider: 'embedded'` connects to into the shell; a shipped build never carries it, because that server listens on loopback without authentication.
 

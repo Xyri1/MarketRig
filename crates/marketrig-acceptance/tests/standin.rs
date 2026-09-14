@@ -752,7 +752,15 @@ fn openviking_exits_after_readiness_as_scripted() {
             json!({"status": "not_ready", "reason": "initializing"})
         )
     );
-    ov.wait_ready();
+    // Readiness, then the scripted exit 200 ms later: a poll that lands after
+    // the exit gets no answer at all on a busy runner, and the exit code below
+    // is the proof either way, so the loop stops on `200` or on silence.
+    for _ in 0..100 {
+        match ov.try_call("GET", "/ready", "", None) {
+            Some((200, _)) | None => break,
+            Some(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
 
     let status = ov.child.0.wait().expect("the scripted exit");
     assert_eq!(status.code(), Some(7));
