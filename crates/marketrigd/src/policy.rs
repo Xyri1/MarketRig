@@ -215,6 +215,57 @@ pub fn put(store: &Store, body: &Value, now_ns: i64) -> Result<Resource, PolicyE
 }
 
 // ---------------------------------------------------------------------------
+// The desktop locale (feature SPEC `localization` §1, per LZ-1)
+// ---------------------------------------------------------------------------
+
+/// The `GET`/`PUT /settings/locale` body (`localization` §1.2): `null` until
+/// the desktop has detected a language and written it. Nothing the agent reads
+/// takes a locale, so this is the whole surface the column has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct Locale {
+    pub locale: Option<String>,
+}
+
+/// The one read of the column (`localization` §4).
+pub fn locale_get(store: &Store) -> Result<Locale, PolicyError> {
+    Ok(store.call(|conn| {
+        conn.query_row(
+            "SELECT locale FROM installation_settings WHERE id = 1",
+            [],
+            |r| Ok(Locale { locale: r.get(0)? }),
+        )
+    })?)
+}
+
+/// The `PUT` (`localization` §1.2): exactly one of the two catalogs, written
+/// with `updated_at_ns` in one unit. A write that changes nothing stamps
+/// nothing — `IS NOT` is SQLite's null-safe comparison — and answers the
+/// resource all the same. No event: nothing reads a locale change after the
+/// fact.
+pub fn locale_put(store: &Store, body: &Value, now_ns: i64) -> Result<Locale, PolicyError> {
+    let locale = match body.get("locale").and_then(Value::as_str) {
+        // The two shipped catalogs, which is what the column's CHECK says too.
+        Some(value @ ("en" | "zh-Hans")) => value.to_string(),
+        _ => {
+            return Err(PolicyError::Validation(
+                "The request body must be a JSON object with \"locale\": \"en\" or \"zh-Hans\"."
+                    .to_string(),
+            ));
+        }
+    };
+    Ok(store.unit(move |tx| {
+        tx.execute(
+            "UPDATE installation_settings SET locale = ?1, updated_at_ns = ?2 \
+             WHERE id = 1 AND locale IS NOT ?1",
+            params![&locale, now_ns],
+        )?;
+        Ok(Locale {
+            locale: Some(locale),
+        })
+    })?)
+}
+
+// ---------------------------------------------------------------------------
 // The decision (§3.1)
 // ---------------------------------------------------------------------------
 
@@ -622,6 +673,91 @@ fn policies_resource() {
         "a policy change never projects a pending trigger"
     );
     assert_eq!(events(&store).len(), 3, "each change is its own event");
+}
+
+// ---------------------------------------------------------------------------
+// policy::locale_resource (`localization` §7 check 2)
+// ---------------------------------------------------------------------------
+
+/// The locale resource (`localization` §1.2, §1.3): `null` on a fresh root,
+/// both catalogs accepted, every other body `VALIDATION` with the column as it
+/// was, no event, and the stored value after the daemon has restarted.
+#[cfg(test)]
+#[test]
+fn locale_resource() {
+    let (dir, store) = crate::store::open_temp();
+    let none = Locale { locale: None };
+    assert_eq!(locale_get(&store).unwrap(), none);
+    assert_eq!(
+        serde_json::to_value(locale_get(&store).unwrap()).unwrap(),
+        json!({ "locale": null })
+    );
+
+    // §1.3's refusals, plus the shapes that are not a locale at all. None of
+    // them writes, and the settings row is untouched.
+    for body in [
+        json!({}),
+        json!({ "locale": "zh" }),
+        json!({ "locale": "zh-Hant" }),
+        json!({ "locale": "en-US" }),
+        json!({ "locale": null }),
+        json!({ "locale": true }),
+        json!("zh-Hans"),
+    ] {
+        let e = locale_put(&store, &body, 100).expect_err("{body} must be refused");
+        assert_eq!(e.code(), "VALIDATION", "{body}: {e}");
+    }
+    assert_eq!(locale_get(&store).unwrap(), none);
+    assert_eq!(get(&store).unwrap().updated_at_ns, 0);
+
+    // A write stamps the row like a policy write; a write that changes nothing
+    // answers the resource and stamps nothing.
+    assert_eq!(
+        locale_put(&store, &json!({ "locale": "zh-Hans" }), 200).unwrap(),
+        Locale {
+            locale: Some("zh-Hans".to_string())
+        }
+    );
+    assert_eq!(get(&store).unwrap().updated_at_ns, 200);
+    assert_eq!(
+        locale_put(&store, &json!({ "locale": "zh-Hans" }), 300)
+            .unwrap()
+            .locale
+            .as_deref(),
+        Some("zh-Hans")
+    );
+    assert_eq!(get(&store).unwrap().updated_at_ns, 200);
+
+    // A refusal after a value is stored leaves that value alone, and a locale
+    // change is nobody's event (§1.2).
+    assert_eq!(
+        locale_put(&store, &json!({ "locale": "zh" }), 400)
+            .unwrap_err()
+            .code(),
+        "VALIDATION"
+    );
+    assert_eq!(
+        locale_get(&store).unwrap().locale.as_deref(),
+        Some("zh-Hans")
+    );
+    assert!(events(&store).is_empty());
+
+    // The daemon restarts on the same database: the choice is still there, and
+    // the other catalog replaces it.
+    drop(store);
+    let store = Store::open(&dir.path().join("marketrig.sqlite3")).unwrap();
+    assert_eq!(
+        locale_get(&store).unwrap().locale.as_deref(),
+        Some("zh-Hans")
+    );
+    assert_eq!(
+        locale_put(&store, &json!({ "locale": "en" }), 500)
+            .unwrap()
+            .locale
+            .as_deref(),
+        Some("en")
+    );
+    assert_eq!(get(&store).unwrap().updated_at_ns, 500);
 }
 
 /// The decision body and the two decision codes (§3.1).

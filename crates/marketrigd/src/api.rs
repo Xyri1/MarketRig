@@ -115,6 +115,7 @@ const HTTP_PATHS: &[&str] = &[
     "/desks/{desk_id}/prompts",
     "/desks/{desk_id}/prompts/{prompt_id}",
     "/settings/policies",
+    "/settings/locale",
     "/approvals",
     "/approvals/{id}",
     "/desks/{desk_id}/approvals/{id}",
@@ -181,6 +182,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     .routes(routes!(list_prompts))
     .routes(routes!(show_prompt))
     .routes(routes!(policies, put_policies))
+    .routes(routes!(locale, put_locale))
     .routes(routes!(approvals))
     .routes(routes!(approval))
     .routes(routes!(decide_approval))
@@ -2288,6 +2290,47 @@ async fn put_policies(
         .flatten()
         .unwrap_or(serde_json::Value::Null);
     Ok(Json(policy::put(&state.store, &body, store::now_ns())?))
+}
+
+// The desktop locale (feature SPEC `localization` §1.2). The column the
+// desktop detects into and reads back; nothing the agent consumes reads it.
+
+#[utoipa::path(
+    get,
+    path = "/settings/locale",
+    responses(
+        (status = 200, body = policy::Locale),
+        (status = 401, body = Envelope),
+    )
+)]
+async fn locale(State(state): State<Arc<ApiState>>) -> Result<Json<policy::Locale>, PolicyError> {
+    Ok(Json(policy::locale_get(&state.store)?))
+}
+
+#[utoipa::path(
+    put,
+    path = "/settings/locale",
+    request_body = policy::Locale,
+    responses(
+        (status = 200, body = policy::Locale),
+        (status = 400, body = Envelope),
+        (status = 401, body = Envelope),
+    )
+)]
+async fn put_locale(
+    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<policy::Locale>, PolicyError> {
+    let body: serde_json::Value = is_json(&headers)
+        .then(|| serde_json::from_str(&body).ok())
+        .flatten()
+        .unwrap_or(serde_json::Value::Null);
+    Ok(Json(policy::locale_put(
+        &state.store,
+        &body,
+        store::now_ns(),
+    )?))
 }
 
 // The approvals (R5 feature SPEC §3.1). The listing and the single read are
@@ -4893,6 +4936,38 @@ fn openapi_describes_every_http_route() {
         value["paths"]["/approvals/{id}"]["get"]["responses"]["404"]["content"]["application/json"]
             ["schema"]["$ref"],
         "#/components/schemas/Envelope"
+    );
+}
+
+/// The document carries both locale routes and the typed body the frontend
+/// client is generated from (`localization` §1.2).
+#[cfg(test)]
+#[test]
+fn openapi_lists_locale() {
+    let document = openapi();
+    let locale = document
+        .paths
+        .paths
+        .get("/settings/locale")
+        .expect("/settings/locale is described");
+    assert!(
+        locale.get.is_some() && locale.put.is_some(),
+        "the resource is read and written"
+    );
+    let value: Value = serde_json::from_str(&document.to_pretty_json().unwrap()).unwrap();
+    assert_eq!(
+        value["paths"]["/settings/locale"]["put"]["requestBody"]["content"]["application/json"]["schema"]
+            ["$ref"],
+        "#/components/schemas/Locale"
+    );
+    assert_eq!(
+        value["paths"]["/settings/locale"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"]["$ref"],
+        "#/components/schemas/Locale"
+    );
+    assert_eq!(
+        value["components"]["schemas"]["Locale"]["properties"]["locale"]["type"],
+        serde_json::json!(["string", "null"])
     );
 }
 

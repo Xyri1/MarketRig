@@ -127,6 +127,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/008_embedding_dimension.sql"),
     include_str!("store/009_hithink.sql"),
     include_str!("store/010_invocation.sql"),
+    include_str!("store/011_locale.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.
@@ -1315,7 +1316,8 @@ fn approval_migration_applies() {
     );
     // The row is one row, and steering is refused by the column itself.
     for sql in [
-        "INSERT INTO installation_settings VALUES (2,'ALWAYS_ALLOW','ALWAYS_ALLOW','QUEUE',1)",
+        "INSERT INTO installation_settings (id, trigger_code_policy, paper_order_policy, \
+         delivery_mode, updated_at_ns) VALUES (2,'ALWAYS_ALLOW','ALWAYS_ALLOW','QUEUE',1)",
         "UPDATE installation_settings SET delivery_mode = 'STEER' WHERE id = 1",
         "UPDATE installation_settings SET trigger_code_policy = 'MAYBE' WHERE id = 1",
     ] {
@@ -1563,8 +1565,7 @@ fn invocation_migration_applies() {
     // A fresh database: `source` is gone, the two input columns are there, and
     // the two partial unique indexes replace the table UNIQUE.
     let (_dir, store) = open_temp();
-    assert_eq!(user_version(&store).unwrap(), 10);
-    assert_eq!(MIGRATIONS.len(), 10);
+    assert_eq!(user_version(&store).unwrap(), MIGRATIONS.len() as i64);
     assert!(!columns(&store, "triggers").contains(&"source".to_string()));
     for column in ["request_id", "input"] {
         assert!(columns(&store, "firings").contains(&column.to_string()));
@@ -1667,7 +1668,7 @@ fn invocation_migration_applies() {
     }
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(user_version(&store).unwrap(), 10);
+    assert_eq!(user_version(&store).unwrap(), MIGRATIONS.len() as i64);
     assert!(!columns(&store, "triggers").contains(&"source".to_string()));
     let carried: (String, i64, i64, String, i64, String, String) = store
         .call(|c| {
@@ -1726,5 +1727,92 @@ fn invocation_migration_applies() {
     assert_eq!(dangling, 0, "PRAGMA foreign_key_check must be empty");
     for index in ["firings_invoked", "firings_scheduled"] {
         assert!(indexes(&store).contains(&index.to_string()), "{index}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// store::locale_migration_applies (`localization` §1.1)
+// ---------------------------------------------------------------------------
+
+/// Migration 11 (`localization` §1.1, per LZ-1): a fresh database carries the
+/// nullable `locale` column, a migration-10 database upgrades in place with its
+/// rows and its settings intact, and the CHECK admits the two shipped catalogs
+/// and nothing else.
+#[cfg(test)]
+#[test]
+fn locale_migration_applies() {
+    let (_dir, fresh) = open_temp();
+    let unset: Option<String> = fresh
+        .call(|c| c.query_row("SELECT locale FROM installation_settings", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(
+        unset, None,
+        "the column is NULL until the desktop writes it"
+    );
+    drop(fresh);
+
+    // A migration-10 database upgrades in place: no table is rebuilt, so every
+    // row and every policy the operator already set survives.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("marketrig.sqlite3");
+    {
+        let conn = Connection::open(&path).unwrap();
+        for sql in &MIGRATIONS[..10] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO desks (id, name, state, workspace_path, created_at_ns, ready_at_ns) \
+               VALUES ('0199','alpha','READY','/desks/alpha',1000,2000);
+             UPDATE installation_settings \
+                SET trigger_code_policy = 'ALWAYS_ALLOW', updated_at_ns = 1500 WHERE id = 1;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 10i64).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .call(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)))
+            .unwrap(),
+        MIGRATIONS.len() as i64,
+        "migration 11 applied"
+    );
+    let carried: (String, String, i64, Option<String>) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT (SELECT name FROM desks), trigger_code_policy, updated_at_ns, locale \
+                 FROM installation_settings",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        carried,
+        ("alpha".to_string(), "ALWAYS_ALLOW".to_string(), 1500, None)
+    );
+
+    // The CHECK is the shipped catalogs: `zh` and `zh-Hant` are languages this
+    // desktop does not ship and the column refuses them.
+    for locale in ["en", "zh-Hans"] {
+        store
+            .unit(move |tx| {
+                tx.execute(
+                    "UPDATE installation_settings SET locale = ?1 WHERE id = 1",
+                    rusqlite::params![locale],
+                )
+            })
+            .unwrap_or_else(|e| panic!("{locale} must be accepted: {e}"));
+    }
+    for locale in ["zh", "zh-Hant", "EN", ""] {
+        assert!(
+            store
+                .unit(move |tx| tx.execute(
+                    "UPDATE installation_settings SET locale = ?1 WHERE id = 1",
+                    rusqlite::params![locale],
+                ))
+                .is_err(),
+            "{locale} must be rejected"
+        );
     }
 }

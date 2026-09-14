@@ -3027,6 +3027,78 @@
         }
       }
     },
+    "/settings/locale": {
+      "get": {
+        "operationId": "locale",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Locale"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "put_locale",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Locale"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Locale"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/settings/policies": {
       "get": {
         "operationId": "policies",
@@ -3348,6 +3420,18 @@
               "null"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "Locale": {
+        "type": "object",
+        "description": "The `GET`/`PUT /settings/locale` body (`localization` §1.2): `null` until\nthe desktop has detected a language and written it. Nothing the agent reads\ntakes a locale, so this is the whole surface the column has.",
+        "properties": {
+          "locale": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
