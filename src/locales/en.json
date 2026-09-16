@@ -15,7 +15,15 @@
     "namePlaceholder": "Desk name",
     "runtime": "Runtime",
     "retry": "Retry",
-    "attention": "This desk asked for you."
+    "attention": "This desk asked for you.",
+    "reveal": {
+      "mac": "Open in Finder",
+      "windows": "Show in File Explorer"
+    },
+    "delete": "Delete desk…",
+    "deleteTitle": "Delete {name}?",
+    "deleteBody": "Its workspace folder and its history are removed. This cannot be undone.",
+    "deleteConfirm": "Delete"
   },
   "session": {
     "live": "session live",

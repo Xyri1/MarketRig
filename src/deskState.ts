@@ -17,6 +17,11 @@ export function deskState(
   return "idle";
 }
 
+/** The host platform, for the one label that names the file manager. */
+export function isWindows(): boolean {
+  return navigator.userAgent.includes("Win");
+}
+
 /** Written out so Tailwind's scanner sees each utility (per D72: no literal colour). */
 export const gutterClass: Record<DeskState, string> = {
   live: "bg-state-live",

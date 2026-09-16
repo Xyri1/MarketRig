@@ -15,7 +15,15 @@
     "namePlaceholder": "交易台名称",
     "runtime": "运行时",
     "retry": "重试",
-    "attention": "这个交易台在等你。"
+    "attention": "这个交易台在等你。",
+    "reveal": {
+      "mac": "在访达中打开",
+      "windows": "在文件资源管理器中显示"
+    },
+    "delete": "删除交易台…",
+    "deleteTitle": "删除 {name} 吗？",
+    "deleteBody": "它的工作区文件夹和历史记录会一并删除，且无法恢复。",
+    "deleteConfirm": "删除"
   },
   "session": {
     "live": "会话进行中",

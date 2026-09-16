@@ -127,6 +127,7 @@ onMounted(() => {
       :desks="desks"
       :selected="selected"
       @select="selected = $event"
+      @deleted="refresh()"
     />
     <section class="flex min-w-[480px] flex-1 flex-col overflow-hidden">
       <SessionHeader v-if="selectedDesk" :desk="selectedDesk" />

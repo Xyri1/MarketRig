@@ -7,7 +7,7 @@ import DeskRow from "./DeskRow.vue";
 import NewDeskForm from "./NewDeskForm.vue";
 
 defineProps<{ desks: Desk[]; selected: string | null }>();
-defineEmits<{ select: [id: string] }>();
+defineEmits<{ select: [id: string]; deleted: [] }>();
 
 const { t } = useI18n();
 const creating = ref(false);
@@ -34,6 +34,7 @@ const creating = ref(false);
         :desk="desk"
         :selected="desk.id === selected"
         @select="$emit('select', desk.id)"
+        @deleted="$emit('deleted')"
       />
     </div>
     <div class="shrink-0 border-t border-line p-2">

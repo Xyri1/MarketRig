@@ -774,3 +774,15 @@ The chain grows scenario by scenario as milestones land, so no chain waits on a 
 `ponytail:` the ceilings are recorded on HT-1 (no per-key rate accounting), HT-2 (change detection on the price triple stands in for a source time), HT-4 (one global spacing gate, one size ceiling), and HT-5 (a pattern-based rewrite that reports what it missed).
 
 **Contract:** [PRD MVP scope](PRD.md#9-mvp-scope), [SPEC §4.4](SPEC.md#44-configuration-scopes), [SPEC §12.1](SPEC.md#121-trading-authority-and-node-topology), [SPEC §12.2](SPEC.md#122-shared-reads-and-isolated-books), [SPEC §12.3](SPEC.md#123-trading-actions-and-approvals), [SPEC §13.2](SPEC.md#132-cli-continuity-plane), [SPEC §16](SPEC.md#16-memory-and-skills), [SPEC §17](SPEC.md#17-verification), [SPEC §18](SPEC.md#18-implementation-deferred-contracts), and [ROADMAP](ROADMAP.md).
+
+## Desk deletion
+
+### D85 — A desk is deleted softly through `DELETE /desks/{desk_id}`, from the desk row's context menu or `marketrig desk delete`; the row stays, the workspace goes
+
+**Decision:** A desk can be deleted. `DELETE /desks/{desk_id}` ends the desk's live session through the exit path, shuts its terminal, stops its trading node, and in one unit stamps migration 12's nullable `desks.deleted_at_ns` and soft-deletes the desk's live triggers, then removes the workspace directory, the launch directory, and the daemon-owned `ovcli.conf` best effort, answering the row. A deleted desk is absent from `GET /desks`, `404 DESK_NOT_FOUND` on every desk-scoped route, and invisible to the scheduler and the executor; its rows stay for history. The desktop's desk row gains a context menu with two actions: reveal the workspace in the platform's file manager through the shell's own `reveal_path` command (`open` on macOS, `explorer` on Windows, no plugin), and *Delete desk…* behind a confirmation dialog. The CLI gains `marketrig [--json] desk delete <desk-name-or-id>`. No `DESK_DELETED` event kind is added.
+
+**Rationale:** The user's ask on 2026-09-16, once the dev stack had accumulated desks with no way to retire them but wiping the data root. Soft deletion is the shape D79 chose for triggers and for the same reason: every desk-owned table references `desks` without a cascade, and history routes must keep reading. Reveal goes through the standard library because a Tauri command that spawns the platform's opener is a dozen lines and the opener plugin would be a new pinned dependency for one call.
+
+`ponytail:` the desk's OpenViking user is left orphaned (delete it through OpenViking's admin route when tenancy growth makes it matter); a deleted desk's name stays taken because `desks.name` is unique (widen to a partial index over live rows when a name must be reusable); no event kind, because a widening is a rebuild of `operational_events` (add `DESK_DELETED` in the next rebuild that has another reason to happen).
+
+**Contract:** [SPEC §5.2](SPEC.md#52-creation-and-recovery), [SPEC §13.2](SPEC.md#132-cli-continuity-plane), [SPEC §14](SPEC.md#14-desktop-and-application-lifecycle), and [SPEC §15](SPEC.md#15-persistence-crash-recovery-and-history).

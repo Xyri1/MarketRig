@@ -335,6 +335,23 @@ fn exit_app(app: AppHandle) {
     app.exit(0);
 }
 
+/// Opens the OS file manager on a desk's workspace folder, for the desk row's
+/// context menu. The path is a directory, so macOS wants plain `open` — `open
+/// -R` is for selecting a file. `explorer` reports exit code 1 even when it
+/// succeeded, so only the spawn is checked.
+#[tauri::command]
+fn reveal_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    Command::new(program)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("REVEAL_FAILED: {e}"))
+}
+
 /// The configured 1280×800 outgrows a small screen's work area, and Windows
 /// then parks the bottom rows under the taskbar: shrink to fit and centre.
 fn fit_to_work_area(window: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -404,7 +421,8 @@ pub fn run() {
             start_daemon,
             set_tray_pending,
             set_locale,
-            exit_app
+            exit_app,
+            reveal_path
         ])
         // Close hides the window; the tray keeps the app reachable (§5).
         .on_window_event(|window, event| {

@@ -304,6 +304,28 @@ export type CreateResponses = {
 
 export type CreateResponse = CreateResponses[keyof CreateResponses];
 
+export type DeleteDeskData = {
+    body?: never;
+    path: {
+        desk_id: string;
+    };
+    query?: never;
+    url: '/desks/{desk_id}';
+};
+
+export type DeleteDeskErrors = {
+    401: Envelope;
+    404: Envelope;
+};
+
+export type DeleteDeskError = DeleteDeskErrors[keyof DeleteDeskErrors];
+
+export type DeleteDeskResponses = {
+    200: Desk;
+};
+
+export type DeleteDeskResponse = DeleteDeskResponses[keyof DeleteDeskResponses];
+
 export type ShowData = {
     body?: never;
     path: {
