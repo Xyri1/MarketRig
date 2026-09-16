@@ -358,12 +358,9 @@ impl OpenViking {
 /// Every `READY` desk, in creation order (§3.2).
 fn ready_desks(store: &Store) -> Result<Vec<String>, StoreError> {
     store.call(|c| {
-        c.prepare(
-            "SELECT id FROM desks WHERE state = 'READY' AND deleted_at_ns IS NULL \
-             ORDER BY created_at_ns, id",
-        )?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<String>>>()
+        c.prepare("SELECT id FROM desks WHERE state = 'READY' ORDER BY created_at_ns, id")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()
     })
 }
 
@@ -1560,6 +1557,52 @@ impl OpenViking {
             }
         });
         Ok(())
+    }
+
+    /// One admin `DELETE` with the root key, `admin`'s client, timeout, and
+    /// bearer. The real server answers `202` and runs its own durable cleanup
+    /// of the user's memories, skills, sessions, and keys (openviking 0.4.17.1,
+    /// `server/routers/admin.py`, `service/user_deletion.py`).
+    async fn admin_delete(&self, port: u16, root: &str, path: &str) -> Result<(), String> {
+        let response = self
+            .http
+            .delete(format!("http://127.0.0.1:{port}/api/v1/{path}"))
+            .bearer_auth(root)
+            .timeout(ADMIN_TIMEOUT)
+            .send()
+            .await
+            .map_err(|e| self.memory.redact(&e.to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(format!(
+            "HTTP {status}: {}",
+            self.memory.redact(&first_line(&text))
+        ))
+    }
+
+    /// The desk is gone: its key leaves this daemon and its OpenViking user is
+    /// deleted, which is what takes that desk's memories and skills with it.
+    /// Best effort — a child that is not `READY`, a refusal, or a transport
+    /// failure is a warning, never a failed deletion.
+    pub async fn forget_desk(self: &Arc<Self>, desk_id: &str) {
+        self.live().keys.remove(desk_id);
+        let Some((port, root)) = self.admin_context() else {
+            return;
+        };
+        let user = Self::desk_user(desk_id);
+        if let Err(e) = self
+            .admin_delete(
+                port,
+                &root,
+                &format!("admin/accounts/{ACCOUNT}/users/{user}"),
+            )
+            .await
+        {
+            tracing::warn!(desk = desk_id, error = %e, "deleting a desk's OpenViking user failed");
+        }
     }
 
     /// §5.3's seed uploads, in order: for each seeded skill, `GET
@@ -2787,9 +2830,11 @@ mod tests {
             });
     }
 
-    /// §3.2's three admin routes with OpenViking's own envelope: the account and
-    /// the user answer `409 AlreadyExists` after the first time they are asked
-    /// for, and the key is deterministic in the user and the seed.
+    /// §3.2's admin routes with OpenViking's own envelope: the account and the
+    /// user answer `409 AlreadyExists` after the first time they are asked for,
+    /// the key is deterministic in the user and the seed, and the deletion
+    /// answers `202` and names the user it took in `$HOME/deleted.txt`, which is
+    /// how the test in this process sees a call made in that one.
     #[cfg(test)]
     fn fake_admin() -> axum::Router {
         use axum::extract::Path as AxumPath;
@@ -2824,6 +2869,20 @@ mod tests {
                     let users = users.clone();
                     async move { once(&users, json!({"user_id": "u"})) }
                 }),
+            )
+            .route(
+                "/api/v1/admin/accounts/{account}/users/{user}",
+                axum::routing::delete(
+                    |AxumPath((_account, user)): AxumPath<(String, String)>| async move {
+                        if let Some(home) = std::env::var_os("HOME") {
+                            let _ = fs::write(PathBuf::from(home).join("deleted.txt"), &user);
+                        }
+                        (
+                            StatusCode::ACCEPTED,
+                            axum::Json(json!({"status": "ok", "result": {}})),
+                        )
+                    },
+                ),
             )
             .route(
                 "/api/v1/admin/accounts/{account}/users/{user}/key",
@@ -3004,6 +3063,15 @@ mod tests {
             !events(&ov.store)
                 .iter()
                 .any(|(_, p)| p.to_string().contains(&key_a))
+        );
+
+        // §3.2 in reverse: a deleted desk's key leaves this daemon and its
+        // OpenViking user is deleted, which is what takes its memories with it.
+        ov.forget_desk(DESK_B).await;
+        assert!(ov.desk_key(DESK_B).is_none());
+        assert_eq!(
+            fs::read_to_string(home.join("deleted.txt")).unwrap(),
+            OpenViking::desk_user(DESK_B)
         );
 
         // §2.3: the stop takes the child and its record with it.

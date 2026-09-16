@@ -128,7 +128,6 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/009_hithink.sql"),
     include_str!("store/010_invocation.sql"),
     include_str!("store/011_locale.sql"),
-    include_str!("store/012_desk_deleted.sql"),
 ];
 
 /// A store failure carrying a stable SCREAMING_SNAKE code.

@@ -3,7 +3,7 @@
 //! Contract: `sdd/features/openviking-continuity/SPEC.md` §7.1, per OV-7. It
 //! speaks exactly the subset the daemon and the vendored plugins consume (§2.2,
 //! §3.2, §5.2, §5.3) and nothing more: `--version`, `/health`, `/ready`, the
-//! three admin routes with the seeded key rule, the skills routes with content
+//! four admin routes with the seeded key rule, the skills routes with content
 //! and files, the temporary upload the seed archive goes through,
 //! `content/read`, sessions with messages and a scripted commit task, and
 //! substring `find` — all behind `api_key` auth over a per-user store. It runs
@@ -33,7 +33,7 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use serde_json::{Value, json};
 
 /// What `openviking-server --version` prints on the pinned line (§1.2).
@@ -127,6 +127,10 @@ async fn main() {
         .route("/ready", get(ready))
         .route("/api/v1/admin/accounts", post(create_account))
         .route("/api/v1/admin/accounts/{account}/users", post(create_user))
+        .route(
+            "/api/v1/admin/accounts/{account}/users/{user}",
+            delete(remove_user),
+        )
         .route(
             "/api/v1/admin/accounts/{account}/users/{user}/key",
             post(issue_key),
@@ -434,6 +438,57 @@ async fn issue_key(
     }
     let key = state.provision(&account, &user, body(&text)["seed"].as_str());
     ok(json!({"user_key": key}))
+}
+
+/// The user and everything of theirs, the way a deleted desk asks for it: the
+/// real server revokes the user and answers `202` with the durable cleanup
+/// task, and refuses an unknown user with `404` — `begin_user_deletion` raises
+/// `NotFoundError` before any task exists (openviking 0.4.17.1,
+/// `server/api_keys/legacy.py`). Here the cleanup is immediate: the user leaves
+/// the account, their keys stop authenticating, and their store goes.
+async fn remove_user(
+    State(state): State<Arc<Ov>>,
+    Path((account, user)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(denied) = state.admin(&headers, &account) {
+        return denied;
+    }
+    let mut store = state.store();
+    if !store["accounts"][&account]["users"][&user].is_boolean() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            &format!("no user {user} under {account}"),
+        );
+    }
+    forget_user(&mut store, &account, &user);
+    state.persist(&store);
+    (
+        StatusCode::ACCEPTED,
+        axum::Json(json!({
+            "status": "ok",
+            "result": {
+                "account_id": account, "user_id": user,
+                "status": "deleting", "task_id": format!("delete-{user}"),
+            },
+        })),
+    )
+        .into_response()
+}
+
+/// The user's three traces in the store: their membership, their own data, and
+/// every key that authenticated them. Another user's keys are untouched.
+fn forget_user(store: &mut Value, account: &str, user: &str) {
+    if let Some(users) = store["accounts"][account]["users"].as_object_mut() {
+        users.remove(user);
+    }
+    if let Some(users) = store["users"].as_object_mut() {
+        users.remove(user);
+    }
+    if let Some(keys) = store["keys"].as_object_mut() {
+        keys.retain(|_, owner| owner != user);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -885,4 +940,29 @@ async fn find(State(state): State<Arc<Ov>>, headers: HeaderMap, text: String) ->
 
 fn abstract_of(text: &str) -> String {
     text.chars().take(200).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_user_takes_the_membership_the_data_and_every_key() {
+        let mut store = json!({
+            "accounts": {"marketrig": {"admin_user_id": "admin", "users": {"a": true, "b": true}}},
+            "keys": {"ka1": "a", "ka2": "a", "kb": "b"},
+            "users": {"a": {"skills": {}, "sessions": {}}, "b": {"skills": {}}},
+        });
+
+        forget_user(&mut store, "marketrig", "a");
+
+        assert_eq!(
+            store["accounts"]["marketrig"]["users"],
+            json!({"b": true}),
+            "{store}"
+        );
+        assert_eq!(store["keys"], json!({"kb": "b"}), "{store}");
+        assert!(store["users"]["a"].is_null(), "{store}");
+        assert!(store["users"]["b"].is_object(), "{store}");
+    }
 }

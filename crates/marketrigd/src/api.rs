@@ -689,7 +689,7 @@ async fn delete_desk(
     }
     state.terminals.shutdown(&desk.id);
     state.registry.stop(&desk.id);
-    let deleted = desk::delete(&state.store, &desk.id, store::now_ns())?;
+    let deleted = desk::delete(&state.store, &desk.id)?;
     // Best effort, after the row: a workspace that will not go is a warning, not
     // a refusal, and the desk is gone from every read regardless. The skills
     // projection is sealed read-only (`openviking-continuity` §5.2), so it is
@@ -703,9 +703,7 @@ async fn delete_desk(
             tracing::warn!(desk = deleted.name, path = %path.display(), "removing a deleted desk's directory failed: {e}");
         }
     }
-    // ponytail: the desk's OpenViking user is left in place, orphaned. Deleting
-    // it needs an OpenViking admin call the child does not expose to us yet;
-    // that call, in this handler, is the upgrade path.
+    state.openviking.forget_desk(&desk.id).await;
     Ok(Json(deleted))
 }
 
@@ -5122,14 +5120,13 @@ async fn delete_desk_route() {
         );
     }
 
-    // The answer is the desk as it was, without the deletion instant.
+    // The answer is the desk as it was.
     let (status, body) = call_delete(url(&format!("/desks/{alpha_id}")), ok);
     assert_eq!(status, 200, "{body}");
     let deleted = json(&body);
     assert_eq!(deleted["id"], alpha["id"]);
     assert_eq!(deleted["name"], "alpha");
     assert_eq!(deleted["state"], "READY");
-    assert!(deleted.get("deleted_at_ns").is_none(), "{deleted}");
     assert!(!workspace.exists(), "the workspace goes with the desk");
 
     // Gone from the single read and from the listing; the other desk stands.
@@ -5162,4 +5159,6 @@ async fn delete_desk_route() {
         404,
         "DESK_NOT_FOUND",
     );
+    // The name went with the row: the same one creates a new desk.
+    assert_ne!(create_desk("alpha")["id"], alpha["id"]);
 }

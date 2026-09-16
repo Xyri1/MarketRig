@@ -399,7 +399,6 @@ fn sql(filter: &str, source: &str) -> String {
                             'timeout_secs', r.timeout_secs, 'fingerprint', r.fingerprint, \
                             'source_bytes', length(cast(r.source AS BLOB))) AS detail \
            FROM code_snapshots r JOIN desks d ON d.id = r.desk_id \
-                                                 AND d.deleted_at_ns IS NULL \
            LEFT JOIN triggers t ON t.id = coalesce( \
                 (SELECT o.id FROM triggers o WHERE o.code_snapshot_id = r.id), \
                 (SELECT f.trigger_id FROM firings f WHERE f.code_snapshot_id = r.id \
@@ -412,7 +411,6 @@ fn sql(filter: &str, source: &str) -> String {
                             'trigger_id', r.trigger_id, 'firing_id', r.firing_id, \
                             'request', json(r.request), 'outcome', json(r.outcome)) \
            FROM trading_actions r JOIN desks d ON d.id = r.desk_id \
-                                                  AND d.deleted_at_ns IS NULL \
           WHERE {filter} \
           ORDER BY requested_at_ns DESC, id DESC"
     )
