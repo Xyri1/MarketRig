@@ -1,5 +1,5 @@
 import { spawn, execFile } from 'node:child_process';
-import { mkdir, copyFile, readFile } from 'node:fs/promises';
+import { mkdir, copyFile, readFile, rm, symlink } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -19,7 +19,7 @@ export async function runDev(args = []) {
 
   function start(program, argv, stdin = 'ignore') {
     const child = spawn(program, argv, {
-      cwd: root, env, detached: false,
+      cwd: root, env, detached: !win,
       stdio: [stdin, 'inherit', 'inherit'],
     });
     const exited = new Promise((resolve) => {
@@ -89,6 +89,12 @@ export async function runDev(args = []) {
     for (const name of names) {
       await copyFile(join(root, 'target/debug', name + suffix), join(bin, name + suffix));
     }
+    // The daemon expects the locked wheel set beside its binary (openviking.rs default_wheels).
+    const platform = win ? 'windows-x64' : 'macos-arm64';
+    const wheelsLink = join(bin, 'openviking-wheels', platform);
+    await mkdir(join(bin, 'openviking-wheels'), { recursive: true });
+    await rm(wheelsLink, { recursive: true, force: true });
+    await symlink(join(root, 'openviking-wheels', platform), wheelsLink, win ? 'junction' : 'dir');
     if (stopping) return exitCode;
     daemon = start(join(bin, 'marketrigd' + suffix), ['--exit-on-stdin-close'], 'pipe');
     const deadline = Date.now() + 30000;
