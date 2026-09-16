@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
-use rusqlite::{ErrorCode, Row, Transaction, params};
+use rusqlite::{ErrorCode, OptionalExtension, Row, Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -93,8 +93,12 @@ pub(crate) const HITHINK_SKILL_FILES: &[(&str, &str)] = &[
 /// The one `failure_code` R0 records: every bootstrap step fails the same way.
 const BOOTSTRAP_FAILED: &str = "BOOTSTRAP_FAILED";
 
+/// Every caller-facing read of `desks`. The `WHERE` is part of the constant, so
+/// a deleted desk (§7.6) cannot be read back by forgetting a filter; the tails
+/// callers append start with `AND`.
 const SELECT: &str = "SELECT id, name, state, workspace_path, created_at_ns, \
-                      ready_at_ns, failure_code, failure_message, selected_runtime FROM desks";
+                      ready_at_ns, failure_code, failure_message, selected_runtime \
+                      FROM desks WHERE deleted_at_ns IS NULL";
 
 /// Accepts the §7.1 grammar: 1–40 characters, lowercase `a–z`, `0–9`, and
 /// single interior hyphens.
@@ -334,7 +338,7 @@ pub fn create(
 /// Startup completion (§7.3): finishes every interrupted `CREATING` desk,
 /// returning how many were completed.
 pub fn complete_interrupted(store: &Store) -> Result<usize, DeskError> {
-    let pending = query(store, "WHERE state = 'CREATING' ORDER BY created_at_ns, id")?;
+    let pending = query(store, "AND state = 'CREATING' ORDER BY created_at_ns, id")?;
     let count = pending.len();
     for desk in pending {
         finish(store, desk)?;
@@ -349,7 +353,7 @@ pub fn complete_interrupted(store: &Store) -> Result<usize, DeskError> {
 /// is never touched. A workspace that will not reconcile is logged and left
 /// alone: it blocks neither another desk nor startup.
 pub fn validate_ready(store: &Store) -> Result<(), DeskError> {
-    for desk in query(store, "WHERE state = 'READY' ORDER BY created_at_ns, id")? {
+    for desk in query(store, "AND state = 'READY' ORDER BY created_at_ns, id")? {
         let workspace = Path::new(&desk.workspace_path);
         if !workspace.is_dir() {
             continue;
@@ -390,6 +394,79 @@ pub fn retry(store: &Store, desk_id: &str) -> Result<Desk, DeskError> {
     desk.failure_code = None;
     desk.failure_message = None;
     finish(store, desk)
+}
+
+/// `DELETE /desks/{desk_id}` (§6): a soft delete, the shape `trigger::delete`
+/// already has, so the firings, orders, and events that reference the desk stay
+/// readable. Every caller-facing read filters the row out, so a deleted desk
+/// answers `DESK_NOT_FOUND` everywhere and is gone from `GET /desks`. The
+/// desk's live triggers go in the same transaction — the scheduler's due query
+/// reads `triggers`, never `desks` — and its queued prompts are failed, because
+/// the dispatcher's pass would otherwise try to activate a desk that is gone at
+/// every poll, forever.
+///
+/// ponytail: `desks.name` is a plain `UNIQUE` column, so a deleted desk keeps
+/// its name reserved and `create` answers `DESK_NAME_TAKEN` for it. A table
+/// rebuild behind a partial unique index over the live rows is the upgrade path
+/// when reusing a name matters.
+pub fn delete(store: &Store, desk_id: &str, at_ns: i64) -> Result<Desk, DeskError> {
+    let sql = format!("{SELECT} AND id = ?1");
+    let id = desk_id.to_string();
+    store
+        .unit(move |tx| {
+            let Some(desk) = tx.query_row(&sql, params![id], read_row).optional()? else {
+                return Ok(None);
+            };
+            tx.execute(
+                "UPDATE desks SET deleted_at_ns = ?2 WHERE id = ?1",
+                params![desk.id, at_ns],
+            )?;
+            tx.execute(
+                "UPDATE triggers SET deleted_at_ns = ?2, next_occurrence_ns = NULL \
+                 WHERE desk_id = ?1 AND deleted_at_ns IS NULL",
+                params![desk.id, at_ns],
+            )?;
+            fail_queued(tx, &desk.id, at_ns)?;
+            // No `DESK_DELETED` event: `operational_events.kind` is a CHECK
+            // constraint, and a new kind means rebuilding the table the way
+            // migrations 2, 4, and 7 did. Deferred — the desktop refreshes from
+            // this route's answer, and the desk's own rows stay in the tail.
+            Ok(Some(desk))
+        })?
+        .ok_or_else(|| DeskError::NotFound(desk_id.to_string()))
+}
+
+/// The deleted desk's queued prompts, resolved in the delete's own transaction.
+/// `ACTIVATION_FAILED` is R3 §6.2's code for a prompt whose desk cannot be
+/// activated; the deletion is the `failure_detail` that payload already carries.
+fn fail_queued(tx: &Transaction<'_>, desk_id: &str, at_ns: i64) -> rusqlite::Result<()> {
+    let queued: Vec<(String, String)> = tx
+        .prepare(
+            "SELECT id, kind FROM prompts WHERE desk_id = ?1 AND state = 'QUEUED' \
+             ORDER BY created_at_ns, id",
+        )?
+        .query_map([desk_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (id, kind) in queued {
+        tx.execute(
+            "UPDATE prompts SET state = 'FAILED', resolved_at_ns = ?2, \
+             failure_code = 'ACTIVATION_FAILED', attempted_at_ns = NULL WHERE id = ?1",
+            params![id, at_ns],
+        )?;
+        append_event(
+            tx,
+            "PROMPT_FAILED",
+            Some(desk_id),
+            at_ns,
+            json!({
+                "prompt_id": id,
+                "kind": kind,
+                "failure_code": "ACTIVATION_FAILED",
+                "failure_detail": "the desk was deleted",
+            }),
+        )?;
+    }
+    Ok(())
 }
 
 /// Every desk in creation order (§6 `GET /desks`).
@@ -492,7 +569,7 @@ fn derive_status(desk: &mut Desk) {
 }
 
 fn load(store: &Store, desk_id: &str) -> Result<Desk, DeskError> {
-    let sql = format!("{SELECT} WHERE id = ?1");
+    let sql = format!("{SELECT} AND id = ?1");
     let id = desk_id.to_string();
     store
         .call(move |c| c.query_row(&sql, params![id], read_row))
@@ -1179,4 +1256,127 @@ fn create_retry_and_reads() {
             "DESK_READY"
         ]
     );
+}
+
+/// Deletion (§7.6): the desk vanishes from every caller-facing read, its live
+/// triggers and queued prompts go with it, a second delete is not found, and the
+/// name stays reserved — the accepted ceiling of a plain `UNIQUE` column.
+#[cfg(test)]
+#[test]
+fn delete_hides_the_desk_and_its_work() {
+    let (_dir, store, desks_home) = scratch();
+    let alpha = create(&store, &desks_home, "alpha", "codex").unwrap();
+    let beta = create(&store, &desks_home, "beta", "claude").unwrap();
+    let id = alpha.id.clone();
+    store
+        .unit(move |tx| {
+            tx.execute(
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
+                 enabled, revision, created_at_ns, updated_at_ns, next_occurrence_ns) \
+                 VALUES ('t1', ?1, 'nightly', 'ONE_OFF', 'look at AAPL', 50, 1, 1, 1, 1, 50)",
+                params![id],
+            )?;
+            // A second trigger, already deleted: its instant must not be rewritten.
+            tx.execute(
+                "INSERT INTO triggers (id, desk_id, name, recurrence, brief, at_ns, \
+                 enabled, revision, created_at_ns, updated_at_ns, deleted_at_ns) \
+                 VALUES ('t0', ?1, 'gone', 'ONE_OFF', 'old', 50, 1, 1, 1, 1, 7)",
+                params![id],
+            )?;
+            tx.execute(
+                "INSERT INTO prompts (id, desk_id, kind, state, payload, created_at_ns) \
+                 VALUES ('p1', ?1, 'EVALUATION', 'QUEUED', '{}', 1)",
+                params![id],
+            )
+        })
+        .unwrap();
+
+    let deleted = delete(&store, &alpha.id, 4242).unwrap();
+    assert_eq!(deleted.id, alpha.id);
+    assert_eq!(deleted.name, "alpha");
+    assert_eq!(
+        serde_json::to_value(&deleted).unwrap().get("deleted_at_ns"),
+        None,
+        "the resource never carries the deletion instant"
+    );
+
+    // Gone from every read; the other desk is untouched.
+    assert_eq!(get(&store, &alpha.id).unwrap_err().code(), "DESK_NOT_FOUND");
+    let names: Vec<String> = list(&store).unwrap().into_iter().map(|d| d.name).collect();
+    assert_eq!(names, ["beta"]);
+    assert_eq!(get(&store, &beta.id).unwrap().name, "beta");
+
+    // A second delete is not found, and the row is stamped exactly once.
+    assert_eq!(
+        delete(&store, &alpha.id, 9999).unwrap_err().code(),
+        "DESK_NOT_FOUND"
+    );
+    let stamp: Option<i64> = store
+        .call({
+            let id = alpha.id.clone();
+            move |c| {
+                c.query_row("SELECT deleted_at_ns FROM desks WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+            }
+        })
+        .unwrap();
+    assert_eq!(stamp, Some(4242));
+
+    // The live trigger is soft-deleted and no longer due; the already-deleted
+    // one keeps its own instant.
+    let triggers: Vec<(String, Option<i64>, Option<i64>)> = store
+        .call(|c| {
+            c.prepare("SELECT id, deleted_at_ns, next_occurrence_ns FROM triggers ORDER BY id")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(
+        triggers,
+        [
+            ("t0".to_string(), Some(7), None),
+            ("t1".to_string(), Some(4242), None),
+        ]
+    );
+
+    // The queued prompt is failed, so the dispatcher never chases a gone desk.
+    let prompt: (String, Option<String>, Option<i64>) = store
+        .call(|c| {
+            c.query_row(
+                "SELECT state, failure_code, resolved_at_ns FROM prompts WHERE id = 'p1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        prompt,
+        (
+            "FAILED".to_string(),
+            Some("ACTIVATION_FAILED".to_string()),
+            Some(4242)
+        )
+    );
+    let kinds = event_kinds(&store);
+    assert!(
+        kinds.contains(&"PROMPT_FAILED".to_string()),
+        "the prompt's own failure is the deletion's evidence: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&"DESK_DELETED".to_string()),
+        "no DESK_DELETED kind exists: {kinds:?}"
+    );
+
+    // The name stays reserved: `desks.name` is a plain UNIQUE column.
+    assert_eq!(
+        create(&store, &desks_home, "alpha", "codex")
+            .unwrap_err()
+            .code(),
+        "DESK_NAME_TAKEN"
+    );
+
+    // Startup reads skip it too: nothing is completed or reconciled for it.
+    assert_eq!(complete_interrupted(&store).unwrap(), 0);
+    validate_ready(&store).unwrap();
 }

@@ -358,9 +358,12 @@ impl OpenViking {
 /// Every `READY` desk, in creation order (§3.2).
 fn ready_desks(store: &Store) -> Result<Vec<String>, StoreError> {
     store.call(|c| {
-        c.prepare("SELECT id FROM desks WHERE state = 'READY' ORDER BY created_at_ns, id")?
-            .query_map([], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<String>>>()
+        c.prepare(
+            "SELECT id FROM desks WHERE state = 'READY' AND deleted_at_ns IS NULL \
+             ORDER BY created_at_ns, id",
+        )?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()
     })
 }
 
@@ -1713,6 +1716,16 @@ impl OpenViking {
     /// ponytail: §2.2 would register the plugins during `STARTING` too, on the
     /// strength of their own pending queue; a key that outlives a restart (§3.2
     /// makes it deterministic) would let that happen without a second predicate.
+    /// The daemon-owned per-desk directories outside the workspace: the plugin
+    /// home [`launch`] writes `ovcli.conf` and the plugin state into (§4.3), and
+    /// the Claude Code launch directory (R3 §5.1). Both go with the desk.
+    pub fn desk_files(&self, desk_id: &str) -> [PathBuf; 2] {
+        [
+            self.roots.data.join(HOME).join("plugin").join(desk_id),
+            crate::daemon::launch_dir(&self.roots).join(desk_id),
+        ]
+    }
+
     pub fn launch(&self, desk_id: &str) -> RuntimeLaunch {
         let off = RuntimeLaunch {
             node: None,
@@ -1861,7 +1874,7 @@ fn seal(dir: &Path) -> std::io::Result<()> {
 
 /// Clears them again, top-down, so the tree can be deleted: Windows refuses to
 /// delete a READONLY file and a `0555` directory refuses the unlink.
-fn unseal(path: &Path) {
+pub(crate) fn unseal(path: &Path) {
     let _ = set_readonly(path, false);
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {

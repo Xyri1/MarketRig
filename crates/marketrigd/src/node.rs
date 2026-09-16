@@ -447,6 +447,16 @@ impl Registry {
         }
     }
 
+    /// Stops one desk's node (§4.3), a no-op when the desk has none. The map
+    /// entry goes first, so nothing starts trading on a node being stopped and
+    /// the lock is not held across the join.
+    pub fn stop(&self, desk_id: &str) {
+        let node = self.lock().remove(desk_id);
+        let Some(node) = node else { return };
+        node.control.stop();
+        node.stop_and_join();
+    }
+
     /// Stops every node (§4.3). Bounded by the caller's shutdown budget.
     pub fn stop_all(&self) {
         let nodes: Vec<Arc<Node>> = self.lock().drain().map(|(_, node)| node).collect();
@@ -2034,5 +2044,28 @@ fn a_same_day_restart_keeps_the_order_resting() {
         ],
         "restoration replayed nothing"
     );
+    registry.stop_all();
+}
+
+/// `Registry::stop` (§4.3): one desk's node, and only that one, leaves the map
+/// and is joined; a desk with no node is a no-op, and so is a second call.
+#[cfg(test)]
+#[test]
+fn stop_takes_one_node() {
+    let (_dir, store) = crate::store::open_temp();
+    let registry = Registry::new(store.clone(), Arc::new(MarketState::new()), None);
+    let alpha = seeded_desk(&store, "alpha");
+    let beta = seeded_desk(&store, "beta");
+    registry.ensure(&alpha).expect("a node starts");
+    registry.ensure(&beta).expect("a node starts");
+
+    registry.stop(&alpha);
+    assert!(!registry.lock().contains_key(&alpha));
+    assert!(registry.lock().contains_key(&beta));
+
+    // Idempotent, and a desk that never had one is untouched.
+    registry.stop(&alpha);
+    registry.stop("01999999-0000-7000-8000-0000000000ff");
+    assert_eq!(registry.lock().len(), 1);
     registry.stop_all();
 }

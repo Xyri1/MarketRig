@@ -650,7 +650,9 @@ fn plan(store: &Store, firing: &FiringRow) -> Result<Plan, StoreError> {
 /// The claim unit: for every desk with nothing running, the oldest code-bearing
 /// firing that has never been claimed becomes a `RUNNING` execution row under
 /// this daemon. The row is the at-most-once fact, so this is the only place a
-/// firing is ever attempted.
+/// firing is ever attempted — which is also why a deleted desk is filtered here
+/// and not in `plan`: an unclaimed firing simply stays unclaimed, where a plan
+/// that refused to read would strand a `RUNNING` row until the next recovery.
 fn claim(store: &Store, daemon_uuid: &str) -> Result<Vec<FiringRow>, StoreError> {
     let daemon_uuid = daemon_uuid.to_string();
     store.unit(move |tx| {
@@ -662,6 +664,8 @@ fn claim(store: &Store, daemon_uuid: &str) -> Result<Vec<FiringRow>, StoreError>
                      PARTITION BY f.desk_id ORDER BY f.accepted_at_ns, f.id) AS rn \
                    FROM firings f \
                    WHERE f.code_snapshot_id IS NOT NULL \
+                     AND EXISTS (SELECT 1 FROM desks d \
+                                 WHERE d.id = f.desk_id AND d.deleted_at_ns IS NULL) \
                      AND NOT EXISTS (SELECT 1 FROM executions e WHERE e.firing_id = f.id) \
                      AND NOT EXISTS (SELECT 1 FROM executions r \
                                      WHERE r.desk_id = f.desk_id AND r.state = 'RUNNING')) \

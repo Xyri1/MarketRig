@@ -264,3 +264,55 @@ fn routes(requests: &Requests) -> Vec<String> {
         .map(|(route, _)| route)
         .collect()
 }
+
+/// `desk delete` resolves a name through the desk listing and prints the row the
+/// daemon answers, the same `field: value` lines `desk show` prints.
+#[test]
+fn desk_delete_resolves_a_name_and_prints_the_row() {
+    const DESK: &str = "01997f00-0000-7000-8000-00000000000a";
+    const ROW: &str = r#"{"id":"01997f00-0000-7000-8000-00000000000a","name":"alpha","state":"READY","workspace_path":"/w/alpha","created_at_ns":1,"ready_at_ns":2}"#;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let (port, requests) = fake_daemon(|route, _| match route {
+        "GET /health" => (200, health_ok()),
+        "GET /desks" => (
+            200,
+            r#"{"desks":[{"id":"01997f00-0000-7000-8000-00000000000a","name":"alpha","state":"READY"}]}"#,
+        ),
+        "DELETE /desks/01997f00-0000-7000-8000-00000000000a" => (200, ROW),
+        _ => (
+            404,
+            r#"{"code":"DESK_NOT_FOUND","message":"No such desk."}"#,
+        ),
+    });
+    write_endpoint(root.path(), port);
+
+    let human = marketrig(root.path(), &["desk", "delete", "alpha"]);
+    assert_eq!(code(&human), 0, "{human:?}");
+    assert_eq!(
+        routes(&requests),
+        [
+            "GET /health".to_string(),
+            "GET /desks".to_string(),
+            format!("DELETE /desks/{DESK}"),
+        ]
+    );
+    let text = String::from_utf8(human.stdout).expect("utf-8 stdout");
+    assert!(text.contains("name: alpha"), "human output: {text:?}");
+    assert!(
+        text.contains("workspace_path: /w/alpha"),
+        "human output: {text:?}"
+    );
+
+    // A UUID is never resolved through the listing, and `--json` is verbatim.
+    let json = marketrig(root.path(), &["--json", "desk", "delete", DESK]);
+    assert_eq!(code(&json), 0, "{json:?}");
+    assert_eq!(
+        routes(&requests),
+        ["GET /health".to_string(), format!("DELETE /desks/{DESK}")]
+    );
+    assert_eq!(
+        String::from_utf8(json.stdout).expect("utf-8 stdout").trim(),
+        ROW
+    );
+}

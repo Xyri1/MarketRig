@@ -139,7 +139,7 @@ fn guarded() -> OpenApiRouter<Arc<ApiState>> {
     )
     .routes(routes!(health))
     .routes(routes!(list, create))
-    .routes(routes!(show))
+    .routes(routes!(show, delete_desk))
     .routes(routes!(retry))
     .routes(routes!(instruments))
     .routes(routes!(quotes))
@@ -663,6 +663,50 @@ async fn show(
     let mut desk = desk::get(&state.store, &desk_id)?;
     desk.native_sessions = Some(crate::session::pointers(&state.store, &desk.id)?);
     Ok(Json(desk))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/desks/{desk_id}",
+    responses(
+        (status = 200, body = Desk),
+        (status = 401, body = Envelope),
+        (status = 404, body = Envelope),
+    )
+)]
+async fn delete_desk(
+    State(state): State<Arc<ApiState>>,
+    Path(desk_id): Path<String>,
+) -> Result<Json<Desk>, DeskError> {
+    let desk = desk::get(&state.store, &desk_id)?;
+    // The desk stops acting before the row goes: the session, then its terminal,
+    // then its trading node. A shutdown that outlasts its budget continues in
+    // the background — the row is deleted either way, so the answer never hangs
+    // on a runtime that will not close.
+    if crate::session::live_process(&state.store, &desk.id)?.is_some() {
+        state.dispatch.exit(&desk.id).await?;
+        let _ = state.dispatch.await_closed(&desk.id).await;
+    }
+    state.terminals.shutdown(&desk.id);
+    state.registry.stop(&desk.id);
+    let deleted = desk::delete(&state.store, &desk.id, store::now_ns())?;
+    // Best effort, after the row: a workspace that will not go is a warning, not
+    // a refusal, and the desk is gone from every read regardless. The skills
+    // projection is sealed read-only (`openviking-continuity` §5.2), so it is
+    // unsealed first or the unlink is refused on both platforms.
+    let workspace = PathBuf::from(&deleted.workspace_path);
+    crate::openviking::unseal(&workspace);
+    for path in std::iter::once(workspace).chain(state.openviking.desk_files(&desk.id)) {
+        if let Err(e) = std::fs::remove_dir_all(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(desk = deleted.name, path = %path.display(), "removing a deleted desk's directory failed: {e}");
+        }
+    }
+    // ponytail: the desk's OpenViking user is left in place, orphaned. Deleting
+    // it needs an OpenViking admin call the child does not expose to us yet;
+    // that call, in this handler, is the upgrade path.
+    Ok(Json(deleted))
 }
 
 // The R3 session and runtime surface (R3 feature SPEC §5.2, §7). The lifecycle
@@ -5041,4 +5085,81 @@ async fn hithink_routes() {
     let (status, body) = call_delete(url, ok);
     assert_eq!(status, 200);
     assert_eq!(json(&body)["state"], "UNCONFIGURED");
+}
+
+/// `DELETE /desks/{desk_id}` (§6): the row answers once, then the desk is gone
+/// from every read and its workspace is off disk. Daemon-local: no node, no
+/// runtime, no feed takes part.
+#[cfg(test)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_desk_route() {
+    let served = serve().await;
+    let base = served.base.clone();
+    let url = |path: &str| format!("{base}{path}");
+    let ok = Some(CREDENTIAL);
+    let create_desk = |name: &str| {
+        let (status, body) = call_post(
+            url("/desks"),
+            ok,
+            Some(("application/json", &format!(r#"{{"name":"{name}"}}"#))),
+        );
+        assert_eq!(status, 201, "{body}");
+        json(&body)
+    };
+
+    let alpha = create_desk("alpha");
+    let alpha_id = alpha["id"].as_str().unwrap().to_string();
+    let keep = create_desk("keep")["id"].as_str().unwrap().to_string();
+    let workspace = served.desks_home.join("alpha");
+    assert!(workspace.is_dir());
+
+    // The bearer guards it like every other route.
+    for bearer in [None, Some("wrong-credential")] {
+        expect_envelope(
+            call_delete(url(&format!("/desks/{alpha_id}")), bearer),
+            401,
+            "UNAUTHORIZED",
+        );
+    }
+
+    // The answer is the desk as it was, without the deletion instant.
+    let (status, body) = call_delete(url(&format!("/desks/{alpha_id}")), ok);
+    assert_eq!(status, 200, "{body}");
+    let deleted = json(&body);
+    assert_eq!(deleted["id"], alpha["id"]);
+    assert_eq!(deleted["name"], "alpha");
+    assert_eq!(deleted["state"], "READY");
+    assert!(deleted.get("deleted_at_ns").is_none(), "{deleted}");
+    assert!(!workspace.exists(), "the workspace goes with the desk");
+
+    // Gone from the single read and from the listing; the other desk stands.
+    expect_envelope(
+        call_get(url(&format!("/desks/{alpha_id}")), ok),
+        404,
+        "DESK_NOT_FOUND",
+    );
+    let (status, body) = call_get(url("/desks"), ok);
+    assert_eq!(status, 200, "{body}");
+    let ids: Vec<String> = json(&body)["desks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids, std::slice::from_ref(&keep));
+
+    // A second delete, and an unknown id, are the same refusal.
+    for id in [alpha_id.as_str(), "01999999-0000-7000-8000-0000000000ff"] {
+        expect_envelope(
+            call_delete(url(&format!("/desks/{id}")), ok),
+            404,
+            "DESK_NOT_FOUND",
+        );
+    }
+    // The desk is gone for the whole desk-scoped surface, not just its own route.
+    expect_envelope(
+        call_get(url(&format!("/desks/{alpha_id}/triggers")), ok),
+        404,
+        "DESK_NOT_FOUND",
+    );
 }

@@ -221,6 +221,9 @@ enum DeskCommand {
     Show { desk: String },
     /// Retry a failed desk creation.
     Retry { desk: String },
+    /// Delete a desk: it stops acting, its workspace goes, and its durable
+    /// records stay.
+    Delete { desk: String },
     /// This desk's operational events, newest first (R5 feature SPEC §4.3).
     Events {
         /// Desk name or UUID.
@@ -486,6 +489,10 @@ fn dispatch(group: &Group) -> Result<String, Fault> {
             DeskCommand::Retry { desk } => {
                 let id = resolve(&endpoint, "/desks", "desk", desk)?;
                 endpoint.post(&format!("/desks/{id}/retry"), None)
+            }
+            DeskCommand::Delete { desk } => {
+                let id = resolve(&endpoint, "/desks", "desk", desk)?;
+                endpoint.delete(&format!("/desks/{id}"))
             }
             DeskCommand::Events { desk, limit } => {
                 let id = resolve(&endpoint, "/desks", "desk", desk)?;
