@@ -28,7 +28,8 @@
     "switch": "Switch runtime"
   },
   "well": {
-    "noSession": "No session. Start one or continue the last."
+    "noSession": "No session. Start one or continue the last.",
+    "noDesk": "Pick a desk, or create one."
   },
   "panel": {
     "tabs": "Desk panels",
@@ -43,27 +44,47 @@
     "triggersShort": "T",
     "approvalsShort": "A",
     "activityShort": "V",
-    "settingsShort": "S"
+    "settingsShort": "S",
+    "noDesk": "No desk selected."
   },
   "desk": {
     "quotes": "Quotes",
-    "book": "Book",
     "positions": "Positions",
     "orders": "Open orders",
     "empty": {
       "quotes": "No quotes yet.",
-      "book": "No book yet.",
       "positions": "No positions.",
-      "orders": "No open orders."
+      "orders": "No open orders.",
+      "cycles": "No closed cycles yet.",
+      "fills": "No fills yet."
+    },
+    "realized": "Realized P&L",
+    "cycleCount": "{count} closed cycles",
+    "fills": "Recent fills",
+    "sellable": "sellable today",
+    "col": {
+      "instrument": "Instrument",
+      "side": "Side",
+      "quantity": "Qty",
+      "avgOpen": "Avg open",
+      "price": "Price",
+      "status": "Status",
+      "last": "Last",
+      "bid": "Bid",
+      "ask": "Ask",
+      "phase": "Phase"
     }
   },
   "triggers": {
     "empty": "No triggers yet.",
     "enable": "Enable",
-    "disable": "Disable"
+    "disable": "Disable",
+    "next": "Next",
+    "noFirings": "This trigger has not fired yet."
   },
   "activity": {
-    "more": "Load more"
+    "more": "Load more",
+    "empty": "Nothing has happened on this desk yet."
   },
   "common": {
     "cancel": "Cancel"
@@ -143,7 +164,9 @@
     "deny": "Deny",
     "quitTitle": "Quit MarketRig?",
     "quit": "Quit",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "denyBody": "The request is refused and the desk is told.",
+    "quitBody": "Every desk's session exits and the daemon stops."
   },
   "notify": {
     "APPROVAL_REQUESTED": {

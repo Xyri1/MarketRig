@@ -28,7 +28,8 @@
     "switch": "切换运行时"
   },
   "well": {
-    "noSession": "没有会话。启动一个，或继续上一个。"
+    "noSession": "没有会话。启动一个，或继续上一个。",
+    "noDesk": "选择一个交易台，或新建一个。"
   },
   "panel": {
     "tabs": "交易台面板",
@@ -43,27 +44,47 @@
     "triggersShort": "触",
     "approvalsShort": "审",
     "activityShort": "动",
-    "settingsShort": "设"
+    "settingsShort": "设",
+    "noDesk": "未选择交易台。"
   },
   "desk": {
     "quotes": "行情",
-    "book": "盘口",
     "positions": "持仓",
     "orders": "未成交订单",
     "empty": {
       "quotes": "暂无行情。",
-      "book": "暂无盘口。",
       "positions": "暂无持仓。",
-      "orders": "没有未成交订单。"
+      "orders": "没有未成交订单。",
+      "cycles": "还没有已平仓周期。",
+      "fills": "还没有成交。"
+    },
+    "realized": "已实现盈亏",
+    "cycleCount": "{count} 个已平仓周期",
+    "fills": "最近成交",
+    "sellable": "今日可卖",
+    "col": {
+      "instrument": "标的",
+      "side": "方向",
+      "quantity": "数量",
+      "avgOpen": "开仓均价",
+      "price": "价格",
+      "status": "状态",
+      "last": "最新",
+      "bid": "买一",
+      "ask": "卖一",
+      "phase": "阶段"
     }
   },
   "triggers": {
     "empty": "还没有触发器。",
     "enable": "启用",
-    "disable": "停用"
+    "disable": "停用",
+    "next": "下次",
+    "noFirings": "这个触发器还没有触发过。"
   },
   "activity": {
-    "more": "加载更多"
+    "more": "加载更多",
+    "empty": "这个交易台还没有任何动态。"
   },
   "common": {
     "cancel": "取消"
@@ -143,7 +164,9 @@
     "deny": "拒绝",
     "quitTitle": "退出 MarketRig 吗？",
     "quit": "退出",
-    "cancel": "取消"
+    "cancel": "取消",
+    "denyBody": "请求将被拒绝，并告知交易台。",
+    "quitBody": "所有交易台的会话将退出，守护进程将停止。"
   },
   "notify": {
     "APPROVAL_REQUESTED": {

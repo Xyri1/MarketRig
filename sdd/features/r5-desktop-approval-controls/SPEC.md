@@ -198,7 +198,7 @@ The desktop uses terminal identity and absolute byte offsets from §6.5 to skip 
 
 - **Left.** Desk rows in creation order: a 2 px status gutter (live → `--state-live`, pending approvals → `--state-pending`, attention → `--state-attention`, `FAILED` or `UNAVAILABLE` workspace → `--state-failure`, else `--state-idle`), the name in the terminal stack, a pending-approval count, an attention dot. *New desk* opens an inline form (name, runtime `Select`); a `FAILED` desk shows *Retry*. Selection is the accent.
 - **Center.** A header line — desk name, selected runtime, session state from `GET /desks/{d}/session`, and the §6.2 controls of root SPEC as buttons (*Start* / *Continue* when no process, *Interrupt* disabled on Claude Code with its reason, *Exit*, *Switch runtime* as a `Select`) — over the well. With no live session the well shows the last known screen if a presentation exists, else an empty well with *No session* and the start controls.
-- **Right.** Reka UI `Tabs`: **Desk** — quotes, book, positions, open orders (`GET …/market/quotes`, `book`, `positions`, `orders`, refetched every 15 s while visible and on `APPROVAL_DECIDED` — the events tail has no trading kind, so a fill reaches the tab through the poll); **Triggers** — the listing with enable/disable, each trigger's `approval` when it has code, and the firings drawer; **Approvals** — the pending items across desks, newest first, each with kind, desk, request or code (source in a `<pre>` in the terminal stack), *Approve* and *Deny* (Deny behind `AlertDialog`); **Activity** — `GET /events?desk_id=` newest first, kind and payload, *Load more* through `before`, live rows prepended by refetch; **Settings** — runtimes (path, version, state, *Discover*, *Retry*, an explicit-path field), memory child and provider (the R4 routes; discovery takes the child's executable path, as `POST /memory/discover` requires one, and the two model ids are typed into text inputs — the desktop does not call `GET /memory/provider/models`), policies (two `Select`s; delivery mode is a plain disabled `<select>` at *Queue next turn* whose *Steer* option is itself disabled, because a control that never opens needs no popover), autostart, and *Quit MarketRig*. The Settings tab is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
+- **Right.** Reka UI `Tabs`: **Desk** — the desk overview: realized P&L per currency from `GET …/history/cycles` (the cycles' own `realized_pnl` figures added exactly on scaled integers for the headline, drawn as one bar per cycle by sign under a running-total line — a reading of the node's figures, never a recomputation, per D38), positions, open orders, the latest fills from `history/fills`, and the watchlist of quotes joined to their book tops (`GET …/market/quotes`, `book`, `positions`, `orders`, refetched every 15 s while visible and on `APPROVAL_DECIDED` — the events tail has no trading kind, so a fill reaches the tab through the poll); **Triggers** — the listing with enable/disable, each trigger's `approval` when it has code, and the firings drawer; **Approvals** — the pending items across desks, newest first, each with kind, desk, request or code (source in a `<pre>` in the terminal stack), *Approve* and *Deny* (Deny behind `AlertDialog`); **Activity** — `GET /events?desk_id=` newest first, kind and payload, *Load more* through `before`, live rows prepended by refetch; **Settings** — runtimes (path, version, state, *Discover*, *Retry*, an explicit-path field), memory child and provider (the R4 routes; discovery takes the child's executable path, as `POST /memory/discover` requires one, and the two model ids are typed into text inputs — the desktop does not call `GET /memory/provider/models`), policies (two `Select`s; delivery mode is a plain disabled `<select>` at *Queue next turn* whose *Steer* option is itself disabled, because a control that never opens needs no popover), autostart, and *Quit MarketRig*. The Settings tab is selected automatically while no runtime is `AVAILABLE`, which is the whole of first-launch onboarding.
 
 ### 6.4 Notifications
 
@@ -215,22 +215,25 @@ Sent through `@tauri-apps/plugin-notification` (`isPermissionGranted` then `requ
   --text-xs: 11px; --text-sm: 12px; --text-base: 13px; --text-lg: 15px; --text-xl: 18px;
   --spacing: 4px;
   --radius-control: 4px; --radius-panel: 8px; --radius-pill: 999px;
-  --color-ground: oklch(0.985 0.004 250);   --color-panel: oklch(0.965 0.005 250);
-  --color-line:   oklch(0.88  0.008 250);   --color-ink:   oklch(0.22  0.01  250);
-  --color-ink-muted: oklch(0.50 0.01 250);  --color-well:  oklch(0.17  0.01  250);
+  --color-ground: oklch(0.985 0.004 250);   --color-panel: oklch(0.955 0.006 250);  --color-panel-raised: oklch(1 0 0);
+  --color-line:   oklch(0.89  0.008 250);   --color-line-strong: oklch(0.78 0.012 250);
+  --color-ink:    oklch(0.22  0.01  250);   --color-ink-muted: oklch(0.50 0.01 250);  --color-ink-faint: oklch(0.68 0.01 250);
+  --color-well:   oklch(0.17  0.01  250);
   --color-accent:  oklch(0.55 0.15 265);    --color-accent-ink: oklch(0.99 0 0);
   --color-state-live: oklch(0.62 0.17 150); --color-state-pending: oklch(0.78 0.16 85);
   --color-state-attention: oklch(0.68 0.19 55); --color-state-failure: oklch(0.58 0.22 25);
   --color-state-idle: oklch(0.72 0.01 250);
 }
 @media (prefers-color-scheme: dark) { :root {
-  --color-ground: oklch(0.19 0.01 250); --color-panel: oklch(0.23 0.01 250); --color-line: oklch(0.32 0.01 250);
-  --color-ink: oklch(0.92 0.005 250);  --color-ink-muted: oklch(0.65 0.01 250); --color-well: oklch(0.14 0.01 250);
+  --color-ground: oklch(0.19 0.01 250); --color-panel: oklch(0.23 0.01 250); --color-panel-raised: oklch(0.265 0.01 250);
+  --color-line: oklch(0.31 0.01 250); --color-line-strong: oklch(0.42 0.012 250);
+  --color-ink: oklch(0.92 0.005 250); --color-ink-muted: oklch(0.65 0.01 250); --color-ink-faint: oklch(0.5 0.01 250);
+  --color-well: oklch(0.14 0.01 250);
   --color-accent: oklch(0.72 0.13 265); --color-accent-ink: oklch(0.15 0.02 265);
 } }
 ```
 
-Colour appears only through the five `state-*` roles, in the gutter, the attention dot, and the approval badge, and through `accent` for selection and focus rings; everything else is the neutral ramp. The terminal well is `--color-well` in both schemes; xterm.js's theme is derived from the tokens at mount. The gutter never animates; the only motion is the 120 ms opacity of a tab body. Type below 13 px is reserved for machine tokens in the terminal stack. Every prose string is `t('…')` from `src/locales/en.json`; a Vitest check fails on a bare string in a template (per D68) so R6 adds `zh-Hans.json` and nothing else.
+Colour appears only through the five `state-*` roles — the gutter, the attention dot, the approval badges, the session and runtime state dots, and failure text — and through `accent` for selection, focus rings, the primary control, and the steady caret in the wordmark and the empty well; everything else is the neutral ramp (`panel-raised` is the surface of inputs and cards, `line-strong` their hover edge, `ink-faint` placeholders). The well is framed as an inset screen and its empty state draws a faint `state-idle` dot grid behind a `<name> ❯` prompt. The terminal well is `--color-well` in both schemes; xterm.js's theme is derived from the tokens at mount. The gutter never animates; the only motion is the 120 ms opacity of a tab body. Type below 13 px is reserved for machine tokens in the terminal stack. Every prose string is `t('…')` from `src/locales/en.json`; a Vitest check fails on a bare string in a template (per D68) so R6 adds `zh-Hans.json` and nothing else.
 
 ## 7. Verification (R5-8)
 

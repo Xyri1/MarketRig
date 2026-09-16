@@ -13,7 +13,15 @@ import {
 } from "reka-ui";
 import { create, runtimes } from "../client";
 import type { Envelope, Runtime } from "../client";
-import { button, buttonPrimary } from "../deskState";
+import {
+  button,
+  buttonPrimary,
+  failureText,
+  input,
+  selectContent,
+  selectItem,
+  selectTrigger,
+} from "../deskState";
 
 const emit = defineEmits<{ close: [] }>();
 const { t } = useI18n();
@@ -50,30 +58,31 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <form class="flex flex-col gap-1" @submit.prevent="submit()">
+  <form class="flex flex-col gap-2" @submit.prevent="submit()">
     <input
       v-model="name"
-      class="terminal rounded-control border border-line px-1 py-1"
+      :class="input"
       data-testid="new-desk-name"
+      autofocus
       :placeholder="t('desks.namePlaceholder')"
       :aria-label="t('desks.name')"
     />
     <SelectRoot v-model="runtime">
       <SelectTrigger
-        :class="button"
+        :class="selectTrigger"
         :aria-label="t('desks.runtime')"
         data-testid="new-desk-runtime"
       >
-        <SelectValue class="terminal" />
-        <span aria-hidden="true">▾</span>
+        <SelectValue class="terminal" :placeholder="t('desks.runtime')" />
+        <span aria-hidden="true" class="text-ink-muted">▾</span>
       </SelectTrigger>
       <SelectPortal>
-        <SelectContent class="rounded-control border border-line bg-panel">
+        <SelectContent :class="selectContent" position="popper">
           <SelectViewport>
             <SelectItem
               v-for="row in available"
               :key="row.runtime"
-              class="terminal px-2 py-1"
+              :class="selectItem"
               :value="row.runtime"
             >
               <SelectItemText>{{ row.runtime }}</SelectItemText>
@@ -82,9 +91,10 @@ async function submit(): Promise<void> {
         </SelectContent>
       </SelectPortal>
     </SelectRoot>
-    <div class="flex gap-1">
+    <div class="flex gap-2">
       <button
         :class="buttonPrimary"
+        class="flex-1"
         :disabled="busy"
         data-testid="new-desk-submit"
         type="submit"
@@ -95,9 +105,6 @@ async function submit(): Promise<void> {
         {{ t("common.cancel") }}
       </button>
     </div>
-    <pre
-      v-if="failure"
-      class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
-      >{{ failure }}</pre>
+    <p v-if="failure" :class="failureText">{{ failure }}</p>
   </form>
 </template>

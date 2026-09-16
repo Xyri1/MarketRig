@@ -27,13 +27,14 @@ const state = computed(() =>
 
 <template>
   <div
-    class="flex items-center gap-2 pr-2"
-    :class="selected ? 'bg-panel' : ''"
+    class="flex h-9 items-center gap-2 pr-2"
+    :class="selected ? 'bg-ground' : 'hover:bg-ground/60'"
     :data-state="state"
+    :title="desk.selected_runtime"
   >
-    <span class="h-7 w-[2px] shrink-0" :class="gutterClass[state]" />
+    <span class="h-full w-[2px] shrink-0" :class="gutterClass[state]" />
     <button
-      class="terminal flex-1 truncate py-1 text-left focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+      class="terminal h-full min-w-0 flex-1 truncate rounded-control pl-1 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
       :class="selected ? 'text-accent' : ''"
       @click="$emit('select')"
     >
@@ -41,18 +42,20 @@ const state = computed(() =>
     </button>
     <span
       v-if="pending"
-      class="text-xs text-ink-muted"
+      class="terminal inline-flex h-5 min-w-5 items-center justify-center rounded-pill bg-state-pending px-1.5 text-xs text-well"
       :data-testid="`desk-pending-${desk.id}`"
       >{{ pending }}</span
     >
     <span
       v-if="attention.has(desk.id)"
-      class="h-2 w-2 rounded-pill bg-state-attention"
+      class="h-2 w-2 shrink-0 rounded-pill bg-state-attention"
       :aria-label="t('desks.attention')"
+      :title="t('desks.attention')"
     />
     <button
       v-if="desk.state === 'FAILED'"
       :class="button"
+      class="h-6 px-2"
       @click="retry({ path: { desk_id: desk.id } })"
     >
       {{ t("desks.retry") }}

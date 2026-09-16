@@ -100,15 +100,26 @@ onMounted(() => {
 </script>
 
 <template>
-  <main v-if="status === 'STARTING'" class="p-4">
-    {{ t("daemon.starting") }}
-  </main>
-  <main v-else-if="status === 'UNAVAILABLE'" class="p-4">
-    <p>{{ t("daemon.unavailable") }}</p>
-    <pre
-      class="terminal text-xs wrap-anywhere whitespace-pre-wrap text-ink-muted"
-      >{{ error }}</pre>
-    <button :class="button" @click="retry()">{{ t("daemon.retry") }}</button>
+  <main
+    v-if="status !== 'READY'"
+    class="flex h-full items-center justify-center p-8"
+  >
+    <div class="flex w-96 flex-col gap-3">
+      <p class="terminal text-lg font-semibold">{{ t("app.name") }}</p>
+      <p v-if="status === 'STARTING'" class="text-ink-muted">
+        {{ t("daemon.starting") }}
+      </p>
+      <template v-else>
+        <p>{{ t("daemon.unavailable") }}</p>
+        <pre
+          v-if="error"
+          class="terminal max-h-48 overflow-y-auto rounded-control border border-line bg-panel p-2 text-sm wrap-anywhere whitespace-pre-wrap text-ink-muted"
+          >{{ error }}</pre>
+        <button :class="button" class="self-start" @click="retry()">
+          {{ t("daemon.retry") }}
+        </button>
+      </template>
+    </div>
   </main>
   <main v-else class="flex h-full overflow-x-hidden">
     <DeskList
@@ -119,7 +130,12 @@ onMounted(() => {
     />
     <section class="flex min-w-[480px] flex-1 flex-col overflow-hidden">
       <SessionHeader v-if="selectedDesk" :desk="selectedDesk" />
-      <TerminalWell class="flex-1" :desk-id="selected" :state="selectedState" />
+      <TerminalWell
+        class="mx-2 mb-2 flex-1 rounded-panel border border-line-strong/60 shadow-inner"
+        :desk-id="selected"
+        :desk-name="selectedDesk?.name"
+        :state="selectedState"
+      />
     </section>
     <RightPanel :desk-id="selected">
       <template #approvals><ApprovalsTab /></template>

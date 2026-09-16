@@ -39,6 +39,10 @@ function at(ns: number): string {
   return new Date(ns / 1e6).toLocaleTimeString();
 }
 
+function payload(row: DaemonEvent): string {
+  return JSON.stringify(row.payload ?? {});
+}
+
 on("*", (event) => {
   if (event.desk_id === props.deskId) void refresh();
 });
@@ -47,16 +51,24 @@ onMounted(() => void refresh());
 </script>
 
 <template>
-  <div class="flex flex-col gap-1">
-    <div v-for="row in rows" :key="row.id" class="flex flex-col">
-      <p class="terminal text-xs text-ink-muted">
-        {{ at(row.occurred_at_ns) }} {{ row.kind }}
-      </p>
-      <pre class="terminal text-xs wrap-anywhere whitespace-pre-wrap">{{
-        JSON.stringify(row.payload ?? {})
-      }}</pre>
-    </div>
-    <button v-if="before" :class="button" @click="more()">
+  <div class="flex flex-col gap-3">
+    <p v-if="!rows.length" class="text-ink-muted">{{ t("activity.empty") }}</p>
+    <ol class="flex flex-col select-text">
+      <li
+        v-for="row in rows"
+        :key="row.id"
+        class="flex flex-col gap-0.5 border-l border-line py-1.5 pl-3"
+      >
+        <p class="terminal flex gap-2 text-sm">
+          <span class="text-ink-muted">{{ at(row.occurred_at_ns) }}</span>
+          <span>{{ row.kind }}</span>
+        </p>
+        <pre
+          class="terminal text-sm wrap-anywhere whitespace-pre-wrap text-ink-muted"
+          >{{ payload(row) }}</pre>
+      </li>
+    </ol>
+    <button v-if="before" :class="button" class="self-start" @click="more()">
       {{ t("activity.more") }}
     </button>
   </div>

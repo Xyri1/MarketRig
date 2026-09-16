@@ -4,7 +4,11 @@ import { useI18n } from "vue-i18n";
 import { useTerminal } from "../composables/useTerminal";
 import { gutterClass, type DeskState } from "../deskState";
 
-const props = defineProps<{ deskId: string | null; state: DeskState }>();
+const props = defineProps<{
+  deskId: string | null;
+  deskName?: string;
+  state: DeskState;
+}>();
 const { t } = useI18n();
 const { mount, evict, panes } = useTerminal();
 
@@ -31,12 +35,31 @@ onMounted(attach);
 </script>
 
 <template>
-  <div class="flex overflow-hidden bg-well">
+  <div class="relative flex overflow-hidden bg-well">
     <span class="w-[2px] shrink-0" :class="gutterClass[state]" />
-    <div ref="slot" class="min-w-0 flex-1 overflow-hidden" data-testid="well">
-      <p v-if="!hasPane" class="terminal p-2 text-state-idle">
-        {{ t("well.noSession") }}
-      </p>
+    <div
+      ref="slot"
+      class="min-w-0 flex-1 overflow-hidden"
+      :class="hasPane ? 'p-1' : ''"
+      data-testid="well"
+    >
+      <div
+        v-if="!hasPane"
+        class="terminal relative flex h-full flex-col items-center justify-center gap-2 p-4 text-center text-state-idle"
+      >
+        <span
+          aria-hidden="true"
+          class="absolute inset-0 bg-[radial-gradient(var(--color-state-idle)_0.6px,transparent_0.7px)] bg-[size:16px_16px] bg-center opacity-15"
+        />
+        <p v-if="deskName" class="relative flex items-center gap-2 text-lg">
+          <span>{{ deskName }}</span>
+          <span aria-hidden="true">❯</span>
+          <span aria-hidden="true" class="h-4 w-2 bg-accent" />
+        </p>
+        <p class="relative text-sm">
+          {{ deskId ? t("well.noSession") : t("well.noDesk") }}
+        </p>
+      </div>
     </div>
   </div>
 </template>

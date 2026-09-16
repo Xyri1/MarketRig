@@ -254,9 +254,9 @@ it("provisions from Settings and follows the row out of PROVISIONING", async () 
   await vi.advanceTimersByTimeAsync(2_000);
   await flushPromises();
 
-  expect(wrapper.get('[data-testid="openviking"]').text()).toContain(
-    "AVAILABLE READY",
-  );
+  const shown = wrapper.get('[data-testid="openviking"]').text();
+  expect(shown).toContain("AVAILABLE");
+  expect(shown).toContain("READY");
   expect(
     wrapper.get('[data-testid="openviking-setup"]').attributes("disabled"),
   ).toBeUndefined();

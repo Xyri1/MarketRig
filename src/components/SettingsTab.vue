@@ -5,6 +5,7 @@ import {
   AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
+  AlertDialogDescription,
   AlertDialogOverlay,
   AlertDialogPortal,
   AlertDialogRoot,
@@ -47,7 +48,19 @@ import type {
 } from "../client";
 import { useDaemon } from "../composables/useDaemon";
 import { useEvents } from "../composables/useEvents";
-import { selectTrigger } from "../deskState";
+import {
+  button,
+  buttonPrimary,
+  chip,
+  dialogContent,
+  dialogOverlay,
+  eyebrow,
+  failureText,
+  input,
+  selectContent,
+  selectItem,
+  selectTrigger,
+} from "../deskState";
 import { applyLocale, LOCALES, type Locale } from "../locale";
 
 const { t, locale } = useI18n();
@@ -261,11 +274,12 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex flex-col gap-6 p-4">
+  <div class="flex flex-col gap-6">
     <section class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted">{{ t("settings.language.title") }}</p>
+      <p :class="eyebrow">{{ t("settings.language.title") }}</p>
       <select
-        class="self-start rounded-control border border-line px-2 py-1"
+        :class="input"
+        class="self-start font-sans"
         data-testid="language"
         :value="locale"
         :aria-label="t('settings.language.title')"
@@ -284,41 +298,47 @@ onMounted(async () => {
     </section>
 
     <section class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted" data-testid="runtimes-title">
+      <p :class="eyebrow" data-testid="runtimes-title">
         {{ t("settings.runtimes.title") }}
       </p>
       <div
         v-for="row in rows"
         :key="row.runtime"
-        class="flex flex-col gap-1 border-b border-line pb-2"
+        class="flex flex-col gap-2 rounded-control border border-line bg-panel-raised p-2"
       >
-        <p class="terminal text-sm wrap-anywhere">
-          {{ row.runtime }} {{ row.executable_path }} {{ row.version }}
-          {{ row.state }}
-        </p>
-        <div class="flex gap-2">
-          <button
-            type="button"
-            class="rounded-control border border-line px-2 py-1"
-            @click="discover(row.runtime)"
+        <div class="flex items-center gap-2">
+          <span class="terminal font-semibold">{{ row.runtime }}</span>
+          <span v-if="row.version" :class="chip">{{ row.version }}</span>
+          <span class="flex-1" />
+          <span
+            class="terminal flex items-center gap-1.5 text-sm text-ink-muted"
           >
-            {{ t("settings.runtimes.discover") }}
-          </button>
-          <button
-            v-if="row.state === 'UNAVAILABLE'"
-            type="button"
-            class="rounded-control border border-line px-2 py-1"
-            @click="retry(row.runtime)"
-          >
-            {{ t("settings.runtimes.retry") }}
-          </button>
+            <span
+              class="h-1.5 w-1.5 rounded-pill"
+              :class="
+                row.state === 'AVAILABLE'
+                  ? 'bg-state-live'
+                  : row.state === 'UNAVAILABLE'
+                    ? 'bg-state-failure'
+                    : 'bg-state-idle'
+              "
+            />
+            {{ row.state }}
+          </span>
         </div>
+        <p
+          v-if="row.executable_path"
+          class="terminal text-sm wrap-anywhere text-ink-muted select-text"
+        >
+          {{ row.executable_path }}
+        </p>
         <form
           class="flex gap-2"
           @submit.prevent="discover(row.runtime, explicit.get(row.runtime))"
         >
           <input
-            class="terminal flex-1 rounded-control border border-line px-2 py-1"
+            :class="input"
+            class="flex-1"
             :data-testid="`runtime-path-${row.runtime}`"
             :aria-label="t('settings.runtimes.path')"
             :placeholder="t('settings.runtimes.path')"
@@ -332,45 +352,67 @@ onMounted(async () => {
           />
           <button
             type="submit"
-            class="rounded-control border border-line px-2 py-1"
+            :class="button"
             :data-testid="`runtime-submit-${row.runtime}`"
           >
             {{ t("settings.runtimes.submit") }}
           </button>
         </form>
+        <div class="flex gap-2">
+          <button type="button" :class="button" @click="discover(row.runtime)">
+            {{ t("settings.runtimes.discover") }}
+          </button>
+          <button
+            v-if="row.state === 'UNAVAILABLE'"
+            type="button"
+            :class="button"
+            @click="retry(row.runtime)"
+          >
+            {{ t("settings.runtimes.retry") }}
+          </button>
+        </div>
       </div>
     </section>
 
     <section v-if="ov" class="flex flex-col gap-2" data-testid="openviking">
-      <p class="text-xs text-ink-muted">{{ t("settings.openviking.title") }}</p>
-      <p class="terminal text-sm wrap-anywhere">
-        {{ ov.setup.state }} {{ ov.child }}
-      </p>
+      <p :class="eyebrow">{{ t("settings.openviking.title") }}</p>
+      <div class="flex items-center gap-2">
+        <span :class="chip">{{ ov.setup.state }}</span>
+        <span :class="chip">{{ ov.child }}</span>
+      </div>
       <p
         v-if="ov.setup.failure_message"
-        class="terminal text-sm wrap-anywhere"
+        :class="failureText"
         data-testid="openviking-failure"
       >
         {{ ov.setup.failure_code }} {{ ov.setup.failure_message }}
       </p>
       <form class="flex flex-col gap-2" @submit.prevent="provision()">
-        <input
-          v-model="paths.python"
-          class="terminal rounded-control border border-line px-2 py-1"
-          data-testid="openviking-python"
-          :aria-label="t('settings.openviking.python')"
-          :placeholder="t('settings.openviking.python')"
-        />
-        <input
-          v-model="paths.node"
-          class="terminal rounded-control border border-line px-2 py-1"
-          data-testid="openviking-node"
-          :aria-label="t('settings.openviking.node')"
-          :placeholder="t('settings.openviking.node')"
-        />
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{
+            t("settings.openviking.python")
+          }}</span>
+          <input
+            v-model="paths.python"
+            :class="input"
+            data-testid="openviking-python"
+            :placeholder="t('settings.openviking.python')"
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{
+            t("settings.openviking.node")
+          }}</span>
+          <input
+            v-model="paths.node"
+            :class="input"
+            data-testid="openviking-node"
+            :placeholder="t('settings.openviking.node')"
+          />
+        </label>
         <p
           v-if="setupFailure"
-          class="terminal text-xs"
+          :class="failureText"
           data-testid="openviking-error"
         >
           {{ setupFailure }}
@@ -378,7 +420,7 @@ onMounted(async () => {
         <div class="flex gap-2">
           <button
             type="submit"
-            class="rounded-control border border-line px-2 py-1"
+            :class="buttonPrimary"
             data-testid="openviking-setup"
             :disabled="ov.setup.state === 'PROVISIONING'"
           >
@@ -387,7 +429,7 @@ onMounted(async () => {
           <button
             v-if="ov.setup.state === 'UNAVAILABLE'"
             type="button"
-            class="rounded-control border border-line px-2 py-1"
+            :class="button"
             data-testid="openviking-retry"
             @click="retryChild()"
           >
@@ -398,12 +440,8 @@ onMounted(async () => {
     </section>
 
     <section v-if="memory" class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted">{{ t("settings.memory.title") }}</p>
-      <p class="terminal text-sm wrap-anywhere">
-        {{ memory.base_url }} {{ memory.llm_model }}
-        {{ memory.embedding_model }}
-      </p>
-      <p class="text-xs text-ink-muted">
+      <p :class="eyebrow">{{ t("settings.memory.title") }}</p>
+      <p class="text-ink-muted">
         {{
           t(
             memory.api_key_present
@@ -413,58 +451,68 @@ onMounted(async () => {
         }}
       </p>
       <form class="flex flex-col gap-2" @submit.prevent="saveProvider()">
-        <input
-          v-model="form.base_url"
-          class="terminal rounded-control border border-line px-2 py-1"
-          :aria-label="t('settings.memory.baseUrl')"
-          :placeholder="t('settings.memory.baseUrl')"
-        />
-        <input
-          v-model="form.api_key"
-          type="password"
-          class="terminal rounded-control border border-line px-2 py-1"
-          :aria-label="t('settings.memory.apiKey')"
-          :placeholder="t('settings.memory.apiKey')"
-        />
-        <input
-          v-model="form.llm"
-          class="terminal rounded-control border border-line px-2 py-1"
-          :aria-label="t('settings.memory.llmModel')"
-          :placeholder="t('settings.memory.llmModel')"
-        />
-        <input
-          v-model="form.embedding"
-          class="terminal rounded-control border border-line px-2 py-1"
-          :aria-label="t('settings.memory.embeddingModel')"
-          :placeholder="t('settings.memory.embeddingModel')"
-        />
-        <button
-          type="submit"
-          class="self-start rounded-control border border-line px-2 py-1"
-        >
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{ t("settings.memory.baseUrl") }}</span>
+          <input
+            v-model="form.base_url"
+            :class="input"
+            :aria-label="t('settings.memory.baseUrl')"
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{ t("settings.memory.apiKey") }}</span>
+          <input
+            v-model="form.api_key"
+            type="password"
+            :class="input"
+            :aria-label="t('settings.memory.apiKey')"
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{
+            t("settings.memory.llmModel")
+          }}</span>
+          <input
+            v-model="form.llm"
+            :class="input"
+            :aria-label="t('settings.memory.llmModel')"
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-ink-muted">{{
+            t("settings.memory.embeddingModel")
+          }}</span>
+          <input
+            v-model="form.embedding"
+            :class="input"
+            :aria-label="t('settings.memory.embeddingModel')"
+          />
+        </label>
+        <button type="submit" :class="button" class="self-start">
           {{ t("settings.memory.save") }}
         </button>
       </form>
     </section>
 
     <section v-if="hithink" class="flex flex-col gap-2" data-testid="hithink">
-      <p class="text-xs text-ink-muted">{{ t("settings.hithink.title") }}</p>
-      <p class="terminal text-sm wrap-anywhere">
-        {{ hithink.state }}
-        {{
-          hithink.validated_at_ns
-            ? new Date(hithink.validated_at_ns / 1_000_000).toLocaleString()
-            : ""
-        }}
-      </p>
+      <p :class="eyebrow">{{ t("settings.hithink.title") }}</p>
+      <div class="flex items-center gap-2">
+        <span :class="chip">{{ hithink.state }}</span>
+        <span
+          v-if="hithink.validated_at_ns"
+          class="terminal text-sm text-ink-muted"
+        >
+          {{ new Date(hithink.validated_at_ns / 1_000_000).toLocaleString() }}
+        </span>
+      </div>
       <p
         v-if="hithink.failure_message"
-        class="terminal text-sm wrap-anywhere"
+        :class="failureText"
         data-testid="hithink-failure"
       >
         {{ hithink.failure_code }} {{ hithink.failure_message }}
       </p>
-      <p class="text-xs text-ink-muted">
+      <p class="text-ink-muted">
         {{
           t(
             hithink.api_key_present
@@ -477,22 +525,19 @@ onMounted(async () => {
         <input
           v-model="hithinkKey"
           type="password"
-          class="terminal flex-1 rounded-control border border-line px-2 py-1"
+          :class="input"
+          class="flex-1"
           data-testid="hithink-key"
           :aria-label="t('settings.hithink.apiKey')"
           :placeholder="t('settings.hithink.apiKey')"
         />
-        <button
-          type="submit"
-          class="rounded-control border border-line px-2 py-1"
-          data-testid="hithink-save"
-        >
+        <button type="submit" :class="button" data-testid="hithink-save">
           {{ t("settings.hithink.save") }}
         </button>
         <button
           v-if="hithink.api_key_present"
           type="button"
-          class="rounded-control border border-line px-2 py-1"
+          :class="button"
           data-testid="hithink-remove"
           @click="removeHithink()"
         >
@@ -502,6 +547,7 @@ onMounted(async () => {
       <label class="flex items-center gap-2">
         <input
           type="checkbox"
+          class="accent-accent"
           data-testid="hithink-feed"
           :checked="hithink.a_share_feed === 'HITHINK'"
           :disabled="!hithink.api_key_present"
@@ -512,57 +558,58 @@ onMounted(async () => {
     </section>
 
     <section v-if="policy" class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted">{{ t("settings.policies.title") }}</p>
-      <label
-        v-for="row in [
-          {
-            field: 'trigger_code_policy' as const,
-            label: 'settings.policies.triggerCode',
-          },
-          {
-            field: 'paper_order_policy' as const,
-            label: 'settings.policies.paperOrder',
-          },
-        ]"
-        :key="row.field"
-        class="flex items-center gap-2"
-      >
-        <span class="text-xs text-ink-muted">{{ t(row.label) }}</span>
-        <SelectRoot
-          :model-value="policy[row.field]"
-          @update:model-value="setPolicy(row.field, $event as string)"
+      <p :class="eyebrow">{{ t("settings.policies.title") }}</p>
+      <div class="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2">
+        <template
+          v-for="row in [
+            {
+              field: 'trigger_code_policy' as const,
+              label: 'settings.policies.triggerCode',
+            },
+            {
+              field: 'paper_order_policy' as const,
+              label: 'settings.policies.paperOrder',
+            },
+          ]"
+          :key="row.field"
         >
-          <SelectTrigger :class="selectTrigger">
-            <SelectValue />
-            <span aria-hidden="true">▾</span>
-          </SelectTrigger>
-          <SelectContent class="rounded-panel border border-line bg-panel p-1">
-            <SelectViewport>
-              <SelectItem
-                v-for="value in ['ALWAYS_ALLOW', 'REQUIRE_APPROVAL']"
-                :key="value"
-                :value="value"
-                class="px-2 py-1"
-              >
-                <SelectItemText>{{
-                  t(`settings.policy.${value}`)
-                }}</SelectItemText>
-              </SelectItem>
-            </SelectViewport>
-          </SelectContent>
-        </SelectRoot>
-      </label>
-      <!--
-        Delivery admits only QUEUE, so it is a plain disabled select: it never
-        opens, and Steer stays visibly refused (feature SPEC §6.3, per D70).
-      -->
-      <label class="flex items-center gap-2">
-        <span class="text-xs text-ink-muted">{{
+          <span class="text-ink-muted">{{ t(row.label) }}</span>
+          <SelectRoot
+            :model-value="policy[row.field]"
+            @update:model-value="setPolicy(row.field, $event as string)"
+          >
+            <SelectTrigger :class="selectTrigger" :aria-label="t(row.label)">
+              <SelectValue />
+              <span aria-hidden="true" class="text-ink-muted">▾</span>
+            </SelectTrigger>
+            <SelectContent :class="selectContent" position="popper">
+              <SelectViewport>
+                <SelectItem
+                  v-for="value in ['ALWAYS_ALLOW', 'REQUIRE_APPROVAL']"
+                  :key="value"
+                  :value="value"
+                  :class="selectItem"
+                  class="font-sans"
+                >
+                  <SelectItemText>{{
+                    t(`settings.policy.${value}`)
+                  }}</SelectItemText>
+                </SelectItem>
+              </SelectViewport>
+            </SelectContent>
+          </SelectRoot>
+        </template>
+        <!--
+          Delivery admits only QUEUE, so it is a plain disabled select: it never
+          opens, and Steer stays visibly refused (feature SPEC §6.3, per D70).
+        -->
+        <span class="text-ink-muted">{{
           t("settings.policies.delivery")
         }}</span>
         <select
           disabled
-          class="rounded-control border border-line px-2 py-1"
+          :class="input"
+          class="font-sans opacity-50"
           :value="policy.delivery_mode"
           :aria-label="t('settings.policies.delivery')"
         >
@@ -571,14 +618,15 @@ onMounted(async () => {
             {{ t("settings.delivery.STEER") }}
           </option>
         </select>
-      </label>
+      </div>
     </section>
 
     <section class="flex flex-col gap-2">
-      <p class="text-xs text-ink-muted">{{ t("settings.autostart.title") }}</p>
+      <p :class="eyebrow">{{ t("settings.autostart.title") }}</p>
       <label class="flex items-center gap-2">
         <input
           type="checkbox"
+          class="accent-accent"
           :checked="autostart"
           @change="toggleAutostart(($event.target as HTMLInputElement).checked)"
         />
@@ -587,36 +635,36 @@ onMounted(async () => {
     </section>
 
     <AlertDialogRoot>
-      <AlertDialogTrigger
-        class="self-start rounded-control border border-line px-2 py-1"
-        data-testid="quit"
-      >
+      <AlertDialogTrigger :class="button" class="self-start" data-testid="quit">
         {{ t("settings.quit") }}
       </AlertDialogTrigger>
       <AlertDialogPortal>
-        <AlertDialogOverlay class="fixed inset-0" />
-        <AlertDialogContent
-          class="fixed top-1/2 left-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-3 rounded-panel border border-line bg-panel p-4"
-        >
-          <AlertDialogTitle>{{ t("dialog.quitTitle") }}</AlertDialogTitle>
-          <div class="flex gap-2">
+        <AlertDialogOverlay :class="dialogOverlay" />
+        <AlertDialogContent :class="dialogContent">
+          <div class="flex flex-col gap-1">
+            <AlertDialogTitle class="text-lg font-semibold">{{
+              t("dialog.quitTitle")
+            }}</AlertDialogTitle>
+            <AlertDialogDescription class="text-ink-muted">
+              {{ t("dialog.quitBody") }}
+            </AlertDialogDescription>
+          </div>
+          <div class="flex justify-end gap-2">
+            <AlertDialogCancel :class="button">
+              {{ t("dialog.cancel") }}
+            </AlertDialogCancel>
             <AlertDialogAction
-              class="rounded-control border border-line px-2 py-1"
+              :class="buttonPrimary"
               data-testid="dialog-quit"
               @click="quit()"
             >
               {{ t("dialog.quit") }}
             </AlertDialogAction>
-            <AlertDialogCancel
-              class="rounded-control border border-line px-2 py-1"
-            >
-              {{ t("dialog.cancel") }}
-            </AlertDialogCancel>
           </div>
         </AlertDialogContent>
       </AlertDialogPortal>
     </AlertDialogRoot>
 
-    <p v-if="failure" class="terminal text-xs">{{ failure }}</p>
+    <p v-if="failure" :class="failureText">{{ failure }}</p>
   </div>
 </template>

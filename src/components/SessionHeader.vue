@@ -23,7 +23,15 @@ import {
 import type { Desk, Envelope, Runtime } from "../client";
 import { useEvents } from "../composables/useEvents";
 import { useTerminal } from "../composables/useTerminal";
-import { button, buttonPrimary } from "../deskState";
+import {
+  button,
+  buttonPrimary,
+  chip,
+  failureText,
+  selectContent,
+  selectItem,
+  selectTrigger,
+} from "../deskState";
 
 const props = defineProps<{ desk: Desk }>();
 const { t } = useI18n();
@@ -103,13 +111,21 @@ onMounted(() => void refresh());
 </script>
 
 <template>
-  <header class="flex flex-col gap-1 border-b border-line px-2 py-2">
-    <div class="flex items-center gap-2">
-      <span class="terminal">{{ desk.name }}</span>
-      <span class="terminal text-ink-muted">{{ desk.selected_runtime }}</span>
-      <span class="text-ink-muted">{{
-        live ? t("session.live") : t("session.none")
-      }}</span>
+  <header class="flex shrink-0 flex-col border-b border-line">
+    <div class="flex h-10 items-center gap-2 px-3">
+      <span class="terminal truncate font-semibold">{{ desk.name }}</span>
+      <span :class="chip">{{ desk.selected_runtime }}</span>
+      <span class="flex items-center gap-1.5 text-ink-muted">
+        <span
+          class="h-1.5 w-1.5 rounded-pill"
+          :class="
+            live
+              ? 'bg-state-live shadow-[0_0_6px_var(--color-state-live)]'
+              : 'bg-state-idle'
+          "
+        />
+        {{ live ? t("session.live") : t("session.none") }}
+      </span>
       <span class="flex-1" />
       <button
         v-if="!live"
@@ -144,7 +160,7 @@ onMounted(() => void refresh());
       </button>
       <button
         :class="button"
-        :disabled="busy || desk.selected_runtime === 'claude'"
+        :disabled="busy || !live || desk.selected_runtime === 'claude'"
         :title="
           desk.selected_runtime === 'claude'
             ? t('session.interruptUnsupported')
@@ -156,23 +172,23 @@ onMounted(() => void refresh());
       </button>
       <button
         :class="button"
-        :disabled="busy"
+        :disabled="busy || !live"
         @click="act(() => sessionExit({ path: { desk_id: desk.id } }))"
       >
         {{ t("session.exit") }}
       </button>
       <SelectRoot v-model="switchTo" :disabled="busy || !others.length">
-        <SelectTrigger :class="button" :aria-label="t('session.switch')">
+        <SelectTrigger :class="selectTrigger" :aria-label="t('session.switch')">
           <SelectValue :placeholder="t('session.switch')" />
-          <span aria-hidden="true">▾</span>
+          <span aria-hidden="true" class="text-ink-muted">▾</span>
         </SelectTrigger>
         <SelectPortal>
-          <SelectContent class="rounded-control border border-line bg-panel">
+          <SelectContent :class="selectContent" position="popper" align="end">
             <SelectViewport>
               <SelectItem
                 v-for="row in others"
                 :key="row.runtime"
-                class="terminal px-2 py-1"
+                :class="selectItem"
                 :value="row.runtime"
               >
                 <SelectItemText>{{ row.runtime }}</SelectItemText>
@@ -182,9 +198,6 @@ onMounted(() => void refresh());
         </SelectPortal>
       </SelectRoot>
     </div>
-    <pre
-      v-if="failure"
-      class="terminal text-xs wrap-anywhere whitespace-pre-wrap"
-      >{{ failure }}</pre>
+    <p v-if="failure" :class="failureText" class="px-3 pb-2">{{ failure }}</p>
   </header>
 </template>
