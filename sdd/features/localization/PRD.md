@@ -16,7 +16,7 @@ An operator whose system language is Chinese launches MarketRig for the first ti
 
 - One installation `locale` setting held by the daemon, `en` or `zh-Hans`, unset until the desktop's first launch detects it from the system language, readable and writable through one REST resource, read by the daemon for nothing else.
 - The `zh-Hans` catalog with the same key tree and the same placeholders as `en`, switched at runtime through vue-i18n's Composition API; the frontend applies the stored locale at startup and on change.
-- A **Language** section at the top of Settings, which is also the onboarding language step because Settings is the whole of first-launch onboarding (R5 PRD §4).
+- A **Language** section at the top of Settings, and the same select in the first-launch onboarding gate (root SPEC §6.3).
 - The tray menu relabelled by the shell's `set_locale` command; notifications titled from the active catalog.
 - The agent-facing byte-identity: no daemon, CLI, or adapter code path reads the locale except the settings resource, and gate scenario L1 compares the agent-facing surfaces byte for byte under both locales.
 - The `marketrig` CLI's UTF-8 output on both platforms, recorded as the property the standard library already gives and checked once.
