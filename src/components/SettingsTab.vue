@@ -32,7 +32,6 @@ import {
   openvikingRetry,
   openvikingSetup,
   policies,
-  putLocale,
   putPolicies,
   runtimeDiscover,
   runtimeRetry,
@@ -61,13 +60,17 @@ import {
   selectItem,
   selectTrigger,
 } from "../deskState";
-import { applyLocale, LOCALES, type Locale } from "../locale";
+import { chooseLocale, LOCALES, type Locale } from "../locale";
 
 const { t, locale } = useI18n();
 const { on } = useEvents();
 const { quit } = useDaemon();
 
 const rows = ref<Runtime[]>([]);
+/** The onboarding steps in order: one required, two optional (SPEC §6.3). */
+function step(required: boolean, done: boolean): string {
+  return `${t(required ? "settings.step.required" : "settings.step.optional")} · ${t(done ? "settings.step.done" : "settings.step.todo")}`;
+}
 const explicit = reactive(new Map<string, string>());
 const memory = ref<Provider | null>(null);
 const hithink = ref<HithinkProvider | null>(null);
@@ -218,12 +221,11 @@ async function setPolicy(field: string, value: string): Promise<void> {
  */
 async function setLanguage(event: Event): Promise<void> {
   const select = event.target as HTMLSelectElement;
-  const next = select.value as Locale;
-  if (refused((await putLocale({ body: { locale: next } })).error)) {
+  const message = await chooseLocale(select.value as Locale);
+  if (message) {
+    failure.value = message;
     select.value = locale.value;
-    return;
   }
-  await applyLocale(next);
 }
 
 async function toggleAutostart(on: boolean): Promise<void> {
@@ -259,16 +261,6 @@ onMounted(async () => {
     loadOpenViking(),
     loadPolicies(),
   ]);
-  // First launch — no runtime discovered yet — turns autostart on once.
-  // ponytail: "first launch" is read as "no AVAILABLE runtime", so an operator
-  // who disables autostart before discovering one gets it re-enabled next
-  // launch; the plugin's own state is the setting (slice 008 §2).
-  if (
-    !rows.value.some((row) => row.state === "AVAILABLE") &&
-    !(await isEnabled())
-  ) {
-    await enable();
-  }
   autostart.value = await isEnabled();
 });
 </script>
@@ -298,9 +290,17 @@ onMounted(async () => {
     </section>
 
     <section class="flex flex-col gap-2">
-      <p :class="eyebrow" data-testid="runtimes-title">
-        {{ t("settings.runtimes.title") }}
-      </p>
+      <div class="flex items-center gap-2">
+        <p :class="eyebrow" data-testid="runtimes-title">
+          {{ t("settings.runtimes.title") }}
+        </p>
+        <span :class="chip" data-testid="step-runtime">{{
+          step(
+            true,
+            rows.some((row) => row.state === "AVAILABLE"),
+          )
+        }}</span>
+      </div>
       <div
         v-for="row in rows"
         :key="row.runtime"
@@ -375,7 +375,12 @@ onMounted(async () => {
     </section>
 
     <section v-if="ov" class="flex flex-col gap-2" data-testid="openviking">
-      <p :class="eyebrow">{{ t("settings.openviking.title") }}</p>
+      <div class="flex items-center gap-2">
+        <p :class="eyebrow">{{ t("settings.openviking.title") }}</p>
+        <span :class="chip" data-testid="step-memory">{{
+          step(false, ov.setup.state === "READY")
+        }}</span>
+      </div>
       <div class="flex items-center gap-2">
         <span :class="chip">{{ ov.setup.state }}</span>
         <span :class="chip">{{ ov.child }}</span>
@@ -495,7 +500,12 @@ onMounted(async () => {
     </section>
 
     <section v-if="hithink" class="flex flex-col gap-2" data-testid="hithink">
-      <p :class="eyebrow">{{ t("settings.hithink.title") }}</p>
+      <div class="flex items-center gap-2">
+        <p :class="eyebrow">{{ t("settings.hithink.title") }}</p>
+        <span :class="chip" data-testid="step-hithink">{{
+          step(false, hithink.api_key_present)
+        }}</span>
+      </div>
       <div class="flex items-center gap-2">
         <span :class="chip">{{ hithink.state }}</span>
         <span

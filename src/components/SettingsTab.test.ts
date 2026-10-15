@@ -199,19 +199,24 @@ it("snaps the language select back when the daemon refuses", async () => {
   expect(wrapper.text()).toContain("not a shipped catalog");
 });
 
-it("turns autostart on once when no runtime is AVAILABLE yet", async () => {
+it("never touches autostart on mount: the onboarding gate owns the first write", async () => {
   runtimes = [{ runtime: "codex", state: "UNAVAILABLE" }];
   mountWithI18n(SettingsTab);
   await flushPromises();
 
-  expect(enable).toHaveBeenCalledTimes(1);
+  expect(enable).not.toHaveBeenCalled();
 });
 
-it("leaves autostart alone once a runtime is AVAILABLE", async () => {
-  mountWithI18n(SettingsTab);
+it("marks the runtime step required and done once one is AVAILABLE", async () => {
+  const wrapper = mountWithI18n(SettingsTab);
   await flushPromises();
 
-  expect(enable).not.toHaveBeenCalled();
+  expect(wrapper.get('[data-testid="step-runtime"]').text()).toBe(
+    "Required · Done",
+  );
+  expect(wrapper.get('[data-testid="step-memory"]').text()).toBe(
+    "Optional · To do",
+  );
 });
 
 it("provisions from Settings and follows the row out of PROVISIONING", async () => {

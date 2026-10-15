@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { list, locale, putLocale } from "./client";
-import type { Desk } from "./client";
+import { list, locale, putLocale, runtimes } from "./client";
+import type { Desk, Runtime } from "./client";
 import { applyLocale, detectLocale, type Locale } from "./locale";
 import { useApprovals } from "./composables/useApprovals";
 import { useDaemon } from "./composables/useDaemon";
@@ -14,6 +14,7 @@ import RightPanel from "./components/RightPanel.vue";
 import SessionHeader from "./components/SessionHeader.vue";
 import TerminalWell from "./components/TerminalWell.vue";
 import ApprovalsTab from "./components/ApprovalsTab.vue";
+import OnboardingGate from "./components/OnboardingGate.vue";
 import SettingsTab from "./components/SettingsTab.vue";
 import { installNotifications, installQuitListener } from "./notifications";
 
@@ -24,6 +25,9 @@ const { byDesk, refetch: refetchApprovals } = useApprovals();
 const { panes } = useTerminal();
 
 const desks = ref<Desk[]>([]);
+// First launch gates the window until Continue: no runtime is AVAILABLE yet
+// (SPEC §6.3). The runtime state is the whole test; nothing is stored.
+const onboarding = ref(false);
 const deskNames = new Map<string, string>();
 const selected = ref<string | null>(null);
 const selectedDesk = computed(
@@ -87,6 +91,10 @@ on(
 watch(status, (now) => {
   if (now !== "READY" || !endpoint.value) return;
   connect(endpoint.value.port, endpoint.value.bearer);
+  void runtimes().then((answer) => {
+    const rows = (answer.data as { runtimes?: Runtime[] })?.runtimes ?? [];
+    onboarding.value = !rows.some((row) => row.state === "AVAILABLE");
+  });
   void refresh();
   void refetchApprovals();
   void startLocale();
@@ -121,6 +129,7 @@ onMounted(() => {
       </template>
     </div>
   </main>
+  <OnboardingGate v-else-if="onboarding" @done="onboarding = false" />
   <main v-else class="flex h-full overflow-x-hidden">
     <DeskList
       class="w-60 shrink-0"

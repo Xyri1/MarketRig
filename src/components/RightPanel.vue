@@ -32,7 +32,7 @@ const short: Record<string, string> = {
   settings: "panel.settingsShort",
 };
 
-// First-launch onboarding is the Settings tab and nothing else (§6.3).
+// After the onboarding gate, first launch lands on the Settings tab (§6.3).
 onMounted(async () => {
   const answer = await runtimes();
   const rows =

@@ -108,7 +108,18 @@
     "approve": "Approve",
     "deny": "Deny"
   },
+  "onboarding": {
+    "intro": "MarketRig runs a coding agent as a paper trader. Pick a language, then point it at a Codex CLI or Claude Code.",
+    "next": "Settings opens next: the runtime is required; memory and A-share data are optional.",
+    "continue": "Continue"
+  },
   "settings": {
+    "step": {
+      "required": "Required",
+      "optional": "Optional",
+      "done": "Done",
+      "todo": "To do"
+    },
     "language": {
       "title": "Language",
       "en": "English",

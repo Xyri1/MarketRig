@@ -108,7 +108,18 @@
     "approve": "批准",
     "deny": "拒绝"
   },
+  "onboarding": {
+    "intro": "MarketRig 让编码智能体做模拟交易员。先选择语言，再指定 Codex CLI 或 Claude Code。",
+    "next": "接下来打开设置：运行时为必填；记忆与 A 股数据为可选。",
+    "continue": "继续"
+  },
   "settings": {
+    "step": {
+      "required": "必填",
+      "optional": "可选",
+      "done": "已完成",
+      "todo": "待完成"
+    },
     "language": {
       "title": "语言",
       "en": "English",

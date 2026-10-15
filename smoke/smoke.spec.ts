@@ -41,6 +41,22 @@ async function api<T>(
   return { status: answer.status, body: (text ? JSON.parse(text) : null) as T };
 }
 
+/**
+ * The Language select writes the setting and applies it. The value is set
+ * and its `change` dispatched from the page, because a `<select>` in
+ * WKWebView opens a native menu that a WebDriver option click reaches only
+ * sometimes.
+ */
+async function chooseZhHans(): Promise<void> {
+  await browser.execute(() => {
+    const select = document.querySelector(
+      '[data-testid="language"]',
+    ) as HTMLSelectElement;
+    select.value = "zh-Hans";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
 async function until(
   what: string,
   ready: () => boolean | Promise<boolean>,
@@ -108,18 +124,20 @@ describe("the packaged desktop", () => {
   });
 
   it("1 — shows the window on Settings with the daemon answering", async () => {
-    await $('[data-testid="tab-settings"]').waitForExist({ timeout: 90_000 });
-    await keepTheWellInTheDom();
-
-    expect(existsSync(endpointPath())).toBe(true);
-    const health = await api<{ daemon_uuid: string }>("GET", "/health");
-    expect(health.status).toBe(200);
+    await until(
+      "the onboarding gate or the panels",
+      async () =>
+        (await $('[data-testid="onboarding-continue"]').isExisting()) ||
+        (await $('[data-testid="tab-settings"]').isExisting()),
+      90_000,
+    );
 
     // The daemon discovers a real `codex` or `claude` on the login PATH at
     // start (R3 SPEC §2), so an operator's machine is rarely a first launch.
-    // Settings is asserted as the auto-selected tab only when it is one; a
-    // machine with a real CLI selects it by hand and step 2 overrides `codex`
-    // with the stand-in through the explicit-path field.
+    // A first launch is gated behind onboarding (SPEC §6.3): the language
+    // choice is made there, Continue lands on Settings auto-selected; a
+    // machine with a real CLI selects Settings by hand and step 2 overrides
+    // `codex` with the stand-in through the explicit-path field.
     const found = await api<{ runtimes: { state: string }[] }>(
       "GET",
       "/runtimes",
@@ -127,6 +145,20 @@ describe("the packaged desktop", () => {
     const firstLaunch = !found.body.runtimes.some(
       (row) => row.state === "AVAILABLE",
     );
+    if (firstLaunch) {
+      expect(await $('[data-testid="onboarding-continue"]').isExisting()).toBe(
+        true,
+      );
+      await chooseZhHans();
+      await $('[data-testid="onboarding-continue"]').click();
+    }
+    await $('[data-testid="tab-settings"]').waitForExist({ timeout: 30_000 });
+    await keepTheWellInTheDom();
+
+    expect(existsSync(endpointPath())).toBe(true);
+    const health = await api<{ daemon_uuid: string }>("GET", "/health");
+    expect(health.status).toBe(200);
+
     const settings = $('[data-testid="tab-settings"]');
     if (firstLaunch) {
       await until(
@@ -149,18 +181,9 @@ describe("the packaged desktop", () => {
       false,
     );
 
-    // The rest of the run is in Simplified Chinese (localization SPEC §6.2):
-    // the Language select writes the setting and applies it. The value is set
-    // and its `change` dispatched from the page, because a `<select>` in
-    // WKWebView opens a native menu that a WebDriver option click reaches
-    // only sometimes.
-    await browser.execute(() => {
-      const select = document.querySelector(
-        '[data-testid="language"]',
-      ) as HTMLSelectElement;
-      select.value = "zh-Hans";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    // The rest of the run is in Simplified Chinese (localization SPEC §6.2),
+    // chosen in the gate on a first launch and in Settings otherwise.
+    if (!firstLaunch) await chooseZhHans();
     await until(
       "the Settings heading in zh-Hans",
       async () =>

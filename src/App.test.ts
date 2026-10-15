@@ -3,6 +3,11 @@ import { beforeEach, expect, it, vi } from "vitest";
 vi.mock("@tauri-apps/api/core", async () => ({
   invoke: (await import("./test/fakeDaemon")).fakeInvoke,
 }));
+vi.mock("@tauri-apps/plugin-autostart", () => ({
+  isEnabled: vi.fn(async () => false),
+  enable: vi.fn(async () => {}),
+  disable: vi.fn(async () => {}),
+}));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => {}),
 }));
@@ -90,4 +95,33 @@ it("writes nothing when the daemon already holds a language", async () => {
 
   expect(fakeLocale.writes).toEqual([]);
   expect(i18n.global.locale.value).toBe("en");
+});
+
+it("gates the window behind onboarding while no runtime is AVAILABLE", async () => {
+  systemLanguages(["en-US"]);
+  installFakeDaemon({
+    ...localeRoutes,
+    "GET /health": () => ({ status: 200, body: endpoint }),
+    "GET /desks": () => ({ status: 200, body: { desks: [] } }),
+    "GET /approvals": () => ({ status: 200, body: { approvals: [] } }),
+    "GET /runtimes": () => ({
+      status: 200,
+      body: { runtimes: [{ runtime: "codex", state: "UNAVAILABLE" }] },
+    }),
+  });
+  const wrapper = mountWithI18n(App);
+  await flushPromises();
+  await flushPromises();
+
+  expect(wrapper.find('[data-testid="onboarding-continue"]').exists()).toBe(
+    true,
+  );
+  expect(wrapper.find('[data-testid="tab-settings"]').exists()).toBe(false);
+
+  await wrapper.get('[data-testid="onboarding-continue"]').trigger("click");
+  await flushPromises();
+  expect(wrapper.find('[data-testid="onboarding-continue"]').exists()).toBe(
+    false,
+  );
+  expect(wrapper.find('[data-testid="tab-settings"]').exists()).toBe(true);
 });

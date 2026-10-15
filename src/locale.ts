@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { putLocale } from "./client";
 import i18n from "./i18n";
 
 export const LOCALES = ["en", "zh-Hans"] as const;
@@ -42,4 +43,15 @@ export async function applyLocale(locale: Locale): Promise<void> {
   } catch (failure) {
     console.warn("set_locale", failure);
   }
+}
+
+/**
+ * The operator's own choice, from onboarding or Settings: stored first, then
+ * applied. Answers the daemon's refusal text, or `null` once applied.
+ */
+export async function chooseLocale(next: Locale): Promise<string | null> {
+  const answer = await putLocale({ body: { locale: next } });
+  if (answer.error) return (answer.error as { message: string }).message;
+  await applyLocale(next);
+  return null;
 }
